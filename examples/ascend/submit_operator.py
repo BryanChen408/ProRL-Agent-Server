@@ -73,7 +73,9 @@ def build_operator_request(
             {"type": "upload_file", "source": f"{tasks_dir}/{op_name}.json", "target": f"{WORKDIR}/src/{op_name}.json"}
         )
     mk = f"mkdir -p {WORKDIR}/output/submission {WORKDIR}/judge_out"
-    cp_tools = f"cp -r /opt/canonical/tools {WORKDIR}/tools"  # writable copy per container
+    # eval engine = pipeline (tools/) + verifier scripts (.agents/skills/.../scripts, the pipeline's
+    # hardcoded VERIFIER_SCRIPTS path). Writable copy per container (no read-only write errors).
+    cp_eval = f"cp -r /opt/canonical/tools {WORKDIR}/tools && cp -r /opt/canonical/.agents {WORKDIR}/.agents"
     # orchestrator into the agent cwd so Claude Code reads it (skills_dir root has AGENTS.md)
     cp_agents = f"cp /opt/canonical/AGENTS.md {WORKDIR}/AGENTS.md"
 
@@ -97,9 +99,9 @@ def build_operator_request(
                 "volumes": [f"{skills_dir}:/opt/canonical:ro"],
             },
             # agent: writable tools copy (run + iterate freely, zero permission friction).
-            "prepare": [*place_task, {"type": "exec", "command": f"{mk} && {cp_tools} && {cp_agents} && command -v claude"}],
+            "prepare": [*place_task, {"type": "exec", "command": f"{mk} && {cp_eval} && {cp_agents} && command -v claude"}],
             # judge (clean container): FRESH canonical tools from the untouched source -> authoritative.
-            "eval_prepare": [*place_task, {"type": "exec", "command": f"{mk} && {cp_tools}"}],
+            "eval_prepare": [*place_task, {"type": "exec", "command": f"{mk} && {cp_eval}"}],
         },
         # skills_path is a read-only SOURCE; the claude_code preset cp's it into CLAUDE_CONFIG_DIR/skills
         # (already a writable copy), so skills are no read-only hazard either.
