@@ -91,17 +91,30 @@ class OperatorJudgeEvaluator(BaseTrajectoryEvaluator):
         timeout_cap = runtime.get("timeout_seconds")
         timeout = self.judge_timeout if timeout_cap is None else min(self.judge_timeout, float(timeout_cap))
 
-        # 1) pull the submitted kernel out of the AGENT runtime. Absent == agent delivered nothing
-        #    -> OPERATOR failure (floor reward), NOT infra (mirrors _judge_and_record).
+        # 1) pull the submitted kernel out of the AGENT runtime. R1 anti-regression (mirrors
+        #    _judge_and_record): prefer the best-so-far successful impl the fixed entry saves on each
+        #    success ({op}_impl.best.py) so a later optimization that breaks the kernel can't drag the
+        #    reward below what was already achieved; fall back to the final impl. Absent == agent
+        #    delivered nothing -> OPERATOR failure (floor reward), NOT infra.
+        candidates = []
+        if self.submission_path.endswith(".py"):
+            candidates.append(self.submission_path[:-3] + ".best.py")
+        candidates.append(self.submission_path)
         local_impl = artifacts_dir / "submission_impl.py"
-        try:
-            await source.download_file(self.submission_path, str(local_impl))
-        except Exception as exc:  # noqa: BLE001
+        picked: str | None = None
+        for cand in candidates:
+            try:
+                await source.download_file(cand, str(local_impl))
+                picked = cand
+                break
+            except Exception:  # noqa: BLE001 — try the next candidate (best -> final)
+                continue
+        if picked is None:
             return self._scored(
                 {"success": False, "ast_check_ok": False, "correctness_ok": False,
                  "error_type": "submission_missing",
-                 "error": f"no submission at {self.submission_path}: {exc!r}"},
-                artifacts_dir,
+                 "error": f"no submission at {self.submission_path} (or .best.py)"},
+                artifacts_dir, submission_used=None,
             )
 
         # 2) place ONLY the impl into the judge runtime (canonical pipeline comes from eval_prepare).
@@ -125,9 +138,9 @@ class OperatorJudgeEvaluator(BaseTrajectoryEvaluator):
                 f"(judge exit={result.return_code}; see {artifacts_dir / 'judge.stdout.log'}): {exc!r}"
             ) from exc
 
-        return self._scored(metrics, artifacts_dir)
+        return self._scored(metrics, artifacts_dir, submission_used=picked)
 
-    def _scored(self, metrics: dict, artifacts_dir: Path) -> EvalResult:
+    def _scored(self, metrics: dict, artifacts_dir: Path, *, submission_used: str | None = None) -> EvalResult:
         """metrics -> EvalResult; infra failures raise (=> session ERROR => retry)."""
         (artifacts_dir / "metrics.json").write_text(json.dumps(metrics, ensure_ascii=False, indent=2))
         outcome = judge_outcome(metrics)
@@ -145,6 +158,7 @@ class OperatorJudgeEvaluator(BaseTrajectoryEvaluator):
                 "success": bool(metrics.get("success", False)),
                 "error_type": outcome["error_type"],
                 "speedup_vs_torch": (metrics.get("perf_data") or {}).get("speedup_vs_torch"),
+                "submission_used": submission_used,  # which impl scored (best-so-far vs final)
                 "metrics_path": str(artifacts_dir / "metrics.json"),
                 "judge_stdout_path": str(artifacts_dir / "judge.stdout.log"),
                 "metrics": metrics,

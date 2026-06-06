@@ -67,9 +67,11 @@ if _DEPS:
 
         async def download_dir(self, remote_path: str, local_path: str) -> None: ...
 
-    def _run(metrics, *, impl=True, exec_rc=0, refresh=True, with_fresh=True):
+    def _run(metrics, *, impl=True, exec_rc=0, refresh=True, with_fresh=True, agent_files=None):
         ev = OperatorJudgeEvaluator(op_name=OP, judge_command="bash pipeline.sh", metrics_path=METRICS)
-        agent = FakeRuntime(files={SUB: "# kernel"} if impl else {})
+        if agent_files is None:
+            agent_files = {SUB: "# kernel"} if impl else {}
+        agent = FakeRuntime(files=agent_files)
         judge = FakeRuntime(files=({METRICS: json.dumps(metrics)} if metrics is not None else {}),
                             exec_rc=exec_rc)
         with tempfile.TemporaryDirectory() as d:
@@ -119,6 +121,15 @@ def test_submission_missing_is_operator_floor():
     res, _agent, judge = _run({"success": True}, impl=False)  # agent wrote no kernel
     assert res.outcome_reward == 0.2 and res.metadata["error_type"] == "submission_missing"
     assert len(judge.execs) == 0  # judge never ran (nothing to score)
+
+
+def test_prefers_best_impl_then_falls_back():
+    best = SUB[:-3] + ".best.py"
+    res, *_ = _run({"success": True, "perf_data": {"speedup_vs_torch": 2.0}},
+                   agent_files={best: "# best", SUB: "# final"})
+    assert res.metadata["submission_used"] == best          # best-so-far wins (R1)
+    res2, *_ = _run({"success": True}, agent_files={SUB: "# final"})
+    assert res2.metadata["submission_used"] == SUB           # no best -> final
 
 
 def test_refresh_without_fresh_runtime_raises():
