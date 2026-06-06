@@ -10,11 +10,15 @@ CANNBOT_SKILLS_MIGRATION_GUIDE.md (§B):
   eval      tools/triton_eval_pipeline.sh          (fixed entry -> judge_out/metrics.json)
   reward    operator_judge evaluator re-runs it in a CLEAN judge runtime (anti-cheat)
 
-Placement (agent READ-ONLY, per request):
-  - `tools/` (canonical pipeline) is bind-mounted ``:ro`` at {workdir}/tools — the agent runs it
-    in-loop (advisor) but CANNOT modify it; the judge runs the *same* untampered ``:ro`` script.
-  - skills are bind-mounted ``:ro`` at /opt/skills; the claude_code preset copies them into
-    CLAUDE_CONFIG_DIR/skills (skills_path). Nothing is baked into the image.
+Placement (agent works on WRITABLE copies — no read-only write errors / wasted RL steps):
+  - The host skills dir is bind-mounted ``:ro`` ONLY as an immutable SOURCE at /opt/canonical
+    (never the agent's working tree).
+  - Each container cp's it into its OWN writable {workdir}/tools, so the agent runs + iterates with
+    zero permission friction. Anti-cheat lives at the JUDGE: it runs in a SEPARATE clean container
+    with a FRESH copy from the untouched source (= your _snapshot_canonical), so tampering an agent
+    copy can't move the reward.
+  - skills_path=/opt/canonical/skills; the claude_code preset copies it into CLAUDE_CONFIG_DIR/skills
+    (also a writable copy). Nothing is baked into the image.
 
 Ascend cards: runtime.kwargs.ascend -> the proven passthrough recipe (polar.runtime.ascend) is applied
 to BOTH the agent (in-loop op runs) and the fresh judge runtime (authoritative reward); per-op card
@@ -68,7 +72,8 @@ def build_operator_request(
         place_task.append(
             {"type": "upload_file", "source": f"{tasks_dir}/{op_name}.json", "target": f"{WORKDIR}/src/{op_name}.json"}
         )
-    mkdirs = {"type": "exec", "command": f"mkdir -p {WORKDIR}/output/submission {WORKDIR}/judge_out"}
+    mk = f"mkdir -p {WORKDIR}/output/submission {WORKDIR}/judge_out"
+    cp_tools = f"cp -r /opt/canonical/tools {WORKDIR}/tools"  # writable copy per container
 
     return {
         "task_id": f"op-{op_name}-{uuid.uuid4().hex[:8]}",
@@ -83,16 +88,20 @@ def build_operator_request(
             "kwargs": {
                 # Ascend passthrough recipe (polar.runtime.ascend) — applied to agent AND fresh judge.
                 "ascend": {"device_ids": device_ids, "lock_dir": lock_dir},
-                # agent READ-ONLY: canonical pipeline + skill source. Nothing baked into the image.
-                "volumes": [
-                    f"{skills_dir}/tools:{WORKDIR}/tools:ro",   # advisor + judge canonical (untamperable)
-                    f"{skills_dir}/skills:/opt/skills:ro",      # preset copies -> CLAUDE_CONFIG_DIR/skills
-                ],
+                # Immutable SOURCE only (read-only); never the agent's working tree. Each container cp's
+                # tools into its OWN writable {workdir}/tools, so the agent never hits a read-only write
+                # error (= no wasted RL steps). Anti-cheat is enforced by the JUDGE running in a SEPARATE
+                # clean container with a FRESH copy from this untouched source (= your _snapshot_canonical).
+                "volumes": [f"{skills_dir}:/opt/canonical:ro"],
             },
-            "prepare": [*place_task, {**mkdirs, "command": mkdirs["command"] + " && command -v claude"}],
-            "eval_prepare": [*place_task, mkdirs],  # judge: task input + dirs; tools via the same :ro mount
+            # agent: writable tools copy (run + iterate freely, zero permission friction).
+            "prepare": [*place_task, {"type": "exec", "command": f"{mk} && {cp_tools} && command -v claude"}],
+            # judge (clean container): FRESH canonical tools from the untouched source -> authoritative.
+            "eval_prepare": [*place_task, {"type": "exec", "command": f"{mk} && {cp_tools}"}],
         },
-        "agent": {"harness": "claude_code", "model_name": model_name, "skills_path": "/opt/skills"},
+        # skills_path is a read-only SOURCE; the claude_code preset cp's it into CLAUDE_CONFIG_DIR/skills
+        # (already a writable copy), so skills are no read-only hazard either.
+        "agent": {"harness": "claude_code", "model_name": model_name, "skills_path": "/opt/canonical/skills"},
         "evaluator": {
             "strategy": "operator_judge",
             "refresh_runtime": True,  # fresh judge runtime (anti-cheat); inherits kwargs.ascend
