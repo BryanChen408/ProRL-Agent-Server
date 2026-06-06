@@ -41,11 +41,18 @@ def main() -> int:
     ap.add_argument("--lock-dir", default="/tmp/npu-locks", help="host dir for flock locks (created if missing)")
     ap.add_argument("--image", default="polar-ascend-agent:latest",
                     help="Ascend-ready image (the one operators run in); npu-smi is bind-mounted from host")
+    ap.add_argument("--entrypoint", default="bash",
+                    help="override image ENTRYPOINT (default bash). Some Ascend/OpenHands images set "
+                         "ENTRYPOINT=bash; then CMD must start at -lc, else you get "
+                         "'bash: ...: cannot execute binary file' (exit 126).")
     ap.add_argument("--dry-run", action="store_true", help="print the docker command and exit")
     args = ap.parse_args()
 
     ascend = ascend_create_args({"device_ids": args.device_ids, "lock_dir": args.lock_dir})
-    cmd = ["docker", "run", "--rm", *ascend, args.image, "bash", "-lc", _CHECK]
+    cmd = ["docker", "run", "--rm", *ascend]
+    if args.entrypoint:
+        cmd += ["--entrypoint", args.entrypoint]  # -> `<entrypoint> -lc '<CHECK>'`, avoids `bash bash -lc`
+    cmd += [args.image, "-lc", _CHECK]
     print("[cmd] " + shlex.join(cmd) + "\n")  # copy-pasteable (CHECK stays one quoted arg)
     if args.dry_run:
         print("[dry-run] not executed")
