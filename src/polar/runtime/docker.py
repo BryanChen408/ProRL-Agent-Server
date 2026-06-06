@@ -6,6 +6,7 @@ import logging
 import os
 from pathlib import Path
 
+from polar.runtime.ascend import ascend_create_args
 from polar.runtime.base import BaseRuntime
 from polar.runtime.models import ExecResult, RuntimeSpec
 
@@ -61,6 +62,10 @@ class DockerRuntime(BaseRuntime):
         # Additional volumes from kwargs (e.g., Docker socket for agents that need DinD)
         for vol in self.spec.kwargs.get("volumes", []):
             create_args.extend(["-v", vol])
+        # Ascend NPU passthrough (operator-gen): one proven recipe in polar.runtime.ascend.
+        # Applies to BOTH agent (in-loop op runs) and judge (authoritative reward) containers.
+        if self.spec.kwargs.get("ascend") is not None:
+            create_args.extend(ascend_create_args(self.spec.kwargs["ascend"]))
         create_args.extend([self.spec.image, "sleep", "infinity"])
         rc, _, stderr = await self._run_local_command(
             *create_args, capture=True, timeout=self._START_TIMEOUT,
