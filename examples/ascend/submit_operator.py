@@ -74,6 +74,8 @@ def build_operator_request(
         )
     mk = f"mkdir -p {WORKDIR}/output/submission {WORKDIR}/judge_out"
     cp_tools = f"cp -r /opt/canonical/tools {WORKDIR}/tools"  # writable copy per container
+    # orchestrator into the agent cwd so Claude Code reads it (skills_dir root has AGENTS.md)
+    cp_agents = f"cp /opt/canonical/AGENTS.md {WORKDIR}/AGENTS.md"
 
     return {
         "task_id": f"op-{op_name}-{uuid.uuid4().hex[:8]}",
@@ -95,7 +97,7 @@ def build_operator_request(
                 "volumes": [f"{skills_dir}:/opt/canonical:ro"],
             },
             # agent: writable tools copy (run + iterate freely, zero permission friction).
-            "prepare": [*place_task, {"type": "exec", "command": f"{mk} && {cp_tools} && command -v claude"}],
+            "prepare": [*place_task, {"type": "exec", "command": f"{mk} && {cp_tools} && {cp_agents} && command -v claude"}],
             # judge (clean container): FRESH canonical tools from the untouched source -> authoritative.
             "eval_prepare": [*place_task, {"type": "exec", "command": f"{mk} && {cp_tools}"}],
         },
