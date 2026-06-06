@@ -1,0 +1,29 @@
+# Polar topology for ONE vllm-ascend endpoint (Qwen3.x-35B "qwen35" @ :8003).
+# Derived from ProRL-Agent-Server/examples/calculator/topology.yaml, trimmed to a
+# single gateway node. Use with:  polar serve_rollout/serve_gateway -c <this file>
+#
+# IMPORTANT:
+#   * inference.base_url is the BARE host:port (NO /v1) — Polar appends /v1 itself.
+#     (P0b used .../v1 because it was a raw OpenAI client; the topology does not.)
+#   * model_served MUST equal your vllm-ascend --served-model-name (here: qwen35).
+#     The gateway rewrites whatever model the harness CLI sends -> model_served.
+rollout:
+  host: 127.0.0.1
+  port: 8080
+  public_url: http://127.0.0.1:8080
+  save_dir: ./rollout_results
+
+gateway:
+  heartbeat_interval_seconds: 30
+  nodes:
+    - id: ascend-node-01
+      host: 127.0.0.1
+      port: 8100
+      public_url: http://127.0.0.1:8100
+      max_init_workers: 4
+      max_run_workers: 4
+      max_postrun_workers: 4
+      model_served: qwen35
+      inference:
+        engine: vllm
+        base_url: http://127.0.0.1:8003
