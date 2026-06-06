@@ -1,0 +1,43 @@
+# syntax=docker/dockerfile:1
+# ============================================================================
+# 极简 operator-gen agent 镜像 = 你的 NPU 算子基底  +  Claude Code
+# ----------------------------------------------------------------------------
+# 从 Polar/Claude Code 集成角度,只有下面 4 件是"必须"的(标 [集成]);
+# 其余 NPU/CANN/py311/torch_npu/triton-ascend/skills/canonical pipeline/flock
+# 全是你的,在 <你来填> 处加。judge 容器可直接用你的基底(不需要 Claude Code)。
+#
+# 构建(在能访问 docker 的宿主机;受限网络给 daemon/build-arg 配代理):
+#   docker build -f examples/ascend/Dockerfile.agent \
+#     --build-arg BASE_IMAGE=<你极简重做的基底> \
+#     --build-arg CLAUDE_BIN=claude \
+#     -t polar-op-agent:latest examples/ascend
+# (CLAUDE_BIN 那个单文件要放进 build context = examples/ascend/)
+# ============================================================================
+
+# ── [集成 1] 基底:你的 Ascend 算子镜像(已含 CANN + py311 跑算子 + driver 的 LD_LIBRARY_PATH)
+ARG BASE_IMAGE=openhands-triton-env:v1
+FROM ${BASE_IMAGE}
+
+# ── [集成 2] Claude Code:本地单文件。若是 native 二进制 → 直接上 PATH,无需 Node(最省、最快)。
+#    ⚠️ 这个二进制的架构必须 == 节点架构(x86_64 / aarch64),否则 'cannot execute binary file'。
+ARG CLAUDE_BIN=claude
+COPY ${CLAUDE_BIN} /usr/local/bin/claude
+RUN chmod +x /usr/local/bin/claude
+# 若你的单文件其实是 JS bundle(不是 native 二进制),才需要 Node,改成:
+#   COPY ${CLAUDE_BIN} /opt/claude/cli.js
+#   RUN <装 node> && printf '#!/bin/sh\nexec node /opt/claude/cli.js "$@"\n' > /usr/local/bin/claude && chmod +x /usr/local/bin/claude
+
+# ── [集成 3] 关键修复:重置基底的 ENTRYPOINT(你 v1 是 ["bash"])。
+#    否则 Polar `docker create ... sleep infinity` 变 `bash sleep infinity` → 容器起不来(exit 126)。
+ENTRYPOINT []
+
+# ── [集成 4] build 期自检 + 可写的 config 目录。
+#    Polar 的 claude_code preset 运行时会把 skills 拷进 CLAUDE_CONFIG_DIR、写 MCP/base_url。
+ENV CLAUDE_CONFIG_DIR=/root/.claude
+RUN claude --version   # 装坏当场 build 失败(可验证);native 二进制不需要 Node
+
+# ── <你来填>(NPU 侧,我不碰):
+#   - 极简基底本身(CANN runtime / py311 / torch_npu / triton-ascend / driver env)
+#   - canonical pipeline(triton_eval_pipeline.sh 等)—— 也可不烤进、靠 eval_prepare 挂只读
+#   - skills(agent 用的)、distributed_npu_lock(flock 抢卡)
+#   - 任何 NPU 相关 ENV
