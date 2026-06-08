@@ -72,3 +72,27 @@ def test_per_request_builder_emits_one_trace_per_completion() -> None:
     assert trace.response_messages == [{"role": "assistant", "content": "Hi"}]
     assert trace.tools == [{"type": "function", "function": {"name": "lookup"}}]
     assert trace.response_logprobs == [-0.1, -0.2]
+    # healthy completion -> no integrity flag added (zero behavior change)
+    assert "logprob_integrity" not in (trace.metadata or {})
+
+
+def test_logprob_integrity_flagged_for_misattribution_and_missing() -> None:
+    # content[1].token_id (99) != response token_ids[1] (4) -> misattributed; content[0] has no
+    # logprob -> would be silently 0.0-filled (fake prob 1.0) -> missing. record_utils must flag both
+    # in metadata so the rllm adapter can reject the trace before it trains GRPO.
+    session = CompletionSession(
+        session_id="s", task_id="t",
+        completions=[CompletionRecord(
+            completion_id="c1",
+            request={"messages": [{"role": "user", "content": "hi"}]},
+            response={"choices": [{
+                "token_ids": [3, 4],
+                "message": {"role": "assistant", "content": "x"},
+                "finish_reason": "stop",
+                "logprobs": {"content": [{"token_id": 3}, {"token_id": 99, "logprob": -0.2}]},
+            }]},
+            metadata={},
+        )],
+    )
+    trace = asyncio.run(PerRequestBuilder().build(session)).traces[0]
+    assert trace.metadata["logprob_integrity"] == {"misattributed": 1, "missing": 1}

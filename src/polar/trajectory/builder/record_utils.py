@@ -44,6 +44,35 @@ def _extract_response_logprobs(choice: dict[str, Any]) -> list[float] | None:
     return None
 
 
+def _logprob_integrity(choice: dict[str, Any], response_ids: list[int]) -> dict[str, int]:
+    """Detect the two silent corruptions the length-only contract misses (see RL-sample audit):
+
+      * misattributed: logprobs.content[i].token_id != response_ids[i] — each token would carry a
+        logprob computed for a DIFFERENT token (e.g. an else-0 backend fallback), biasing the GRPO
+        importance ratio. Lengths stay equal, so no existing guard fires.
+      * missing: a content entry lacks a `logprob` — _extract_response_logprobs 0.0-fills it, which
+        reads as probability 1.0 for a sampled token (fabricated). Length stays equal.
+
+    Non-fatal here (keeps capture robust); recorded into trace.metadata so the rllm adapter
+    (normalize_trace, which has per-task error handling) can REJECT the trace before it trains.
+    """
+    lg = choice.get("logprobs")
+    content = lg.get("content") if isinstance(lg, dict) else None
+    if not isinstance(content, list):
+        return {}
+    misattributed = missing = 0
+    for i, item in enumerate(content):
+        if not isinstance(item, dict):
+            missing += 1
+            continue
+        if item.get("logprob") is None:
+            missing += 1
+        tid = item.get("token_id")
+        if tid is not None and i < len(response_ids) and int(tid) != int(response_ids[i]):
+            misattributed += 1
+    return {"misattributed": misattributed, "missing": missing} if (misattributed or missing) else {}
+
+
 def _extract_prompt_messages(request: dict[str, Any]) -> list[dict[str, Any]]:
     messages = request.get("messages")
     if not isinstance(messages, list):
@@ -76,6 +105,14 @@ def build_trace_from_completion(completion: CompletionRecord) -> Trace:
 
     response_ids = _extract_response_ids(response, first_choice)
 
+    # Record (don't raise) token_id<->logprob misattribution / missing-logprob into metadata so the
+    # rllm adapter can reject the trace before training (keeps capture itself robust). Adds the key
+    # ONLY when there's a problem -> zero behavior change on healthy completions.
+    md = deepcopy(completion.metadata)
+    integ = _logprob_integrity(first_choice, response_ids)
+    if integ:
+        md = {**(md if isinstance(md, dict) else {}), "logprob_integrity": integ}
+
     return Trace(
         prompt_ids=list(prompt_ids) if isinstance(prompt_ids, list) else [],
         response_ids=response_ids,
@@ -85,5 +122,5 @@ def build_trace_from_completion(completion: CompletionRecord) -> Trace:
         tools=_extract_tools(request),
         finish_reason=str(finish_reason) if finish_reason is not None else None,
         response_logprobs=_extract_response_logprobs(first_choice),
-        metadata=deepcopy(completion.metadata),
+        metadata=md,
     )
