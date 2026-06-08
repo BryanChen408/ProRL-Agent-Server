@@ -1,33 +1,31 @@
-"""Ascend NPU per-card passthrough for the Docker rollout runtime (multi-container safe).
+"""Ascend NPU passthrough for the Docker rollout runtime (multi-container safe).
 
-There are TWO ORTHOGONAL failures on share-disabled hosts (e.g. Node-5-88). They are independent;
-the recipe below solves each with a different part (don't conflate them):
+EMPIRICAL on Node-5-88 (and matching the user's proven OpenHands `remote_eval_worker`):
 
-1. -8005 (DCMI_ERR_EXCLUSIVE) — a CONCURRENCY problem.
-   `--privileged` / `-v /dev:/dev` exposes the GLOBAL management channel. A second container then
-   fights the host's single DCMI management lock and its init is rejected (`dcmi module initialize
-   failed ... -8005`). FIX = MINIMAL exposure: only the one card's davinci node + the shared
-   davinci_manager/devmm_svm/hisi_hdc, NO /dev:/dev, NO --privileged. (Has nothing to do with #2.)
+  * The recipe below — `--privileged -v /dev:/dev` (full device + management visibility) +
+    `ASCEND_RT_VISIBLE_DEVICES=<one physical card>` — runs CONCURRENTLY with the training container
+    with NO -8005. This is the working path.
+  * The opposite (minimal per-card `--device=/dev/davinciN:/dev/davinci0`, no /dev, no privileged)
+    FAILS here with aclInit 507899 `Resource_Busy` / `Get device cnt failed` / `chipType=0`: without
+    the full /dev + privileged, the driver can't enumerate the device / read its chip type. So on
+    this host, broad visibility is REQUIRED for init to work at all.
 
-2. 107001 (aclInit "Invalid device ID ... deviceId:0") — a SINGLE-container init problem.
-   torch_npu `_npu_init()` hard-builds its default context on LOGICAL device 0, which requires a
-   `/dev/davinci0` NODE to exist. For HARD isolation we mount only ONE card; mounting it under its
-   real name (e.g. davinci8) leaves the container with no davinci0 -> aclInit crashes. FIX = docker
-   device-RENAME `--device=/dev/davinci8:/dev/davinci0`: the assigned physical card appears inside
-   the container AS davinci0, so torch_npu's logical-0 init finds it; `ASCEND_RT_VISIBLE_DEVICES=0`
-   then means "my one card is logical 0". (Like CUDA_VISIBLE_DEVICES, but Ascend additionally needs
-   the davinci0 *file* present — so an env var alone is not enough when only one card is mounted;
-   hence the rename. Mounting ALL cards would make davinci0 exist and avoid the rename, but only
-   gives soft, env-based isolation — the rename is the price of one-card-per-container hard isolation,
-   so a generated kernel cannot touch another rollout's card.)
+So concurrency-safety does NOT come from minimizing /dev exposure (that breaks enumeration); it comes
+from two things:
+  1. Each container is scoped to ONE card via `ASCEND_RT_VISIBLE_DEVICES=<N>` set BEFORE any NPU init
+     (so torch_npu doesn't default to card 0 and collide). The host flock leases N.
+  2. NOT running `npu-smi info` inside the hot path (it ignores RT and enumerates ALL cards globally,
+     which is what actually fights the global DCMI lock -> -8005). The eval engine is torch-only, so
+     this never happens.
 
-Side effect of the minimal exposure: the DCMI/management channel is closed inside, so `npu-smi` does
-NOT work there. That's fine — operator verification only needs compute (torch matmul, Triton
-compile+run) and `torch.npu.max_memory_allocated` (a torch API, not DCMI), all of which work.
+Tradeoff: all cards are visible inside the container (soft, RT-based isolation rather than hard
+device isolation). A generated Triton kernel honors ASCEND_RT_VISIBLE_DEVICES (it doesn't open device
+files directly), and this is the user's proven OpenHands setup, so it's acceptable.
 
-Card ALLOCATION is host-level: ``acquire_card`` flock's a free physical card from a pool (held by
-the gateway process for the container lifetime, auto-released on crash). DockerRuntime acquires at
-start() and releases at stop(). Config: ``RuntimeSpec.kwargs['ascend'] = {pool, lock_dir}``.
+Card ALLOCATION is host-level: ``acquire_card`` flock's a free physical card from a pool (held by the
+gateway process for the container lifetime, auto-released on crash) — the equivalent of OpenHands'
+``npu_lease``. DockerRuntime acquires at start() and releases at stop(), then passes the leased card
+as ``ASCEND_RT_VISIBLE_DEVICES``. Config: ``RuntimeSpec.kwargs['ascend'] = {pool, lock_dir}``.
 """
 
 from __future__ import annotations
@@ -36,16 +34,17 @@ import fcntl
 import os
 from typing import Any
 
-# Per-card device nodes + driver mounts needed for compute (NOT the global /dev, NOT --privileged).
-# Matches the validated Node-5-88 template.
+# Ascend driver/runtime mounts (host paths == the user's openhands worker). With -v /dev:/dev these
+# give the runtime everything it needs to enumerate + run on the card.
 _DRIVER_MOUNTS = (
+    "/dev:/dev",
     "/usr/local/Ascend/driver:/usr/local/Ascend/driver:ro",
+    "/usr/local/Ascend/firmware:/usr/local/Ascend/firmware:ro",
     "/usr/local/dcmi:/usr/local/dcmi:ro",
     "/usr/local/bin/npu-smi:/usr/local/bin/npu-smi:ro",
-    "/usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/",
-    "/usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info",
+    "/etc/ascend_install.info:/etc/ascend_install.info:ro",
+    "/usr/local/sbin:/usr/local/sbin:ro",
 )
-_SHARED_DEVICES = ("/dev/davinci_manager", "/dev/devmm_svm", "/dev/hisi_hdc")
 
 
 def parse_pool(spec: Any) -> list[str]:
@@ -62,26 +61,28 @@ def parse_pool(spec: Any) -> list[str]:
 
 
 def ascend_create_args(cfg: dict) -> list[str]:
-    """``docker create`` args giving a container ONE Ascend card, remapped to davinci0.
+    """``docker create`` args giving a container Ascend NPU access scoped to ONE physical card.
 
-    cfg: ``{device_id: int|str (the assigned PHYSICAL card, e.g. 8), [mounts], [env]}``.
-    No --privileged, no -v /dev:/dev. ``ASCEND_RT_VISIBLE_DEVICES=0`` aligns torch_npu's default
-    device-0 with the single mounted card.
+    cfg: ``{device_id: int|str (the assigned PHYSICAL card, e.g. 9), [shm_size], [mounts], [env]}``.
+    `--privileged -v /dev:/dev` (required for device enumeration on this host) + full driver mounts +
+    `ASCEND_RT_VISIBLE_DEVICES=<device_id>` (scopes the process to that one card -> concurrency-safe).
     """
     if not isinstance(cfg, dict):
         raise TypeError(f"ascend cfg must be a dict, got {type(cfg).__name__}")
     device_id = str(cfg.get("device_id", "")).strip()
     if device_id == "":
-        raise ValueError("ascend.device_id required (ONE physical NPU card, e.g. 8)")
+        raise ValueError("ascend.device_id required (the physical NPU card to scope to, e.g. 9)")
 
-    args: list[str] = ["--device", f"/dev/davinci{device_id}:/dev/davinci0"]
-    for dev in _SHARED_DEVICES:
-        args += ["--device", dev]
+    args: list[str] = ["--privileged"]
+    if cfg.get("ipc", "host"):
+        args += ["--ipc", str(cfg.get("ipc", "host"))]
+    if cfg.get("shm_size", "500g"):
+        args += ["--shm-size", str(cfg.get("shm_size", "500g"))]
     for mount in _DRIVER_MOUNTS:
         args += ["-v", mount]
     for mount in cfg.get("mounts", []) or []:
         args += ["-v", str(mount)]
-    env = {"ASCEND_RT_VISIBLE_DEVICES": "0"}
+    env = {"ASCEND_RT_VISIBLE_DEVICES": device_id}  # scope to the leased card (before any NPU init)
     env.update(cfg.get("env", {}) or {})
     for key, value in env.items():
         args += ["-e", f"{key}={value}"]
@@ -109,7 +110,7 @@ def acquire_card(pool: list[str], lock_dir: str) -> CardLock:
     """flock the first FREE physical card in ``pool`` (held until release / process death).
 
     Raises RuntimeError if every card is locked. Crash-safe: flock auto-releases when the holding
-    process dies, so a crashed rollout never leaks a card.
+    process dies, so a crashed rollout never leaks a card. This is OpenHands' ``npu_lease`` equivalent.
     """
     if not pool:
         raise ValueError("ascend.pool is empty — no NPU cards to allocate")

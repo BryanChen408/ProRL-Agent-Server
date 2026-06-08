@@ -45,21 +45,23 @@ def test_parse_pool():
     assert parse_pool("") == []
 
 
-def test_recipe_remaps_card_to_davinci0():
-    args = ascend_create_args({"device_id": 8})
-    devs = _vals(args, "--device")
-    assert "/dev/davinci8:/dev/davinci0" in devs           # physical 8 -> container davinci0
-    assert "/dev/davinci_manager" in devs and "/dev/devmm_svm" in devs and "/dev/hisi_hdc" in devs
+def test_recipe_scopes_to_one_card():
+    # B recipe (validated on Node-5-88 + OpenHands): privileged + /dev:/dev (enumeration) +
+    # RT=<physical card> (scope -> concurrency-safe).
+    args = ascend_create_args({"device_id": 9})
+    assert "--privileged" in args
+    vols = _vals(args, "-v")
+    assert "/dev:/dev" in vols
+    assert "/usr/local/dcmi:/usr/local/dcmi:ro" in vols
+    assert "/usr/local/bin/npu-smi:/usr/local/bin/npu-smi:ro" in vols
     env = dict(p.split("=", 1) for p in _vals(args, "-e"))
-    assert env["ASCEND_RT_VISIBLE_DEVICES"] == "0"         # torch_npu default-device-0 aligns
-    assert "/usr/local/Ascend/driver:/usr/local/Ascend/driver:ro" in _vals(args, "-v")
+    assert env["ASCEND_RT_VISIBLE_DEVICES"] == "9"         # scope to the leased physical card
 
 
-def test_no_privileged_no_full_dev():
-    # the whole point: avoid the DCMI exclusive lock (-8005) on share-disabled hosts
-    args = ascend_create_args({"device_id": 8})
-    assert "--privileged" not in args
-    assert "/dev:/dev" not in _vals(args, "-v")
+def test_no_per_card_device_remap():
+    # we scope via RT + /dev:/dev, NOT the per-card `--device=davinciN:davinci0` (507899 on this host)
+    args = ascend_create_args({"device_id": 9})
+    assert "--device" not in args
 
 
 def test_requires_device_id():

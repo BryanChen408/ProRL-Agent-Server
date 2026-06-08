@@ -1,14 +1,13 @@
 #!/usr/bin/env python3
-"""On-node check: can a container get ONE Ascend card for COMPUTE (per-card, no privileged)?
+"""On-node check: can a container get ONE Ascend card for COMPUTE?
 
-Builds docker args with the REAL ``polar.runtime.ascend.ascend_create_args`` — the multi-container-safe
-per-card recipe: physical card -> the container's ``davinci0``, ``ASCEND_RT_VISIBLE_DEVICES=0``,
-**no --privileged, no -v /dev:/dev** (so concurrent containers don't fight the DCMI exclusive lock
--8005). Runs a throwaway container and does ``torch.ones(10, device='npu')`` inside.
+Builds docker args with the REAL ``polar.runtime.ascend.ascend_create_args`` — the recipe validated on
+Node-5-88 (+ the user's OpenHands worker): ``--privileged -v /dev:/dev`` (needed for device
+enumeration on this host) + ``ASCEND_RT_VISIBLE_DEVICES=<device_id>`` to scope the process to one
+physical card (concurrency-safe). Runs a throwaway container and does ``torch.ones(10, device='npu')``.
 
-Green ("NPU compute OK") = that card is usable for compute, which is exactly what operator
-verification needs. Note: ``npu-smi`` / DCMI management is intentionally CLOSED inside this recipe —
-that's expected; we only need compute.
+Green ("NPU compute OK") = that card is usable for compute, which is what operator verification needs.
+(npu-smi works inside this recipe too, but we test compute since that's what matters.)
 
     python examples/ascend/check_npu_passthrough.py --device-id 8 --dry-run        # just print the command
     python examples/ascend/check_npu_passthrough.py --device-id 8 --image <ascend-image>   # real check
@@ -54,8 +53,7 @@ def main() -> int:
 
     rc = subprocess.run(cmd).returncode
     ok = rc == 0
-    print(f"\n[{'OK' if ok else 'FAIL'}] exit={rc} — 看到 'NPU compute OK' 即物理卡 {args.device_id} "
-          f"可上算子(npu-smi 在本配方不可用是预期的,只验算力)")
+    print(f"\n[{'OK' if ok else 'FAIL'}] exit={rc} — 看到 'NPU compute OK' 即物理卡 {args.device_id} 可上算子")
     return 0 if ok else 1
 
 
