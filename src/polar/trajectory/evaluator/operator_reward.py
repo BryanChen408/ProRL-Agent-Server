@@ -15,6 +15,8 @@ The Polar `operator_judge` evaluator imports `judge_outcome` to turn judge metri
 
 from __future__ import annotations
 
+import math
+
 # error_type values that mean the eval COULDN'T RUN for infra/setup reasons (retry, do not score).
 # Everything else (ast_check_failed / correctness_failed / *compile* / *lowering* / ub_overflow /
 # benchmark_failed / implementation_missing / submission_missing) is the AGENT's fault -> real signal.
@@ -39,7 +41,10 @@ def reward_from_metrics(metrics: dict) -> float:
         if bool(metrics.get("ast_check_ok", False)):
             return 0.3
         return 0.2
-    speedup = float((metrics.get("perf_data") or {}).get("speedup_vs_torch", 1.0))
+    try:
+        speedup = float((metrics.get("perf_data") or {}).get("speedup_vs_torch", 1.0))
+    except (TypeError, ValueError):
+        speedup = float("nan")  # non-numeric -> judge_outcome's finiteness gate treats it as infra
     return min(0.5 + 0.5 * (speedup / 2.0), 1.0)
 
 
@@ -60,6 +65,17 @@ def judge_outcome(metrics: dict | None) -> dict:
         et = (metrics or {}).get("error_type") or "no_metrics"
         return {"status": "ERROR", "retry": True, "reward": None,
                 "error_type": et, "reason": f"infra failure ({et}) -> retry, not scored"}
+    # Malformed perf on a 'success' (NaN/inf/negative speedup) == garbage metrics, NOT a real reward.
+    # Treat as infra (retry) so a single NaN never poisons the whole GRPO group's normalized advantage.
+    if bool(metrics.get("success", False)):
+        try:
+            sp = float((metrics.get("perf_data") or {}).get("speedup_vs_torch", 1.0))
+        except (TypeError, ValueError):
+            sp = float("nan")
+        if not math.isfinite(sp) or sp < 0:
+            return {"status": "ERROR", "retry": True, "reward": None,
+                    "error_type": "judge_metrics_unreadable",
+                    "reason": f"non-finite/negative speedup ({sp!r}) -> malformed metrics, retry"}
     reward = reward_from_metrics(metrics)
     return {"status": "COMPLETED", "retry": False, "reward": reward,
             "error_type": metrics.get("error_type"), "reason": "scored"}
@@ -107,6 +123,14 @@ def test_judge_outcome_operator_failure_scored():
 def test_judge_outcome_success():
     o = judge_outcome({"success": True, "perf_data": {"speedup_vs_torch": 2.0}, "error_type": None})
     assert o["status"] == "COMPLETED" and o["reward"] == 1.0 and o["retry"] is False
+
+
+def test_malformed_speedup_is_infra_not_nan_reward():
+    # NaN/inf/negative/garbage speedup on a 'success' must -> infra retry (reward None), never a
+    # non-finite/garbage reward that would poison the GRPO group's normalized advantage.
+    for bad in (float("nan"), float("inf"), -1.0, "oops"):
+        o = judge_outcome({"success": True, "perf_data": {"speedup_vs_torch": bad}, "error_type": None})
+        assert o["status"] == "ERROR" and o["retry"] is True and o["reward"] is None, bad
 
 
 if __name__ == "__main__":
