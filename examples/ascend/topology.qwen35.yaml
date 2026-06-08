@@ -5,7 +5,7 @@
 # IMPORTANT:
 #   * inference.base_url is the BARE host:port (NO /v1) — Polar appends /v1 itself.
 #     (P0b used .../v1 because it was a raw OpenAI client; the topology does not.)
-#   * model_served MUST equal your vllm-ascend --served-model-name (here: qwen35).
+#   * model_served MUST equal your vllm-ascend --served-model-name (here: qwen36).
 #     The gateway rewrites whatever model the harness CLI sends -> model_served.
 rollout:
   host: 127.0.0.1
@@ -23,7 +23,7 @@ gateway:
       max_init_workers: 4
       max_run_workers: 4
       max_postrun_workers: 4
-      model_served: qwen35
+      model_served: qwen36          # == 你 vllm-ascend 的 --served-model-name
       inference:
         engine: vllm
-        base_url: http://127.0.0.1:8003
+        base_url: http://127.0.0.1:8003   # 改成你 vllm 实际的 host:port(不带 /v1)
