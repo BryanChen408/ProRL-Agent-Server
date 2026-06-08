@@ -1,17 +1,29 @@
 """Ascend NPU per-card passthrough for the Docker rollout runtime (multi-container safe).
 
-Why not `--privileged -v /dev:/dev`: on hosts with card-level exclusive mode (share_mode off,
-e.g. Node-5-88), a second container fighting the global DCMI management lock fails with
-`dcmi module initialize failed ... -8005 (DCMI_ERR_EXCLUSIVE)`. So we DON'T expose /dev or use
---privileged — only the specific card's device nodes go in.
+There are TWO ORTHOGONAL failures on share-disabled hosts (e.g. Node-5-88). They are independent;
+the recipe below solves each with a different part (don't conflate them):
 
-Why remap to davinci0: torch_npu `_npu_init()` hard-pulls logical device 0 as the default context.
-A bare `--device=/dev/davinci8` (no davinci0 in the container) crashes at `aclInit` with 107001
-`Invalid device ID ... deviceId:0`. So we map the assigned PHYSICAL card -> the container's
-`/dev/davinci0` and set `ASCEND_RT_VISIBLE_DEVICES=0`; torch/triton then run on that one card.
+1. -8005 (DCMI_ERR_EXCLUSIVE) — a CONCURRENCY problem.
+   `--privileged` / `-v /dev:/dev` exposes the GLOBAL management channel. A second container then
+   fights the host's single DCMI management lock and its init is rejected (`dcmi module initialize
+   failed ... -8005`). FIX = MINIMAL exposure: only the one card's davinci node + the shared
+   davinci_manager/devmm_svm/hisi_hdc, NO /dev:/dev, NO --privileged. (Has nothing to do with #2.)
 
-Side effect: the DCMI/management channel is closed inside the container, so `npu-smi` does not work
-there — but compute (torch matmul, Triton compile+run) is unaffected.
+2. 107001 (aclInit "Invalid device ID ... deviceId:0") — a SINGLE-container init problem.
+   torch_npu `_npu_init()` hard-builds its default context on LOGICAL device 0, which requires a
+   `/dev/davinci0` NODE to exist. For HARD isolation we mount only ONE card; mounting it under its
+   real name (e.g. davinci8) leaves the container with no davinci0 -> aclInit crashes. FIX = docker
+   device-RENAME `--device=/dev/davinci8:/dev/davinci0`: the assigned physical card appears inside
+   the container AS davinci0, so torch_npu's logical-0 init finds it; `ASCEND_RT_VISIBLE_DEVICES=0`
+   then means "my one card is logical 0". (Like CUDA_VISIBLE_DEVICES, but Ascend additionally needs
+   the davinci0 *file* present — so an env var alone is not enough when only one card is mounted;
+   hence the rename. Mounting ALL cards would make davinci0 exist and avoid the rename, but only
+   gives soft, env-based isolation — the rename is the price of one-card-per-container hard isolation,
+   so a generated kernel cannot touch another rollout's card.)
+
+Side effect of the minimal exposure: the DCMI/management channel is closed inside, so `npu-smi` does
+NOT work there. That's fine — operator verification only needs compute (torch matmul, Triton
+compile+run) and `torch.npu.max_memory_allocated` (a torch API, not DCMI), all of which work.
 
 Card ALLOCATION is host-level: ``acquire_card`` flock's a free physical card from a pool (held by
 the gateway process for the container lifetime, auto-released on crash). DockerRuntime acquires at
