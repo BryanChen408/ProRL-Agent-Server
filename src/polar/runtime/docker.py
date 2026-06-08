@@ -6,7 +6,7 @@ import logging
 import os
 from pathlib import Path
 
-from polar.runtime.ascend import ascend_create_args
+from polar.runtime.ascend import CardLock, acquire_card, ascend_create_args, parse_pool
 from polar.runtime.base import BaseRuntime
 from polar.runtime.models import ExecResult, RuntimeSpec
 
@@ -23,6 +23,7 @@ class DockerRuntime(BaseRuntime):
         safe_name = session_id.replace("/", "-")[:55]
         self._container_name = f"polar-{safe_name}"
         self._chmod_needed: bool | None = None
+        self._npu_lock: CardLock | None = None  # held physical NPU card (Ascend), released on stop()
 
     @property
     def runtime_id(self) -> str:
@@ -62,10 +63,14 @@ class DockerRuntime(BaseRuntime):
         # Additional volumes from kwargs (e.g., Docker socket for agents that need DinD)
         for vol in self.spec.kwargs.get("volumes", []):
             create_args.extend(["-v", vol])
-        # Ascend NPU passthrough (operator-gen): one proven recipe in polar.runtime.ascend.
-        # Applies to BOTH agent (in-loop op runs) and judge (authoritative reward) containers.
-        if self.spec.kwargs.get("ascend") is not None:
-            create_args.extend(ascend_create_args(self.spec.kwargs["ascend"]))
+        # Ascend NPU (operator-gen): allocate ONE free physical card from the pool (host flock,
+        # held for this container's lifetime), map it -> the container's davinci0. No --privileged /
+        # no -v /dev:/dev, so concurrent containers don't fight the DCMI exclusive lock (-8005).
+        ascend = self.spec.kwargs.get("ascend")
+        if ascend is not None:
+            self._npu_lock = acquire_card(parse_pool(ascend.get("pool")), ascend.get("lock_dir", "/tmp/npu-locks"))
+            create_args.extend(ascend_create_args({**ascend, "device_id": self._npu_lock.device_id}))
+            logger.info("ascend: %s -> physical card %s", self._container_name, self._npu_lock.device_id)
         create_args.extend([self.spec.image, "sleep", "infinity"])
         rc, _, stderr = await self._run_local_command(
             *create_args, capture=True, timeout=self._START_TIMEOUT,
@@ -123,6 +128,10 @@ class DockerRuntime(BaseRuntime):
                 "docker rm -f failed for %s (rc=%s): %s",
                 self._container_name, rc, stderr,
             )
+        # Release the held NPU card (after the container is gone) so the pool frees up.
+        if self._npu_lock is not None:
+            self._npu_lock.release()
+            self._npu_lock = None
 
     async def _detect_chmod_needed(self) -> bool:
         """True unless the container's effective UID matches the host's."""

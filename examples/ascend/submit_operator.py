@@ -28,7 +28,7 @@ pick is the in-container flock.
     python examples/ascend/submit_operator.py --op-name add --dry-run
     # real rollout on the node:
     python examples/ascend/submit_operator.py --op-name add --image polar-op-agent:latest \
-      --device-ids 8,9,10,11 --lock-dir /shared/npu-locks \
+      --device-pool 8,9,10,11 --lock-dir /shared/npu-locks \
       --skills-dir /data/cannbot-skills --tasks-dir /data/op-tasks
 """
 
@@ -55,7 +55,7 @@ def _instruction(op: str) -> str:
 
 
 def build_operator_request(
-    *, op_name: str, image: str, backend: str, device_ids: str, lock_dir: str,
+    *, op_name: str, image: str, backend: str, device_pool: str, lock_dir: str,
     skills_dir: str, tasks_dir: str, model_name: str, task_json: bool,
 ) -> dict:
     sub = f"output/submission/{op_name}_impl.py"
@@ -90,8 +90,9 @@ def build_operator_request(
             "network": "host",
             "workdir": WORKDIR,
             "kwargs": {
-                # Ascend passthrough recipe (polar.runtime.ascend) — applied to agent AND fresh judge.
-                "ascend": {"device_ids": device_ids, "lock_dir": lock_dir},
+                # Ascend per-card recipe (polar.runtime.ascend) — host flock allocates ONE free card
+                # from the pool to EACH container (agent + fresh judge), remapped to davinci0.
+                "ascend": {"pool": device_pool, "lock_dir": lock_dir},
                 # Immutable SOURCE only (read-only); never the agent's working tree. Each container cp's
                 # tools into its OWN writable {workdir}/tools, so the agent never hits a read-only write
                 # error (= no wasted RL steps). Anti-cheat is enforced by the JUDGE running in a SEPARATE
@@ -137,7 +138,7 @@ def main() -> int:
     ap.add_argument("--op-name", required=True)
     ap.add_argument("--image", default="polar-op-agent:latest")
     ap.add_argument("--backend", choices=["docker", "apptainer"], default="docker")
-    ap.add_argument("--device-ids", default="8,9,10,11", help="NPU verification pool")
+    ap.add_argument("--device-pool", default="8,9,10,11", help="NPU card pool; host flock 每容器分一张空闲卡")
     ap.add_argument("--lock-dir", default="/shared/npu-locks")
     ap.add_argument("--skills-dir", default="/data/cannbot-skills", help="host dir with skills/ + tools/")
     ap.add_argument("--tasks-dir", default="/data/op-tasks", help="host dir with {op}.py (+ {op}.json)")
@@ -152,7 +153,7 @@ def main() -> int:
 
     req = build_operator_request(
         op_name=args.op_name, image=args.image, backend=args.backend,
-        device_ids=args.device_ids, lock_dir=args.lock_dir,
+        device_pool=args.device_pool, lock_dir=args.lock_dir,
         skills_dir=args.skills_dir, tasks_dir=args.tasks_dir,
         model_name=args.model_name, task_json=args.task_json,
     )

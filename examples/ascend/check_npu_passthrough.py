@@ -1,20 +1,17 @@
 #!/usr/bin/env python3
-"""On-node check: does the Ascend passthrough recipe actually expose NPU cards to a container?
+"""On-node check: can a container get ONE Ascend card for COMPUTE (per-card, no privileged)?
 
-Builds the docker args with the REAL ``polar.runtime.ascend.ascend_create_args`` (so this tests
-that code, not a hand-copied command), starts a throwaway container, and runs ``npu-smi info`` +
-lists ``/dev/davinci*`` inside. Green = the recipe + your host paths work, independent of Polar
-rollout / reward. Zero third-party deps (stdlib only).
+Builds docker args with the REAL ``polar.runtime.ascend.ascend_create_args`` — the multi-container-safe
+per-card recipe: physical card -> the container's ``davinci0``, ``ASCEND_RT_VISIBLE_DEVICES=0``,
+**no --privileged, no -v /dev:/dev** (so concurrent containers don't fight the DCMI exclusive lock
+-8005). Runs a throwaway container and does ``torch.ones(10, device='npu')`` inside.
 
-    # see the exact command first (no docker needed):
-    python examples/ascend/check_npu_passthrough.py --device-ids 8,9,10,11 --dry-run
-    # real check on the NPU host (use an Ascend-ready image — same one your operators run in):
-    python examples/ascend/check_npu_passthrough.py --device-ids 8,9,10,11 --image <ascend-image>
+Green ("NPU compute OK") = that card is usable for compute, which is exactly what operator
+verification needs. Note: ``npu-smi`` / DCMI management is intentionally CLOSED inside this recipe —
+that's expected; we only need compute.
 
-Note: with ``-v /dev:/dev`` the container sees ALL cards in ``npu-smi`` — the per-operator
-restriction to one card is done at run time by the in-container flock (``distributed_npu_lock``
-sets ``ASCEND_RT_VISIBLE_DEVICES``), not at container level. So "npu-smi lists cards +
-/dev/davinci* present" is the correct success signal for the *passthrough*.
+    python examples/ascend/check_npu_passthrough.py --device-id 8 --dry-run        # just print the command
+    python examples/ascend/check_npu_passthrough.py --device-id 8 --image <ascend-image>   # real check
 """
 
 from __future__ import annotations
@@ -25,44 +22,40 @@ import shlex
 import subprocess
 import sys
 
-# Bootstrap src/ so we import the REAL ascend_create_args (no `pip install -e .` needed).
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "src"))
 from polar.runtime.ascend import ascend_create_args  # noqa: E402
 
 _CHECK = (
-    'echo "== npu-smi info ==" ; npu-smi info 2>&1 | head -20 ; '
-    'echo "== /dev/davinci* ==" ; ls -d /dev/davinci* 2>/dev/null || echo "(none)"'
+    "python -c \"import torch, torch_npu; "
+    "x = torch.ones(10, device='npu'); "
+    "print('NPU compute OK:', float(x.sum().item()))\""
 )
 
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--device-ids", required=True, help="NPU pool, e.g. 8,9,10,11")
-    ap.add_argument("--lock-dir", default="/tmp/npu-locks", help="host dir for flock locks (created if missing)")
-    ap.add_argument("--image", default="polar-ascend-agent:latest",
-                    help="Ascend-ready image (the one operators run in); npu-smi is bind-mounted from host")
+    ap.add_argument("--device-id", required=True, help="ONE physical NPU card to test, e.g. 8")
+    ap.add_argument("--image", default="polar-op-agent:latest", help="Ascend-ready image (torch_npu inside)")
     ap.add_argument("--entrypoint", default="bash",
-                    help="override image ENTRYPOINT (default bash). Some Ascend/OpenHands images set "
-                         "ENTRYPOINT=bash; then CMD must start at -lc, else you get "
-                         "'bash: ...: cannot execute binary file' (exit 126).")
+                    help="override image ENTRYPOINT (default bash); some images set ENTRYPOINT=bash so "
+                         "the CMD must start at -lc")
     ap.add_argument("--dry-run", action="store_true", help="print the docker command and exit")
     args = ap.parse_args()
 
-    ascend = ascend_create_args({"device_ids": args.device_ids, "lock_dir": args.lock_dir})
+    ascend = ascend_create_args({"device_id": args.device_id})
     cmd = ["docker", "run", "--rm", *ascend]
     if args.entrypoint:
-        cmd += ["--entrypoint", args.entrypoint]  # -> `<entrypoint> -lc '<CHECK>'`, avoids `bash bash -lc`
+        cmd += ["--entrypoint", args.entrypoint]
     cmd += [args.image, "-lc", _CHECK]
-    print("[cmd] " + shlex.join(cmd) + "\n")  # copy-pasteable (CHECK stays one quoted arg)
+    print("[cmd] " + shlex.join(cmd) + "\n")
     if args.dry_run:
         print("[dry-run] not executed")
         return 0
 
-    os.makedirs(args.lock_dir, exist_ok=True)
     rc = subprocess.run(cmd).returncode
     ok = rc == 0
-    print(f"\n[{'OK' if ok else 'FAIL'}] exit={rc} — 看到 npu-smi 列出卡 + /dev/davinci* 即透传成功 "
-          f"(单卡限制由容器内 flock 运行时设,不在这一层)")
+    print(f"\n[{'OK' if ok else 'FAIL'}] exit={rc} — 看到 'NPU compute OK' 即物理卡 {args.device_id} "
+          f"可上算子(npu-smi 在本配方不可用是预期的,只验算力)")
     return 0 if ok else 1
 
 
