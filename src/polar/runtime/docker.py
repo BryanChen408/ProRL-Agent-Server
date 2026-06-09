@@ -45,6 +45,10 @@ class DockerRuntime(BaseRuntime):
     def supports_memory_limits(self) -> bool:
         return True
 
+    @property
+    def supports_ascend(self) -> bool:
+        return True  # start() applies the kwargs.ascend passthrough recipe (acquire_card + RT + mounts)
+
     async def start(self) -> None:
         if self._destroyed:
             raise RuntimeError("docker runtime was already destroyed")

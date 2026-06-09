@@ -59,6 +59,14 @@ class BaseRuntime(ABC):
     def supports_storage_limits(self) -> bool:
         return False
 
+    @property
+    def supports_ascend(self) -> bool:
+        """True iff this backend implements the Ascend NPU passthrough recipe (``kwargs.ascend``:
+        host card-pool lease + ASCEND_RT_VISIBLE_DEVICES + driver mounts). Only DockerRuntime does;
+        the factory rejects ``kwargs.ascend`` on backends that return False, so a kernel rollout can
+        never silently run without its leased card (would collide on davinci0 / fail aclInit)."""
+        return False
+
     @abstractmethod
     async def start(self) -> None:
         """Create and start the runtime instance."""

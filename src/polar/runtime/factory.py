@@ -52,6 +52,13 @@ def _validate_runtime_capabilities(runtime: BaseRuntime) -> None:
         raise ValueError(f"runtime backend {backend!r} does not support memory limits")
     if spec.storage_mb is not None and not runtime.supports_storage_limits:
         raise ValueError(f"runtime backend {backend!r} does not support storage limits")
+    if spec.kwargs.get("ascend") and not runtime.supports_ascend:
+        raise ValueError(
+            f"runtime backend {backend!r} does not implement Ascend NPU passthrough "
+            "(kwargs.ascend); only the 'docker' backend leases a card + sets "
+            "ASCEND_RT_VISIBLE_DEVICES + mounts drivers. Running an operator rollout on this "
+            "backend would silently get no card isolation (davinci0 collision / aclInit failure)."
+        )
     if not spec.allow_internet:
         if not runtime.can_disable_internet:
             raise ValueError(
