@@ -43,6 +43,24 @@ import uuid
 
 WORKDIR = "/opt/workspace/agent_workdir"
 
+# RL rollout tool surface. KEEP = exactly what kernel-gen needs: Read/Write/Edit/Bash/Glob/Grep/Skill.
+# BAN everything else. Bare tool names in --disallowedTools are removed from the model's context
+# ENTIRELY (Claude never sees them), and deny precedence holds even under --dangerously-skip-permissions
+# (claude_code preset maps settings.disallowed_tools -> --disallowedTools). Why each is banned:
+#   WebSearch / WebFetch          — non-reproducible external I/O; lets the agent look up answers (reward hacking)
+#   Agent                         — sub-agent calls ARE captured (same session token) but UNATTRIBUTED: they splice a
+#                                   different sub-agent system prompt into the per_request stream -> break rllm's
+#                                   prefix-merge (merge_compression_ratio) + pollute the train distribution. Not needed here.
+#   AskUserQuestion               — no human in the RL loop; would stall the rollout
+#   EnterPlanMode / ExitPlanMode  — would wait for an approval that never comes
+#   Enter/ExitWorktree, Cron*,    — harness/session-management noise, meaningless in a one-shot rollout
+#     ScheduleWakeup, Task*, NotebookEdit
+_DISALLOWED_TOOLS = (
+    "Agent AskUserQuestion CronCreate CronDelete CronList EnterPlanMode EnterWorktree "
+    "ExitPlanMode ExitWorktree NotebookEdit ScheduleWakeup TaskCreate TaskGet TaskList "
+    "TaskOutput TaskStop TaskUpdate WebFetch WebSearch"
+)
+
 
 def _instruction(op: str) -> str:
     return (
@@ -106,7 +124,11 @@ def build_operator_request(
         },
         # skills_path is a read-only SOURCE; the claude_code preset cp's it into CLAUDE_CONFIG_DIR/skills
         # (already a writable copy), so skills are no read-only hazard either.
-        "agent": {"harness": "claude_code", "model_name": model_name, "skills_path": "/opt/canonical/skills"},
+        "agent": {
+            "harness": "claude_code", "model_name": model_name, "skills_path": "/opt/canonical/skills",
+            # restrict the rollout tool surface (see _DISALLOWED_TOOLS) — keep Read/Write/Edit/Bash/Glob/Grep/Skill.
+            "settings": {"disallowed_tools": _DISALLOWED_TOOLS},
+        },
         "evaluator": {
             "strategy": "operator_judge",
             "refresh_runtime": True,  # fresh judge runtime (anti-cheat); inherits kwargs.ascend

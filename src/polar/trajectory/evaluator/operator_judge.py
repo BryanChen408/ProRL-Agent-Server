@@ -21,7 +21,11 @@ change freely. Config (``EvaluatorSpec.config``):
   submission_path (str, default ``output/submission/{op_name}_impl.py``) — path in the AGENT runtime
   submission_dest (str, default = submission_path)                       — path in the JUDGE runtime
   metrics_path    (str, default ``judge_out/metrics.json``)              — where judge_command writes it
-  workdir         (str, optional) — cwd for judge_command
+  workdir         (str, optional) — cwd for judge_command; ALSO the base a *relative* submission_path /
+                  submission_dest is resolved against before the docker cp / bind-mount transfer (the
+                  agent writes the kernel under its workdir, but ``docker cp`` resolves a bare relative
+                  path against the container ROOT — without this they'd never meet -> a deterministic
+                  false-negative ``submission_missing``). Absolute paths pass through unchanged.
   judge_timeout   (float, default 1800)
 
 Set ``evaluator.refresh_runtime: true`` in the request so a fresh judge runtime is provided (anti-cheat).
@@ -31,6 +35,7 @@ from __future__ import annotations
 
 import json
 import logging
+import posixpath
 from pathlib import Path
 from typing import Any
 
@@ -71,6 +76,22 @@ class OperatorJudgeEvaluator(BaseTrajectoryEvaluator):
         self.workdir = workdir
         self.judge_timeout = float(judge_timeout)
 
+    def _abs(self, path: str) -> str:
+        """Resolve a runtime path against ``workdir`` so the transfer actually finds it.
+
+        The agent writes the submission under its workdir (e.g. ``/opt/workspace/agent_workdir/
+        output/submission/...``), but ``DockerRuntime.download_file`` -> ``docker cp`` resolves a bare
+        relative path against the container ROOT (``/output/submission/...``) and the bind-mount fast
+        path only covers ``/polar/session`` — so a relative path is found by NEITHER and the judge
+        reports ``submission_missing`` even on a perfect kernel (deterministic false-negative that
+        floors every rollout to 0.2 and zeroes the GRPO group's advantage). Joining ``workdir`` makes
+        ``docker cp`` hit the real file. Absolute paths and a missing workdir pass through unchanged.
+        Assumes the judge runtime mirrors the agent's workdir layout (it does: same WORKDIR + eval_prepare).
+        """
+        if self.workdir and not posixpath.isabs(path):
+            return posixpath.join(self.workdir, path)
+        return path
+
     async def evaluate(self, trajectory: Trajectory, **runtime: Any) -> EvalResult:
         source = runtime.get("runtime")
         if not isinstance(source, BaseRuntime):
@@ -104,8 +125,8 @@ class OperatorJudgeEvaluator(BaseTrajectoryEvaluator):
         picked: str | None = None
         for cand in candidates:
             try:
-                await source.download_file(cand, str(local_impl))
-                picked = cand
+                await source.download_file(self._abs(cand), str(local_impl))
+                picked = cand  # report the logical (relative) path; _abs is a transfer detail
                 break
             except Exception:  # noqa: BLE001 — try the next candidate (best -> final)
                 continue
@@ -119,7 +140,7 @@ class OperatorJudgeEvaluator(BaseTrajectoryEvaluator):
 
         # 2) place ONLY the impl into the judge runtime (canonical pipeline comes from eval_prepare).
         if judge_rt is not source:
-            await judge_rt.upload_file(str(local_impl), self.submission_dest)
+            await judge_rt.upload_file(str(local_impl), self._abs(self.submission_dest))
 
         # 3) run the canonical eval pipeline inside the judge runtime -> metrics.json.
         result = await judge_rt.exec(self.judge_command, cwd=self.workdir, env=env, timeout_sec=timeout)
@@ -128,9 +149,11 @@ class OperatorJudgeEvaluator(BaseTrajectoryEvaluator):
             raise TimeoutError(f"operator_judge: judge pipeline timed out after {timeout}s")  # infra -> retry
 
         # 4) read metrics.json. Missing/garbled after the judge ran == INFRA -> raise (retry, never score 0).
+        #    _abs: judge_command writes it relative to cwd=workdir, so download via the absolute path too
+        #    (same docker-cp-resolves-against-container-root trap as the submission).
         local_metrics = artifacts_dir / "metrics.json"
         try:
-            await judge_rt.download_file(self.metrics_path, str(local_metrics))
+            await judge_rt.download_file(self._abs(self.metrics_path), str(local_metrics))
             metrics = json.loads(local_metrics.read_text())
         except Exception as exc:  # noqa: BLE001
             raise RuntimeError(

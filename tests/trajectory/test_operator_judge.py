@@ -123,6 +123,30 @@ def test_submission_missing_is_operator_floor():
     assert len(judge.execs) == 0  # judge never ran (nothing to score)
 
 
+def test_workdir_resolves_relative_submission_to_absolute():
+    # Regression (V4 false-negative): the agent writes the kernel under its workdir, but docker cp
+    # resolves a bare relative path against the container ROOT -> the judge found NOTHING and floored
+    # every rollout to 0.2 (submission_missing) even on a correct, fast kernel. With workdir set, the
+    # relative submission_path must be resolved to the ABSOLUTE path for both download and upload.
+    wd = "/opt/workspace/agent_workdir"
+    abs_best = f"{wd}/{SUB[:-3]}.best.py"
+    ev = OperatorJudgeEvaluator(op_name=OP, judge_command="bash pipeline.sh",
+                                metrics_path=METRICS, workdir=wd)
+    agent = FakeRuntime(files={abs_best: "# best kernel"})   # ONLY the absolute path exists
+    # judge writes metrics under cwd=workdir too -> operator_judge must download it via the absolute path.
+    judge = FakeRuntime(files={f"{wd}/{METRICS}": json.dumps({"success": True,
+                                                              "perf_data": {"speedup_vs_torch": 2.0}})})
+    with tempfile.TemporaryDirectory() as d:
+        res = asyncio.run(ev.evaluate(
+            Trajectory(status="COMPLETED", traces=[]),
+            runtime=agent, fresh_eval_runtime=judge, refresh_runtime=True,
+            artifacts_dir=d, env={}, timeout_seconds=None, session_id="s", task_id="t",
+        ))
+    assert res.metadata["error_type"] is None and res.outcome_reward == 1.0   # found + scored, NOT missing
+    assert res.metadata["submission_used"] == SUB[:-3] + ".best.py"           # logical (relative) label kept
+    assert judge.uploaded and judge.uploaded[0][1] == f"{wd}/{SUB}"           # uploaded to the ABSOLUTE dest
+
+
 def test_prefers_best_impl_then_falls_back():
     best = SUB[:-3] + ".best.py"
     res, *_ = _run({"success": True, "perf_data": {"speedup_vs_torch": 2.0}},
