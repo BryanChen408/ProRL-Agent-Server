@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import shutil
 from contextlib import suppress
 from pathlib import Path
@@ -960,6 +961,11 @@ class GatewayNodeManager:
         session_dir: Path,
         session_id: str,
     ) -> None:
+        # 诊断开关:置 POLAR_KEEP_SESSION_DIR=1 时保留 session 目录(claude 转录/submission/metrics),
+        # 供跨容器从共享盘 /home/docker/polar_sessions 读取定位 reward 根因。默认仍删(原行为)。
+        if os.environ.get("POLAR_KEEP_SESSION_DIR"):
+            logger.info("POLAR_KEEP_SESSION_DIR set; KEEP session dir for %s: %s", session_id, session_dir)
+            return
         try:
             await asyncio.to_thread(shutil.rmtree, session_dir)
         except FileNotFoundError:

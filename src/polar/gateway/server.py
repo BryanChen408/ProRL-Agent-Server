@@ -111,6 +111,11 @@ def _build_state(topology: TopologyConfig, node_id: str | None) -> GatewayState:
         default_runtime=node.default_runtime,
         rollout_server_url=topology.gateway.rollout_server_url or None,
         heartbeat_interval_seconds=topology.gateway.heartbeat_interval_seconds,
+        # DooD: session_dir 必须落在宿主与 polar-ctrl 同名共享的 bind 路径(/home/docker/...),
+        # 否则 docker daemon 按宿主路径解析 -v 时挂到不同的物理目录,容器内看不到 gateway
+        # 建的 logs/agent → claude 的 `tee logs/agent/claude-code.txt` 失败 → step exit 1。
+        # 默认 None(=/tmp,仅适用无 DooD 的 LocalRuntime)。
+        session_base_dir=os.environ.get("POLAR_SESSION_BASE_DIR") or None,
     )
     return GatewayState(
         topology=topology,
