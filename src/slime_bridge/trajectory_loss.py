@@ -4,10 +4,15 @@ from __future__ import annotations
 
 from collections import OrderedDict
 from collections.abc import Callable, Sequence
+import logging
+import os
 from typing import Any
 
 import torch
 from megatron.core import mpu
+
+logger = logging.getLogger(__name__)
+_LOGGED_REDUCER_EVENTS: set[str] = set()
 
 
 def get_trajectory_pg_loss_reducer(
@@ -60,6 +65,11 @@ def get_trajectory_pg_loss_reducer(
     if trajectory_loss_scale is None and batch:
         trajectory_loss_scale = batch.get("trajectory_loss_scale")
     if trajectory_keys is None or len(trajectory_keys) != len(response_lengths):
+        _fallback_or_raise(
+            "sample_mean",
+            "trajectory_keys missing or length mismatch "
+            f"(keys={_safe_len(trajectory_keys)}, samples={len(response_lengths)})",
+        )
         return _sample_mean_reducer(
             total_lengths,
             response_lengths,
@@ -69,6 +79,11 @@ def get_trajectory_pg_loss_reducer(
             max_seq_lens=max_seq_lens,
         )
     if trajectory_trace_counts is None or len(trajectory_trace_counts) != len(response_lengths):
+        _fallback_or_raise(
+            "local_grouped",
+            "trajectory_trace_counts missing or length mismatch "
+            f"(counts={_safe_len(trajectory_trace_counts)}, samples={len(response_lengths)})",
+        )
         return _local_grouped_trajectory_reducer(
             total_lengths,
             response_lengths,
@@ -89,6 +104,15 @@ def get_trajectory_pg_loss_reducer(
     )
     scale = _positive_float(trajectory_loss_scale, default=1.0)
     trace_denominators = [_positive_float(value, default=1.0) for value in trajectory_trace_counts]
+    _log_once(
+        "weighted",
+        "Using trajectory-weighted PG reducer: samples=%d trajectories=%d "
+        "trajectory_loss_scale=%s trace_counts=%s",
+        len(response_lengths),
+        len({_normalize_key(key, idx) for idx, key in enumerate(trajectory_keys)}),
+        scale,
+        list(trajectory_trace_counts),
+    )
 
     def reduce_pg_loss(pg_loss: torch.Tensor) -> torch.Tensor:
         total = pg_loss.new_zeros(())
@@ -104,6 +128,31 @@ def get_trajectory_pg_loss_reducer(
         return total
 
     return reduce_pg_loss
+
+
+def _strict_mode() -> bool:
+    return os.environ.get("POLAR_TRAJECTORY_PG_STRICT", "0").lower() in ("1", "true", "yes", "on")
+
+
+def _safe_len(value: Any) -> int | None:
+    try:
+        return len(value) if value is not None else None
+    except TypeError:
+        return None
+
+
+def _fallback_or_raise(kind: str, reason: str) -> None:
+    message = f"Trajectory PG reducer cannot use weighted path; falling back to {kind}: {reason}"
+    if _strict_mode():
+        raise ValueError(message)
+    _log_once(f"fallback:{kind}:{reason}", message)
+
+
+def _log_once(key: str, message: str, *args: Any) -> None:
+    if key in _LOGGED_REDUCER_EVENTS:
+        return
+    _LOGGED_REDUCER_EVENTS.add(key)
+    logger.info(message, *args)
 
 
 def _fallback_trajectory_keys(batch: dict[str, Any] | None, n: int) -> list[Any] | None:
