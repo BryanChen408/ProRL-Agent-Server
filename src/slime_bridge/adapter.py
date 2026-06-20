@@ -128,6 +128,8 @@ def _build_sample(
     )
     if status in (Sample.Status.ABORTED, Sample.Status.FAILED):
         loss_mask = [0] * len(response_ids)
+    trainable_tokens = sum(1 for value in loss_mask if int(value) != 0)
+    masked_context_tokens = len(loss_mask) - trainable_tokens
     response_log_probs = _extract_rollout_log_probs(
         trace,
         response_len=len(response_ids),
@@ -148,10 +150,18 @@ def _build_sample(
         "task_id": result.task_id,
         "timing": result.timing.model_dump(mode="python"),
         "trace_index": trace_index,
+        "trajectory_key": [group_index, index],
         "trace_metadata": deepcopy(getattr(trace, "metadata", {}) or {}),
         "trajectory_error": result.trajectory.error,
         "trajectory_metadata": deepcopy(result.trajectory.metadata),
         "trajectory_status": result.trajectory.status,
+        "token_counts": {
+            "prompt_tokens": len(prompt_ids),
+            "response_tokens": len(response_ids),
+            "trainable_tokens": trainable_tokens,
+            "masked_context_tokens": masked_context_tokens,
+            "physical_total_tokens": total_len,
+        },
         # Preserved for the longest-trace wandb artifact dump; training reads
         # tokens+logprobs, not these.
         "trace_debug": {

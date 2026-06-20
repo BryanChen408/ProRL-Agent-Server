@@ -7,6 +7,7 @@ Aligned with agent-harness-proxy/src/harness_proxy/transform/anthropic.py.
 from __future__ import annotations
 
 import json
+import os
 import re
 import uuid
 from dataclasses import dataclass
@@ -29,6 +30,18 @@ from polar.gateway.transform.reasoning import (
 _CLAUDE_CODE_BILLING_HEADER_RE = re.compile(
     r"^\s*x-anthropic-billing-header:[^\n]*\n?", re.IGNORECASE
 )
+_DEFAULT_MAX_TOKENS = 4096
+
+
+def _default_max_tokens() -> int:
+    value = os.environ.get("POLAR_ANTHROPIC_DEFAULT_MAX_TOKENS")
+    if value is None:
+        return _DEFAULT_MAX_TOKENS
+    try:
+        parsed = int(value)
+    except ValueError:
+        return _DEFAULT_MAX_TOKENS
+    return parsed if parsed > 0 else _DEFAULT_MAX_TOKENS
 
 
 @dataclass
@@ -354,7 +367,7 @@ class AnthropicTransformer(BaseTransformer):
 
         result: dict[str, Any] = {
             "messages": messages,
-            "max_tokens": body.get("max_tokens", 4096),
+            "max_tokens": body.get("max_tokens", _default_max_tokens()),
         }
         if "model" in body:
             result["model"] = body["model"]

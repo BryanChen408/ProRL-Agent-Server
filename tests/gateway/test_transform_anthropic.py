@@ -129,6 +129,17 @@ def test_anthropic_request_maps_all_fields_and_image_input_to_chat() -> None:
     assert transformed["chat_template_kwargs"]["enable_thinking"] is False
 
 
+def test_anthropic_request_uses_configurable_default_max_tokens(monkeypatch) -> None:
+    monkeypatch.setenv("POLAR_ANTHROPIC_DEFAULT_MAX_TOKENS", "32768")
+    transformer = AnthropicTransformer()
+
+    transformed = transformer.transform_request(
+        {"messages": [{"role": "user", "content": "hello"}]}
+    )
+
+    assert transformed["max_tokens"] == 32768
+
+
 def test_anthropic_request_maps_multi_turn_reasoning_and_parallel_tools() -> None:
     transformer = AnthropicTransformer()
 
