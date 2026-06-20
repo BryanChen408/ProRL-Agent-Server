@@ -63,7 +63,13 @@ def test_baseline_flags_preserved():
 def test_stop_supervisor_enabled_by_default():
     cmd = _cmd({"disallowed_tools": _BAN})
     assert "/polar/session/.polar/STOP_NOW" in cmd
+    assert "/polar/session/.polar/STOP_VIOLATION" in cmd
     assert "polar-supervisor" in cmd
+    assert "stop_grace_seconds=20" in cmd
+    assert "terminate_claude()" in cmd
+    assert "stop_violation_file" in cmd
+    assert "stop_violation_log" in cmd
+    assert "stop_grace_timeout" in cmd
     assert "returning success after policy stop" in cmd
     assert "exit 0" in cmd
     assert "claude " in cmd
@@ -77,9 +83,20 @@ def test_stop_supervisor_can_be_disabled():
 
 
 def test_stop_supervisor_custom_stop_file():
-    cmd = _cmd({"stop_file": "/tmp/custom-stop", "stop_poll_seconds": 1})
+    cmd = _cmd({
+        "stop_file": "/tmp/custom-stop",
+        "stop_poll_seconds": 1,
+        "stop_grace_seconds": 3,
+        "stop_kill_grace_seconds": 2,
+        "stop_violation_file": "/tmp/custom-violation",
+        "stop_violation_pattern": "verify[.]py",
+    })
     assert "/tmp/custom-stop" in cmd
+    assert "/tmp/custom-violation" in cmd
     assert "poll_seconds=1" in cmd
+    assert "stop_grace_seconds=3" in cmd
+    assert "stop_kill_grace_seconds=2" in cmd
+    assert "stop_violation_pattern='verify[.]py'" in cmd
 
 
 if __name__ == "__main__":
