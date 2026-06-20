@@ -223,6 +223,67 @@ def _build_task_payload(
     )
 
 
+def _chunk_task_payloads(
+    payload: dict[str, Any],
+    *,
+    max_sessions_per_task: int | None,
+) -> list[dict[str, Any]]:
+    total_sessions = int(payload.get("num_samples") or 1)
+    if max_sessions_per_task is None or total_sessions <= max_sessions_per_task:
+        return [payload]
+    if max_sessions_per_task <= 0:
+        raise ValueError("max_sessions_per_task must be greater than 0")
+
+    base_task_id = str(payload["task_id"])
+    chunks: list[dict[str, Any]] = []
+    chunk_count = math.ceil(total_sessions / max_sessions_per_task)
+    for chunk_index, chunk_start in enumerate(range(0, total_sessions, max_sessions_per_task)):
+        chunk_size = min(max_sessions_per_task, total_sessions - chunk_start)
+        child = copy.deepcopy(payload)
+        child["task_id"] = f"{base_task_id}--part{chunk_index:03d}"
+        child["num_samples"] = chunk_size
+        metadata = child.get("metadata")
+        if metadata is None:
+            metadata = {}
+        if not isinstance(metadata, dict):
+            raise ValueError("polar task metadata must be a mapping when provided")
+        child["metadata"] = {
+            **metadata,
+            "parent_task_id": base_task_id,
+            "chunk_index": chunk_index,
+            "chunk_start": chunk_start,
+            "chunk_size": chunk_size,
+            "chunk_count": chunk_count,
+        }
+        chunks.append(child)
+    return chunks
+
+
+def _merge_task_results(parent_task_id: str, child_results: list[TaskResult]) -> TaskResult:
+    if not child_results:
+        return TaskResult(task_id=parent_task_id, status="failed", results=[])
+    if len(child_results) == 1 and child_results[0].task_id == parent_task_id:
+        return child_results[0]
+
+    merged_results = [
+        result
+        for child in child_results
+        for result in child.results
+    ]
+    result_paths = [
+        path
+        for child in child_results
+        for path in child.result_paths
+    ]
+    status = "completed" if all(child.status == "completed" for child in child_results) else "failed"
+    return TaskResult(
+        task_id=parent_task_id,
+        status=status,
+        results=merged_results,
+        result_paths=result_paths,
+    )
+
+
 def _attach_scheduler_metadata(
     payload: dict[str, Any],
     *,
@@ -281,6 +342,26 @@ async def _submit_and_wait_for_task(
         results=status.results,
         result_paths=status.result_paths,
     )
+
+
+async def _submit_payload_in_chunks(
+    payload: dict[str, Any],
+    *,
+    max_sessions_per_task: int | None,
+    submit_one: Any,
+) -> TaskResult:
+    """Submit one logical task, splitting session fanout into sequential child tasks."""
+    chunks = _chunk_task_payloads(
+        payload,
+        max_sessions_per_task=max_sessions_per_task,
+    )
+    if len(chunks) == 1:
+        return await submit_one(chunks[0])
+
+    child_results: list[TaskResult] = []
+    for chunk in chunks:
+        child_results.append(await submit_one(chunk))
+    return _merge_task_results(str(payload["task_id"]), child_results)
 
 
 def _resolve_max_tokens(args: Any) -> int | None:
@@ -772,7 +853,7 @@ class AsyncPolarRolloutWorker:
             policy_version=pending.policy_version,
             rollout_step=pending.submitted_rollout_id,
         )
-        task_result = await self._submit_with_callback(client, payload)
+        task_result = await self._submit_payload_with_callback(client, payload)
 
         rejection_reason = self._task_rejection_reason(task_result, pending.group)
         if rejection_reason is not None:
@@ -910,6 +991,27 @@ class AsyncPolarRolloutWorker:
             self._task_events.pop(task_id, None)
             self._task_results.pop(task_id, None)
 
+    async def _submit_payload_with_callback(
+        self, client: httpx.AsyncClient, payload: dict[str, Any]
+    ) -> TaskResult:
+        """Submit one logical Slime group, chunking Polar sessions if needed."""
+        chunks = _chunk_task_payloads(
+            payload,
+            max_sessions_per_task=self.config.max_sessions_per_task,
+        )
+        if len(chunks) > 1:
+            self._inc_metric("polar/chunked_tasks")
+            self._inc_metric("polar/task_chunks", len(chunks))
+
+        async def submit_one(chunk: dict[str, Any]) -> TaskResult:
+            return await self._submit_with_callback(client, chunk)
+
+        return await _submit_payload_in_chunks(
+            payload,
+            max_sessions_per_task=self.config.max_sessions_per_task,
+            submit_one=submit_one,
+        )
+
     async def _await_task_result(
         self,
         client: httpx.AsyncClient,
@@ -1040,7 +1142,15 @@ async def _submit_eval_groups(
                 policy_version=rollout_id,
                 rollout_step=rollout_id,
             )
-            return await _submit_and_wait_for_task(client, config.rollout_server_url, payload)
+
+            async def submit_one(chunk: dict[str, Any]) -> TaskResult:
+                return await _submit_and_wait_for_task(client, config.rollout_server_url, chunk)
+
+            return await _submit_payload_in_chunks(
+                payload,
+                max_sessions_per_task=config.max_sessions_per_task,
+                submit_one=submit_one,
+            )
 
     async with httpx.AsyncClient(timeout=timeout) as client:
         task_results = await asyncio.gather(
