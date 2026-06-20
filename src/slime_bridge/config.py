@@ -187,6 +187,7 @@ def render_topology_template(topology_path: str | Path, args: Any) -> dict[str, 
     router_url = resolve_sglang_router_base_url(args)
     if router_url is None:
         raise ValueError("sglang_router_ip and sglang_router_port must be set to render topology")
+    model_served = getattr(args, "polar_model_served_name", None)
 
     topology = TopologyConfig.load(topology_path)
     return {
@@ -207,7 +208,7 @@ def render_topology_template(topology_path: str | Path, args: Any) -> dict[str, 
                     "host": node.host,
                     "port": node.port,
                     "public_url": node.public_url,
-                    "model_served": node.model_served,
+                    "model_served": str(model_served).strip() if model_served else node.model_served,
                     "inference": {
                         "engine": "sglang",
                         "base_url": router_url,

@@ -6,6 +6,8 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from polar.runtime.models import RuntimeSpec
+
 
 # ---------------------------------------------------------------------------
 # Strategy / evaluator specs
@@ -26,6 +28,7 @@ class EvaluatorSpec(BaseModel):
     config: dict[str, Any] = Field(default_factory=dict)
     env: dict[str, str] = Field(default_factory=dict)
     refresh_runtime: bool = False
+    runtime: RuntimeSpec | None = None
 
 
 # ---------------------------------------------------------------------------

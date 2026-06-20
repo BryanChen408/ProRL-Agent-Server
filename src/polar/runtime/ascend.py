@@ -82,8 +82,9 @@ def ascend_create_args(cfg: dict) -> list[str]:
         args += ["-v", mount]
     for mount in cfg.get("mounts", []) or []:
         args += ["-v", str(mount)]
-    env = {"ASCEND_RT_VISIBLE_DEVICES": device_id}  # scope to the leased card (before any NPU init)
-    env.update(cfg.get("env", {}) or {})
+    env = dict(cfg.get("env", {}) or {})
+    # Always scope to the leased card, even if callers pass a generic env block.
+    env["ASCEND_RT_VISIBLE_DEVICES"] = device_id
     for key, value in env.items():
         args += ["-e", f"{key}={value}"]
     return args

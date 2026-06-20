@@ -68,8 +68,9 @@ class DockerRuntime(BaseRuntime):
         for vol in self.spec.kwargs.get("volumes", []):
             create_args.extend(["-v", vol])
         # Ascend NPU (operator-gen): allocate ONE free physical card from the pool (host flock,
-        # held for this container's lifetime), map it -> the container's davinci0. No --privileged /
-        # no -v /dev:/dev, so concurrent containers don't fight the DCMI exclusive lock (-8005).
+        # held for this container's lifetime), then apply the validated privileged + /dev:/dev
+        # passthrough recipe from polar.runtime.ascend. Concurrency safety comes from
+        # ASCEND_RT_VISIBLE_DEVICES plus the host lock, not hard per-device remapping.
         ascend = self.spec.kwargs.get("ascend")
         if ascend is not None:
             self._npu_lock = acquire_card(parse_pool(ascend.get("pool")), ascend.get("lock_dir", "/tmp/npu-locks"))

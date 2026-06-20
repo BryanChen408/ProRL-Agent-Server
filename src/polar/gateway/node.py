@@ -258,6 +258,11 @@ class GatewayNodeManager:
             )
         return spec
 
+    def _resolve_eval_runtime_spec(self, request: SessionDispatchRequest) -> RuntimeSpec:
+        if request.evaluator is not None and request.evaluator.runtime is not None:
+            return request.evaluator.runtime
+        return self._resolve_runtime_spec(request)
+
     async def _run_runtime_prepare(
         self,
         runtime: BaseRuntime,
@@ -422,7 +427,7 @@ class GatewayNodeManager:
     ) -> BaseRuntime | None:
         """Create and prepare a fresh runtime for the evaluator. Returns None on failure."""
         request = managed.request
-        runtime_spec = self._resolve_runtime_spec(request)
+        runtime_spec = self._resolve_eval_runtime_spec(request)
         eval_session_dir = managed.session_dir / "eval_runtime"
         eval_artifacts_dir = eval_session_dir / "artifacts"
         eval_artifacts_dir.mkdir(parents=True, exist_ok=True)
@@ -651,7 +656,9 @@ class GatewayNodeManager:
             raise RuntimeError("runtime is required for evaluation")
 
         fresh_eval_runtime: BaseRuntime | None = None
+        eval_runtime_spec = self._resolve_runtime_spec(request)
         if evaluator_spec.refresh_runtime:
+            eval_runtime_spec = self._resolve_eval_runtime_spec(request)
             fresh_eval_runtime = await self._acquire_prepared_eval_runtime(managed)
             if fresh_eval_runtime is None:
                 return trajectory.model_copy(
@@ -681,7 +688,7 @@ class GatewayNodeManager:
                     timeout_seconds=self._remaining_budget(managed),
                     runtime=live_runtime,
                     fresh_eval_runtime=fresh_eval_runtime,
-                    runtime_spec=request.runtime or self.default_runtime,
+                    runtime_spec=eval_runtime_spec,
                     refresh_runtime=evaluator_spec.refresh_runtime,
                 ),
                 managed,

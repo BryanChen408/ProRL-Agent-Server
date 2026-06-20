@@ -29,6 +29,7 @@ from __future__ import annotations
 
 from pathlib import Path
 import importlib.util
+import os
 
 
 SUPPORTED_SGLANG_VERSION = "0.5.10"
@@ -55,19 +56,30 @@ def revert_once(text: str, old: str, new: str) -> str:
     return text.replace(old, new, 1)
 
 
-import sglang  # noqa: E402
+root_override = os.environ.get("SGLANG_ROOT")
+if root_override:
+    root = Path(root_override).resolve()
+    print(f"SGLANG_ROOT override -> patching {root}")
+else:
+    import sglang  # noqa: E402
 
-if sglang.__version__ != SUPPORTED_SGLANG_VERSION:
-    fail(
-        f"patch_sglang.sh is pinned to sglang=={SUPPORTED_SGLANG_VERSION} "
-        f"but found {sglang.__version__}. Install the pinned version before patching."
-    )
+    if sglang.__version__ != SUPPORTED_SGLANG_VERSION:
+        if os.environ.get("SGLANG_ALLOW_VERSION_MISMATCH") != "1":
+            fail(
+                f"patch_sglang.sh is pinned to sglang=={SUPPORTED_SGLANG_VERSION} "
+                f"but found {sglang.__version__}. Install the pinned version before patching, "
+                "set SGLANG_ALLOW_VERSION_MISMATCH=1, or set SGLANG_ROOT=<dir>."
+            )
+        print(
+            f"WARNING: sglang {sglang.__version__} != pinned {SUPPORTED_SGLANG_VERSION}; "
+            "continuing because SGLANG_ALLOW_VERSION_MISMATCH=1"
+        )
 
-spec = importlib.util.find_spec("sglang")
-if spec is None or spec.origin is None:
-    fail("sglang is not installed in the active Python environment")
+    spec = importlib.util.find_spec("sglang")
+    if spec is None or spec.origin is None:
+        fail("sglang is not installed in the active Python environment")
 
-root = Path(spec.origin).resolve().parent
+    root = Path(spec.origin).resolve().parent
 protocol_path = root / "srt/entrypoints/openai/protocol.py"
 utils_path = root / "srt/entrypoints/openai/utils.py"
 serving_chat_path = root / "srt/entrypoints/openai/serving_chat.py"
@@ -96,6 +108,9 @@ protocol_text = replace_once(
     "    top_logprobs: List[Optional[Dict[str, float]]] = Field(default_factory=list)\n",
     label=str(protocol_path),
 )
+# Upgrade older Polar patches that added the field with a silent default. Token
+# id 0 is a valid vocabulary id, so missing data must fail rather than default.
+protocol_text = protocol_text.replace("    token_id: int = 0\n", "    token_id: int\n")
 protocol_text = replace_once(
     protocol_text,
     "class ChatCompletionTokenLogprob(BaseModel):\n"
@@ -105,7 +120,7 @@ protocol_text = replace_once(
     "    top_logprobs: List[TopLogprob]\n",
     "class ChatCompletionTokenLogprob(BaseModel):\n"
     "    token: str\n"
-    "    token_id: int = 0\n"
+    "    token_id: int\n"
     "    bytes: List[int]\n"
     "    logprob: float\n"
     "    top_logprobs: List[TopLogprob]\n",
@@ -354,6 +369,22 @@ serving_chat_text = replace_once(
     "                finish_reason = content[\"meta_info\"].get(\"finish_reason\", None)\n",
     label=str(serving_chat_path),
 )
+serving_chat_text = serving_chat_text.replace(
+    "            token_id = logprobs.token_ids[token_idx] if token_idx < len(logprobs.token_ids) else 0\n",
+    "            if len(logprobs.token_ids) != len(logprobs.token_logprobs):\n"
+    "                raise ValueError(\n"
+    "                    \"SGLang logprob token_id contract violated: \"\n"
+    "                    f\"len(token_ids)={len(logprobs.token_ids)} != \"\n"
+    "                    f\"len(token_logprobs)={len(logprobs.token_logprobs)}\"\n"
+    "                )\n"
+    "            if len(logprobs.tokens) != len(logprobs.token_logprobs):\n"
+    "                raise ValueError(\n"
+    "                    \"SGLang logprob token text contract violated: \"\n"
+    "                    f\"len(tokens)={len(logprobs.tokens)} != \"\n"
+    "                    f\"len(token_logprobs)={len(logprobs.token_logprobs)}\"\n"
+    "                )\n"
+    "            token_id = logprobs.token_ids[token_idx]\n",
+)
 serving_chat_text = replace_once(
     serving_chat_text,
     "                    async for chunk in self._process_tool_call_stream(\n"
@@ -512,7 +543,19 @@ serving_chat_text = replace_once(
     "        for token_idx, (token, logprob) in enumerate(\n"
     "            zip(logprobs.tokens, logprobs.token_logprobs)\n"
     "        ):\n"
-    "            token_id = logprobs.token_ids[token_idx] if token_idx < len(logprobs.token_ids) else 0\n"
+    "            if len(logprobs.token_ids) != len(logprobs.token_logprobs):\n"
+    "                raise ValueError(\n"
+    "                    \"SGLang logprob token_id contract violated: \"\n"
+    "                    f\"len(token_ids)={len(logprobs.token_ids)} != \"\n"
+    "                    f\"len(token_logprobs)={len(logprobs.token_logprobs)}\"\n"
+    "                )\n"
+    "            if len(logprobs.tokens) != len(logprobs.token_logprobs):\n"
+    "                raise ValueError(\n"
+    "                    \"SGLang logprob token text contract violated: \"\n"
+    "                    f\"len(tokens)={len(logprobs.tokens)} != \"\n"
+    "                    f\"len(token_logprobs)={len(logprobs.token_logprobs)}\"\n"
+    "                )\n"
+    "            token_id = logprobs.token_ids[token_idx]\n"
     "            token_bytes = list(token.encode(\"utf-8\"))\n"
     "            top_logprobs = []\n"
     "            if logprobs.top_logprobs:\n"
@@ -542,6 +585,19 @@ serving_chat_text = replace_once(
     label=str(serving_chat_path),
 )
 serving_chat_path.write_text(serving_chat_text)
+
+protocol_check = protocol_path.read_text()
+serving_chat_check = serving_chat_path.read_text()
+if "token_id: int = 0" in protocol_check:
+    fail("SGLang patch contract failed: unsafe token_id default remains in protocol.py")
+if "token_id = logprobs.token_ids[token_idx] if token_idx < len(logprobs.token_ids) else 0" in serving_chat_check:
+    fail("SGLang patch contract failed: unsafe token_id fallback remains in serving_chat.py")
+for needle in (
+    "SGLang logprob token_id contract violated",
+    "SGLang logprob token text contract violated",
+):
+    if needle not in serving_chat_check:
+        fail(f"SGLang patch contract failed: missing strict check {needle!r}")
 
 print(f"Patched SGLang in {root}")
 PY
@@ -580,11 +636,29 @@ response = fetch_json(
 )
 
 choice = response["choices"][0]
-content = (choice.get("logprobs") or {}).get("content") or []
-if not isinstance(choice.get("input_token_ids"), list):
-    raise SystemExit("Patch smoke test failed: missing choice.input_token_ids")
-if not content or content[0].get("token_id") is None:
-    raise SystemExit("Patch smoke test failed: missing logprobs.content[].token_id")
+input_token_ids = choice.get("input_token_ids")
+if not isinstance(input_token_ids, list) or not input_token_ids:
+    raise SystemExit("Patch smoke test failed: missing/nonempty choice.input_token_ids")
+
+content = (choice.get("logprobs") or {}).get("content")
+if not isinstance(content, list) or not content:
+    raise SystemExit("Patch smoke test failed: missing/nonempty choice.logprobs.content")
+
+for idx, item in enumerate(content):
+    if not isinstance(item, dict):
+        raise SystemExit(f"Patch smoke test failed: logprobs.content[{idx}] is not an object")
+    if "token_id" not in item or item["token_id"] is None:
+        raise SystemExit(f"Patch smoke test failed: missing logprobs.content[{idx}].token_id")
+    if "logprob" not in item or item["logprob"] is None:
+        raise SystemExit(f"Patch smoke test failed: missing logprobs.content[{idx}].logprob")
+
+token_ids = [item["token_id"] for item in content]
+logprobs = [item["logprob"] for item in content]
+if len(token_ids) != len(logprobs):
+    raise SystemExit(
+        f"Patch smoke test failed: response token/logprob length mismatch "
+        f"{len(token_ids)} != {len(logprobs)}"
+    )
 
 print("SGLang patch smoke test passed")
 PY

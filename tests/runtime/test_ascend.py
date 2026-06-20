@@ -50,12 +50,35 @@ def test_recipe_scopes_to_one_card():
     # RT=<physical card> (scope -> concurrency-safe).
     args = ascend_create_args({"device_id": 9})
     assert "--privileged" in args
+    assert "--ipc" in args
+    assert "host" in _vals(args, "--ipc")
+    assert "--shm-size" in args
+    assert "500g" in _vals(args, "--shm-size")
     vols = _vals(args, "-v")
     assert "/dev:/dev" in vols
+    assert "/usr/local/Ascend/driver:/usr/local/Ascend/driver:ro" in vols
+    assert "/usr/local/Ascend/firmware:/usr/local/Ascend/firmware:ro" in vols
     assert "/usr/local/dcmi:/usr/local/dcmi:ro" in vols
     assert "/usr/local/bin/npu-smi:/usr/local/bin/npu-smi:ro" in vols
+    assert "/etc/ascend_install.info:/etc/ascend_install.info:ro" in vols
+    assert "/usr/local/sbin:/usr/local/sbin:ro" in vols
     env = dict(p.split("=", 1) for p in _vals(args, "-e"))
     assert env["ASCEND_RT_VISIBLE_DEVICES"] == "9"         # scope to the leased physical card
+
+
+def test_recipe_env_cannot_override_leased_device():
+    args = ascend_create_args(
+        {
+            "device_id": 9,
+            "env": {"ASCEND_RT_VISIBLE_DEVICES": "0", "CUSTOM_FLAG": "1"},
+            "mounts": ["/host/tools:/tools:ro"],
+        }
+    )
+
+    env = dict(p.split("=", 1) for p in _vals(args, "-e"))
+    assert env["ASCEND_RT_VISIBLE_DEVICES"] == "9"
+    assert env["CUSTOM_FLAG"] == "1"
+    assert "/host/tools:/tools:ro" in _vals(args, "-v")
 
 
 def test_no_per_card_device_remap():

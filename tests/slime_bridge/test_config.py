@@ -141,3 +141,27 @@ gateway:
     node = rendered["gateway"]["nodes"][0]
     assert node["inference"] == {"engine": "sglang", "base_url": "http://127.0.0.1:30000"}
     assert "sglang" not in node
+
+
+def test_render_topology_template_can_override_model_served(tmp_path) -> None:
+    topology_path = tmp_path / "topology.yaml"
+    topology_path.write_text(
+        """
+rollout: {host: 127.0.0.1, port: 8080, public_url: http://127.0.0.1:8080}
+gateway:
+  nodes:
+    - id: n1
+      host: 127.0.0.1
+      port: 8100
+      public_url: http://127.0.0.1:8100
+      model_served: placeholder
+      inference: {engine: sglang, base_url: http://127.0.0.1:8000}
+""".strip()
+    )
+
+    rendered = render_topology_template(
+        str(topology_path),
+        _args(polar_model_served_name="/models/Qwen3"),
+    )
+
+    assert rendered["gateway"]["nodes"][0]["model_served"] == "/models/Qwen3"

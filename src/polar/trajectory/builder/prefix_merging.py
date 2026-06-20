@@ -39,6 +39,7 @@ from __future__ import annotations
 
 import logging
 from copy import deepcopy
+from dataclasses import dataclass
 from typing import Any
 
 from polar.trajectory.builder.base import BaseTrajectoryBuilder
@@ -49,6 +50,13 @@ logger = logging.getLogger(__name__)
 
 # finish_reasons where the model emitted the natural end-of-turn token itself.
 _NATURAL_STOP_REASONS = frozenset({"stop", "tool_calls", "stop_sequence"})
+
+
+@dataclass(frozen=True, slots=True)
+class _FinalizedChain:
+    trace: Trace
+    kept_count: int
+    break_reason: str | None = None
 
 
 class PrefixMergingBuilder(BaseTrajectoryBuilder):
@@ -100,14 +108,43 @@ class PrefixMergingBuilder(BaseTrajectoryBuilder):
             chains[chain_idx].append(completion)
             chain_tips[chain_idx] = prompt_ids
 
-        stats: dict[str, int] = {
+        stats: dict[str, Any] = {
             "chains_total": len(chains),
             "chains_reconstructed_full": 0,
             "chains_reconstructed_truncated": 0,
             "completions_total": len(session.completions),
             "completions_merged": 0,
+            "completions_preserved": 0,
+            "completions_dropped": 0,
+            "break_reasons": {},
         }
-        final_traces = [self._finalize_chain(chain, stats) for chain in chains]
+        final_traces: list[Trace] = []
+        for chain_index, chain in enumerate(chains):
+            start = 0
+            segment_index = 0
+            chain_had_break = False
+            while start < len(chain):
+                finalized = self._finalize_chain(
+                    chain[start:],
+                    chain_index=chain_index,
+                    chain_length=len(chain),
+                    segment_index=segment_index,
+                    segment_start=start,
+                )
+                final_traces.append(finalized.trace)
+                stats["completions_preserved"] += finalized.kept_count
+                if finalized.kept_count > 1:
+                    stats["completions_merged"] += finalized.kept_count
+                if finalized.break_reason:
+                    chain_had_break = True
+                    self._increment_break_reason(stats, finalized.break_reason)
+                start += finalized.kept_count
+                segment_index += 1
+
+            if chain_had_break:
+                stats["chains_reconstructed_truncated"] += 1
+            else:
+                stats["chains_reconstructed_full"] += 1
 
         return Trajectory(
             status="COMPLETED",
@@ -120,7 +157,7 @@ class PrefixMergingBuilder(BaseTrajectoryBuilder):
                 "model_used": session.model_used,
                 "record_count": len(session.completions),
                 "task_metadata": dict(session.metadata),
-                "trace_count": len(chains),
+                "trace_count": len(final_traces),
                 "reconstruction_stats": stats,
                 **_top_level_scheduler_metadata(session.metadata),
             },
@@ -134,8 +171,12 @@ class PrefixMergingBuilder(BaseTrajectoryBuilder):
     def _finalize_chain(
         self,
         chain: list[CompletionRecord],
-        stats: dict[str, int],
-    ) -> Trace:
+        *,
+        chain_index: int,
+        chain_length: int,
+        segment_index: int,
+        segment_start: int,
+    ) -> _FinalizedChain:
         # Everything in C_1.prompt_ids is the non-trainable
         # prompt; C_1.response_ids plus every subsequent raw response +
         # canonical interstitial becomes the trainable response.  No role-shape
@@ -163,6 +204,7 @@ class PrefixMergingBuilder(BaseTrajectoryBuilder):
         response_messages.extend(deepcopy(m) for m in first_trace.response_messages)
         msg_acc += len(first_trace.response_messages)
         kept = 1
+        break_reason: str | None = None
 
         for i in range(1, len(chain)):
             Ci_trace = build_trace_from_completion(chain[i])
@@ -180,10 +222,19 @@ class PrefixMergingBuilder(BaseTrajectoryBuilder):
                     i,
                     len(chain),
                 )
+                break_reason = "canonical_prefix_break"
                 break
 
             # canonical_tail = canonical tokens for [prev assistant msg + new interstitials].
             canonical_tail = Ci_prompt_ids[len(prev_prompt_ids):]
+            if eot_id is None:
+                logger.debug(
+                    "prefix_merging: eot unavailable at step %d/%d",
+                    i,
+                    len(chain),
+                )
+                break_reason = "eot_unavailable"
+                break
             interstitial = self._slice_interstitial(
                 canonical_tail=canonical_tail,
                 prev_raw_response=prev_raw_response,
@@ -198,6 +249,7 @@ class PrefixMergingBuilder(BaseTrajectoryBuilder):
                     eot_id,
                     len(canonical_tail),
                 )
+                break_reason = "interstitial_split_failed"
                 break
 
             if interstitial:
@@ -219,17 +271,11 @@ class PrefixMergingBuilder(BaseTrajectoryBuilder):
             prev_raw_response = list(Ci_trace.response_ids)
             kept += 1
 
-        stats["completions_merged"] += kept
-        if kept == len(chain):
-            stats["chains_reconstructed_full"] += 1
-        else:
-            stats["chains_reconstructed_truncated"] += 1
-
         response_ids = stream_ids[len(prompt_ids):]
         response_logprobs = self._finalize_logprobs(response_slots)
         last_kept_trace = build_trace_from_completion(chain[kept - 1])
 
-        return Trace(
+        trace = Trace(
             prompt_ids=prompt_ids,
             response_ids=response_ids,
             loss_mask=loss_mask,
@@ -238,8 +284,17 @@ class PrefixMergingBuilder(BaseTrajectoryBuilder):
             tools=deepcopy(first_trace.tools),
             finish_reason=last_kept_trace.finish_reason,
             response_logprobs=response_logprobs,
-            metadata=self._chain_metadata(chain[:kept]),
+            metadata=self._chain_metadata(
+                chain[:kept],
+                chain_index=chain_index,
+                chain_length=chain_length,
+                segment_index=segment_index,
+                segment_start=segment_start,
+                kept_completion_count=kept,
+                break_reason=break_reason,
+            ),
         )
+        return _FinalizedChain(trace=trace, kept_count=kept, break_reason=break_reason)
 
     # ------------------------------------------------------------------
     # Helpers
@@ -325,11 +380,33 @@ class PrefixMergingBuilder(BaseTrajectoryBuilder):
         return [slot if slot is not None else 0.0 for slot in slots]
 
     @staticmethod
-    def _chain_metadata(chain: list[CompletionRecord]) -> dict[str, Any]:
+    def _chain_metadata(
+        chain: list[CompletionRecord],
+        *,
+        chain_index: int,
+        chain_length: int,
+        segment_index: int,
+        segment_start: int,
+        kept_completion_count: int,
+        break_reason: str | None,
+    ) -> dict[str, Any]:
         completion_metadata = [dict(completion.metadata) for completion in chain]
         merged = dict(completion_metadata[0]) if completion_metadata else {}
         merged["completion_metadata"] = completion_metadata
+        merged["chain_index"] = chain_index
+        merged["chain_length"] = chain_length
+        merged["chain_segment_index"] = segment_index
+        merged["chain_segment_start"] = segment_start
+        merged["source_completion_ids"] = [completion.completion_id for completion in chain]
+        merged["kept_completion_count"] = kept_completion_count
+        if break_reason:
+            merged["break_reason"] = break_reason
         return merged
+
+    @staticmethod
+    def _increment_break_reason(stats: dict[str, Any], reason: str) -> None:
+        reasons = stats.setdefault("break_reasons", {})
+        reasons[reason] = int(reasons.get(reason, 0)) + 1
 
     @staticmethod
     def _find_extendable_chain(
