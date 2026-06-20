@@ -7,23 +7,31 @@ from typing import Any
 
 from polar.trajectory.models import CompletionRecord, Trace
 
+_THINK_END_TOKEN = "</think>"
+
+
+def _logprob_content(choice: dict[str, Any]) -> list[Any] | None:
+    logprobs = choice.get("logprobs")
+    if not isinstance(logprobs, dict):
+        return None
+    content = logprobs.get("content")
+    return content if isinstance(content, list) else None
+
 
 def _extract_response_ids(response: dict[str, Any], choice: dict[str, Any]) -> list[int]:
     token_ids = choice.get("token_ids", response.get("token_ids"))
     if isinstance(token_ids, list):
         return list(token_ids)
 
-    logprobs = choice.get("logprobs")
-    if isinstance(logprobs, dict):
-        content = logprobs.get("content")
-        if isinstance(content, list):
-            extracted = [
-                int(item["token_id"])
-                for item in content
-                if isinstance(item, dict) and item.get("token_id") is not None
-            ]
-            if extracted:
-                return extracted
+    content = _logprob_content(choice)
+    if isinstance(content, list):
+        extracted = [
+            int(item["token_id"])
+            for item in content
+            if isinstance(item, dict) and item.get("token_id") is not None
+        ]
+        if extracted:
+            return extracted
     return []
 
 
@@ -33,14 +41,12 @@ def _extract_response_logprobs(choice: dict[str, Any]) -> list[float] | None:
     The token id is intentionally dropped -- it is already in ``response_ids``
     at the same index; only the float is needed for training.
     """
-    logprobs = choice.get("logprobs")
-    if isinstance(logprobs, dict):
-        content = logprobs.get("content")
-        if isinstance(content, list):
-            return [
-                float(item.get("logprob", 0.0)) if isinstance(item, dict) else 0.0
-                for item in content
-            ]
+    content = _logprob_content(choice)
+    if isinstance(content, list):
+        return [
+            float(item.get("logprob", 0.0)) if isinstance(item, dict) else 0.0
+            for item in content
+        ]
     return None
 
 
@@ -56,8 +62,7 @@ def _logprob_integrity(choice: dict[str, Any], response_ids: list[int]) -> dict[
     Non-fatal here (keeps capture robust); recorded into trace.metadata so the rllm adapter
     (normalize_trace, which has per-task error handling) can REJECT the trace before it trains.
     """
-    lg = choice.get("logprobs")
-    content = lg.get("content") if isinstance(lg, dict) else None
+    content = _logprob_content(choice)
     if not isinstance(content, list):
         return {}
     misattributed = missing = 0
@@ -71,6 +76,38 @@ def _logprob_integrity(choice: dict[str, Any], response_ids: list[int]) -> dict[
         if tid is not None and i < len(response_ids) and int(tid) != int(response_ids[i]):
             misattributed += 1
     return {"misattributed": misattributed, "missing": missing} if (misattributed or missing) else {}
+
+
+def _response_loss_mask(
+    choice: dict[str, Any], response_message: Any, response_ids: list[int]
+) -> tuple[list[int], dict[str, Any]]:
+    """Mask parsed Qwen-style hidden reasoning without changing token/logprob alignment."""
+
+    mask = [1] * len(response_ids)
+    if not mask or not isinstance(response_message, dict):
+        return mask, {}
+
+    reasoning_content = response_message.get("reasoning_content")
+    if not reasoning_content:
+        return mask, {}
+
+    content = _logprob_content(choice)
+    if not isinstance(content, list):
+        return mask, {"masked_tokens": 0, "reason": "missing_logprobs_content"}
+
+    end_index = None
+    for idx, item in enumerate(content[: len(mask)]):
+        if isinstance(item, dict) and item.get("token") == _THINK_END_TOKEN:
+            end_index = idx
+            break
+
+    if end_index is None:
+        return mask, {"masked_tokens": 0, "reason": "think_end_token_not_found"}
+
+    masked_tokens = end_index + 1
+    for idx in range(masked_tokens):
+        mask[idx] = 0
+    return mask, {"masked_tokens": masked_tokens, "end_token_index": end_index}
 
 
 def _extract_prompt_messages(request: dict[str, Any]) -> list[dict[str, Any]]:
@@ -112,11 +149,14 @@ def build_trace_from_completion(completion: CompletionRecord) -> Trace:
     integ = _logprob_integrity(first_choice, response_ids)
     if integ:
         md = {**(md if isinstance(md, dict) else {}), "logprob_integrity": integ}
+    loss_mask, reasoning_mask = _response_loss_mask(first_choice, response_message, response_ids)
+    if reasoning_mask:
+        md = {**(md if isinstance(md, dict) else {}), "reasoning_loss_mask": reasoning_mask}
 
     return Trace(
         prompt_ids=list(prompt_ids) if isinstance(prompt_ids, list) else [],
         response_ids=response_ids,
-        loss_mask=[1] * len(response_ids),
+        loss_mask=loss_mask,
         prompt_messages=_extract_prompt_messages(request),
         response_messages=[deepcopy(response_message)] if isinstance(response_message, dict) else [],
         tools=_extract_tools(request),

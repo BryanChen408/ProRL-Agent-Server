@@ -80,6 +80,53 @@ def test_linear_main_agent_tool_chain_merges_with_interstitial_masked() -> None:
     assert trajectory.metadata["reconstruction_stats"]["completions_dropped"] == 0
 
 
+def test_prefix_merge_preserves_reasoning_loss_mask() -> None:
+    records = [
+        CompletionRecord(
+            completion_id="00-main1",
+            request={"messages": [{"role": "user", "content": "q"}]},
+            response={
+                "choices": [
+                    {
+                        "input_token_ids": [1, 2],
+                        "message": {
+                            "role": "assistant",
+                            "reasoning_content": "Need a plan.",
+                            "content": "main1",
+                        },
+                        "finish_reason": "stop",
+                        "logprobs": {
+                            "content": [
+                                {"token": "Need", "token_id": 10, "logprob": -0.01},
+                                {"token": "</think>", "token_id": 11, "logprob": -0.02},
+                                {"token": "main1", "token_id": 12, "logprob": -0.03},
+                                {"token": f"t{EOT}", "token_id": EOT, "logprob": -0.04},
+                            ]
+                        },
+                    }
+                ]
+            },
+        ),
+        _record(
+            "01-main2",
+            [1, 2, 10, 11, 12, EOT, 50],
+            [20, EOT],
+            prompt_messages=[
+                {"role": "user", "content": "q"},
+                {"role": "assistant", "content": "main1"},
+                {"role": "tool", "content": "tool-result"},
+            ],
+        ),
+    ]
+
+    trajectory = _build(records)
+    trace = trajectory.traces[0]
+
+    assert trace.response_ids == [10, 11, 12, EOT, 50, 20, EOT]
+    assert trace.loss_mask == [0, 0, 1, 1, 0, 1, 1]
+    assert trace.response_logprobs == [-0.01, -0.02, -0.03, -0.04, 0.0, -0.01, -0.02]
+
+
 def test_interleaved_main_and_subagent_prefixes_form_separate_chains() -> None:
     records = [
         _record("00-main1", [1], [10, EOT], metadata={"agent": "main"}),

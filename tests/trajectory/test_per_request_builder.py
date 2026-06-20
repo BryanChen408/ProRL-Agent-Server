@@ -76,6 +76,50 @@ def test_per_request_builder_emits_one_trace_per_completion() -> None:
     assert "logprob_integrity" not in (trace.metadata or {})
 
 
+def test_qwen_reasoning_tokens_are_loss_masked_without_changing_token_alignment() -> None:
+    session = CompletionSession(
+        session_id="session-1",
+        completions=[
+            CompletionRecord(
+                completion_id="completion-1",
+                request={"messages": [{"role": "user", "content": "Write code"}]},
+                response={
+                    "choices": [
+                        {
+                            "input_token_ids": [1, 2],
+                            "message": {
+                                "role": "assistant",
+                                "reasoning_content": "Need a plan.",
+                                "content": "Use the tool.",
+                            },
+                            "finish_reason": "tool_calls",
+                            "logprobs": {
+                                "content": [
+                                    {"token": "Need", "token_id": 10, "logprob": -0.1},
+                                    {"token": "</think>", "token_id": 11, "logprob": -0.2},
+                                    {"token": "\n\n", "token_id": 12, "logprob": -0.3},
+                                    {"token": "Use", "token_id": 13, "logprob": -0.4},
+                                ]
+                            },
+                        }
+                    ]
+                },
+                metadata={},
+            )
+        ],
+    )
+
+    trace = asyncio.run(PerRequestBuilder().build(session)).traces[0]
+
+    assert trace.response_ids == [10, 11, 12, 13]
+    assert trace.response_logprobs == [-0.1, -0.2, -0.3, -0.4]
+    assert trace.loss_mask == [0, 0, 1, 1]
+    assert trace.metadata["reasoning_loss_mask"] == {
+        "masked_tokens": 2,
+        "end_token_index": 1,
+    }
+
+
 def test_logprob_integrity_flagged_for_misattribution_and_missing() -> None:
     # content[1].token_id (99) != response token_ids[1] (4) -> misattributed; content[0] has no
     # logprob -> would be silently 0.0-filled (fake prob 1.0) -> missing. record_utils must flag both
