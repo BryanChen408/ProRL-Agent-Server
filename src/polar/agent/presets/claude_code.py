@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import shlex
+import textwrap
 
 from polar.agent.base import BaseHarness
 from polar.agent.models import AgentSpec
@@ -99,12 +100,57 @@ class ClaudeCodeHarness(BaseHarness):
             ):
                 env[alias] = self.model_name
 
-        return [
-            ExecInput(
-                command=(
-                    f"claude {flags_str}{model_flag} -p {escaped} "
-                    f"2>&1 | tee {RUNTIME_AGENT_LOG_DIR}/claude-code.txt"
-                ),
-                env=env,
+        claude_command = f"claude {flags_str}{model_flag} -p {escaped}"
+        if self.settings.get("stop_supervisor", True):
+            command = self._supervised_command(claude_command)
+        else:
+            command = f"{claude_command} 2>&1 | tee {RUNTIME_AGENT_LOG_DIR}/claude-code.txt"
+
+        return [ExecInput(command=command, env=env)]
+
+    def _supervised_command(self, claude_command: str) -> str:
+        stop_file = str(
+            self.settings.get("stop_file")
+            or f"{RUNTIME_SESSION_DIR}/.polar/STOP_NOW"
+        )
+        poll_seconds = str(self.settings.get("stop_poll_seconds", 5))
+        log_path = f"{RUNTIME_AGENT_LOG_DIR}/claude-code.txt"
+        supervisor_log = f"{RUNTIME_AGENT_LOG_DIR}/claude-supervisor.txt"
+        script = f"""
+            set -euo pipefail
+            mkdir -p {shlex.quote(RUNTIME_AGENT_LOG_DIR)}
+            stop_file={shlex.quote(stop_file)}
+            poll_seconds={shlex.quote(poll_seconds)}
+            log_path={shlex.quote(log_path)}
+            supervisor_log={shlex.quote(supervisor_log)}
+            set +e
+            (
+              set -m
+              {claude_command} 2>&1 | tee "$log_path" &
+              claude_pid=$!
+              echo "[polar-supervisor] claude_pid=$claude_pid stop_file=$stop_file poll=${{poll_seconds}}s" >> "$supervisor_log"
+              stop_requested=0
+              while kill -0 "$claude_pid" 2>/dev/null; do
+                if [ -f "$stop_file" ]; then
+                  stop_requested=1
+                  echo "[polar-supervisor] STOP_NOW detected at $(date -Is)" >> "$supervisor_log"
+                  kill -TERM -- "-$claude_pid" 2>/dev/null || kill -TERM "$claude_pid" 2>/dev/null || true
+                  sleep 5
+                  if kill -0 "$claude_pid" 2>/dev/null; then
+                    kill -KILL -- "-$claude_pid" 2>/dev/null || kill -KILL "$claude_pid" 2>/dev/null || true
+                  fi
+                  break
+                fi
+                sleep "$poll_seconds"
+              done
+              wait "$claude_pid"
+              rc=$?
+              if [ "$stop_requested" = "1" ]; then
+                echo "[polar-supervisor] returning success after policy stop; claude_rc=$rc" >> "$supervisor_log"
+                exit 0
+              fi
+              echo "[polar-supervisor] claude exited rc=$rc" >> "$supervisor_log"
+              exit "$rc"
             )
-        ]
+        """
+        return textwrap.dedent(script).strip()

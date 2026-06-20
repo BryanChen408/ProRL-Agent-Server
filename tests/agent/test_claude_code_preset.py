@@ -60,6 +60,28 @@ def test_baseline_flags_preserved():
     assert "--model" in cmd and "qwen35" in cmd
 
 
+def test_stop_supervisor_enabled_by_default():
+    cmd = _cmd({"disallowed_tools": _BAN})
+    assert "/polar/session/.polar/STOP_NOW" in cmd
+    assert "polar-supervisor" in cmd
+    assert "returning success after policy stop" in cmd
+    assert "exit 0" in cmd
+    assert "claude " in cmd
+
+
+def test_stop_supervisor_can_be_disabled():
+    cmd = _cmd({"stop_supervisor": False})
+    assert "polar-supervisor" not in cmd
+    assert "/polar/session/.polar/STOP_NOW" not in cmd
+    assert "2>&1 | tee /polar/session/logs/agent/claude-code.txt" in cmd
+
+
+def test_stop_supervisor_custom_stop_file():
+    cmd = _cmd({"stop_file": "/tmp/custom-stop", "stop_poll_seconds": 1})
+    assert "/tmp/custom-stop" in cmd
+    assert "poll_seconds=1" in cmd
+
+
 if __name__ == "__main__":
     if not _DEPS:
         print(f"[skip] polar/pydantic not importable: {_IMPORT_ERR}")
