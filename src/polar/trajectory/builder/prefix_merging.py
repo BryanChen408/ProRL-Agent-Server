@@ -43,6 +43,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from polar.trajectory.builder.base import BaseTrajectoryBuilder
+from polar.trajectory.builder.record_filters import filter_trainable_completions
 from polar.trajectory.builder.record_utils import build_trace_from_completion
 from polar.trajectory.models import CompletionRecord, CompletionSession, Trace, Trajectory
 
@@ -81,6 +82,7 @@ class PrefixMergingBuilder(BaseTrajectoryBuilder):
         self._configured_eot_id = end_of_turn_token_id
 
     async def build(self, session: CompletionSession) -> Trajectory:
+        filter_result = filter_trainable_completions(session.completions)
         if not session.completions:
             return Trajectory(
                 status="ERROR",
@@ -94,11 +96,25 @@ class PrefixMergingBuilder(BaseTrajectoryBuilder):
                 traces=[],
                 error="no completions",
             )
+        if not filter_result.kept:
+            return Trajectory(
+                status="ERROR",
+                metadata={
+                    "builder": "prefix_merging",
+                    "session_id": session.session_id,
+                    "task_metadata": dict(session.metadata),
+                    "record_count": len(session.completions),
+                    "completion_filter": filter_result.metadata,
+                    **_top_level_scheduler_metadata(session.metadata),
+                },
+                traces=[],
+                error="no trainable completions after completion filter",
+            )
 
         chains: list[list[CompletionRecord]] = []
         chain_tips: list[list[int]] = []  # last completion's prompt_ids, per chain
 
-        for completion in session.completions:
+        for completion in filter_result.kept:
             prompt_ids = build_trace_from_completion(completion).prompt_ids
             chain_idx = self._find_extendable_chain(prompt_ids, chain_tips)
             if chain_idx is None:
@@ -112,7 +128,8 @@ class PrefixMergingBuilder(BaseTrajectoryBuilder):
             "chains_total": len(chains),
             "chains_reconstructed_full": 0,
             "chains_reconstructed_truncated": 0,
-            "completions_total": len(session.completions),
+            "raw_completions_total": len(session.completions),
+            "completions_total": len(filter_result.kept),
             "completions_merged": 0,
             "completions_preserved": 0,
             "completions_dropped": 0,
@@ -159,6 +176,7 @@ class PrefixMergingBuilder(BaseTrajectoryBuilder):
                 "task_metadata": dict(session.metadata),
                 "trace_count": len(final_traces),
                 "reconstruction_stats": stats,
+                "completion_filter": filter_result.metadata,
                 **_top_level_scheduler_metadata(session.metadata),
             },
             traces=final_traces,

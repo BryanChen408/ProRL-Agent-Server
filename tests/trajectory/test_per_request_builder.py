@@ -33,6 +33,7 @@ def test_per_request_builder_emits_one_trace_per_completion() -> None:
         completions=[
             CompletionRecord(
                 completion_id="completion-1",
+                timestamp="2026-01-01T00:00:00+00:00",
                 request={
                     "messages": [{"role": "user", "content": "Say hi"}],
                     "tools": [{"type": "function", "function": {"name": "lookup"}}],
@@ -74,6 +75,103 @@ def test_per_request_builder_emits_one_trace_per_completion() -> None:
     assert trace.response_logprobs == [-0.1, -0.2]
     # healthy completion -> no integrity flag added (zero behavior change)
     assert "logprob_integrity" not in (trace.metadata or {})
+
+
+def test_per_request_builder_filters_non_trainable_completions() -> None:
+    session = CompletionSession(
+        session_id="session-1",
+        completions=[
+            _normal_record("keep-1", [1], [10]),
+            _side_read_record("side-1"),
+            _truncated_record("truncated-1"),
+            _empty_record("empty-1"),
+        ],
+    )
+
+    trajectory = asyncio.run(PerRequestBuilder().build(session))
+
+    assert trajectory.status == "COMPLETED"
+    assert len(trajectory.traces) == 1
+    assert "source_completion_ids" not in trajectory.traces[0].metadata
+    assert trajectory.metadata["record_count"] == 4
+    assert trajectory.metadata["trace_count"] == 1
+    completion_filter = trajectory.metadata["completion_filter"]
+    assert completion_filter["input_completions"] == 4
+    assert completion_filter["kept_completions"] == 1
+    assert completion_filter["excluded_completions"] == 3
+    assert completion_filter["excluded_reasons"] == {
+        "empty_completion": 1,
+        "non_agent_side_completion": 1,
+        "persisted_truncated_completion": 1,
+    }
+    assert set(completion_filter["excluded_completion_ids"]) == {
+        "side-1",
+        "truncated-1",
+        "empty-1",
+    }
+    assert {
+        (item["completion_id"], item["reason"])
+        for item in completion_filter["excluded"]
+    } == {
+        ("side-1", "non_agent_side_completion"),
+        ("truncated-1", "persisted_truncated_completion"),
+        ("empty-1", "empty_completion"),
+    }
+
+
+def test_per_request_builder_returns_error_when_filter_removes_everything() -> None:
+    session = CompletionSession(
+        session_id="session-1",
+        completions=[
+            _side_read_record("side-1"),
+            _empty_record("empty-1"),
+        ],
+    )
+
+    trajectory = asyncio.run(PerRequestBuilder().build(session))
+
+    assert trajectory.status == "ERROR"
+    assert trajectory.error == "no trainable completions after completion filter"
+    assert trajectory.traces == []
+    assert set(trajectory.metadata["completion_filter"]["excluded_completion_ids"]) == {
+        "side-1",
+        "empty-1",
+    }
+
+
+def test_per_request_builder_keeps_normal_single_user_request_with_tools() -> None:
+    session = CompletionSession(
+        session_id="session-1",
+        completions=[
+            CompletionRecord(
+                completion_id="keep",
+                original_request={
+                    "messages": [{"role": "user", "content": "# Triton Ascend 基础知识参考手册"}],
+                    "tools": [{"type": "function", "function": {"name": "Read"}}],
+                },
+                request={
+                    "messages": [{"role": "user", "content": "# Triton Ascend 基础知识参考手册"}],
+                    "tools": [{"type": "function", "function": {"name": "Read"}}],
+                },
+                response={
+                    "choices": [
+                        {
+                            "input_token_ids": [1],
+                            "message": {"role": "assistant", "content": "ok"},
+                            "finish_reason": "stop",
+                            "logprobs": {"content": [{"token_id": 10, "logprob": -0.1}]},
+                        }
+                    ]
+                },
+            )
+        ],
+    )
+
+    trajectory = asyncio.run(PerRequestBuilder().build(session))
+
+    assert trajectory.status == "COMPLETED"
+    assert len(trajectory.traces) == 1
+    assert trajectory.metadata["completion_filter"]["excluded_completions"] == 0
 
 
 def test_qwen_reasoning_tokens_are_loss_masked_without_changing_token_alignment() -> None:
@@ -140,3 +238,75 @@ def test_logprob_integrity_flagged_for_misattribution_and_missing() -> None:
     )
     trace = asyncio.run(PerRequestBuilder().build(session)).traces[0]
     assert trace.metadata["logprob_integrity"] == {"misattributed": 1, "missing": 1}
+
+
+def _normal_record(
+    completion_id: str,
+    prompt_ids: list[int],
+    response_ids: list[int],
+) -> CompletionRecord:
+    return CompletionRecord(
+        completion_id=completion_id,
+        timestamp=f"2026-01-01T00:00:{len(completion_id):02d}+00:00",
+        request={"messages": [{"role": "user", "content": completion_id}]},
+        response={
+            "choices": [
+                {
+                    "input_token_ids": prompt_ids,
+                    "message": {"role": "assistant", "content": completion_id},
+                    "finish_reason": "stop",
+                    "logprobs": {
+                        "content": [
+                            {"token_id": token_id, "logprob": -0.1}
+                            for token_id in response_ids
+                        ]
+                    },
+                }
+            ]
+        },
+    )
+
+
+def _side_read_record(completion_id: str) -> CompletionRecord:
+    request = {
+        "messages": [
+            {
+                "role": "user",
+                "content": "# Triton Ascend 基础知识参考手册\n\n本文档汇集 Triton Ascend 编程的基础知识。",
+            }
+        ],
+    }
+    return CompletionRecord(
+        completion_id=completion_id,
+        timestamp=f"2026-01-01T00:00:{len(completion_id):02d}+00:00",
+        original_request=request,
+        request=request,
+        response={
+            "choices": [
+                {
+                    "input_token_ids": [1],
+                    "message": {"role": "assistant", "content": "doc review"},
+                    "finish_reason": "stop",
+                    "logprobs": {"content": [{"token_id": 10, "logprob": -0.1}]},
+                }
+            ]
+        },
+    )
+
+
+def _truncated_record(completion_id: str) -> CompletionRecord:
+    return CompletionRecord(
+        completion_id=completion_id,
+        timestamp=f"2026-01-01T00:00:{len(completion_id):02d}+00:00",
+        request={"messages": [{"role": "user", "content": completion_id}]},
+        response={"id": "r1", "__truncated": True},
+    )
+
+
+def _empty_record(completion_id: str) -> CompletionRecord:
+    return CompletionRecord(
+        completion_id=completion_id,
+        timestamp=f"2026-01-01T00:00:{len(completion_id):02d}+00:00",
+        request={"messages": [{"role": "user", "content": completion_id}]},
+        response={"id": "r1", "choices": []},
+    )

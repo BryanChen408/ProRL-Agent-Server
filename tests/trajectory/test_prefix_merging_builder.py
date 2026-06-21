@@ -80,6 +80,70 @@ def test_linear_main_agent_tool_chain_merges_with_interstitial_masked() -> None:
     assert trajectory.metadata["reconstruction_stats"]["completions_dropped"] == 0
 
 
+def test_prefix_merge_filters_side_truncated_and_empty_completions_before_grouping() -> None:
+    records = [
+        _record("00-main1", [1, 2], [10, EOT]),
+        _side_read_record("01-side"),
+        _truncated_record("02-truncated"),
+        _empty_record("03-empty"),
+        _record(
+            "04-main2",
+            [1, 2, 10, EOT, 50],
+            [20, EOT],
+            prompt_messages=[
+                {"role": "user", "content": "q"},
+                {"role": "assistant", "content": "main1"},
+                {"role": "tool", "content": "tool-result"},
+            ],
+        ),
+    ]
+
+    trajectory = _build(records)
+
+    assert trajectory.status == "COMPLETED"
+    assert len(trajectory.traces) == 1
+    assert trajectory.traces[0].metadata["source_completion_ids"] == ["00-main1", "04-main2"]
+    stats = trajectory.metadata["reconstruction_stats"]
+    assert stats["raw_completions_total"] == 5
+    assert stats["completions_total"] == 2
+    assert stats["completions_preserved"] == 2
+    assert stats["completions_dropped"] == 0
+    completion_filter = trajectory.metadata["completion_filter"]
+    assert completion_filter["input_completions"] == 5
+    assert completion_filter["kept_completions"] == 2
+    assert completion_filter["excluded_completions"] == 3
+    assert completion_filter["excluded_reasons"] == {
+        "empty_completion": 1,
+        "non_agent_side_completion": 1,
+        "persisted_truncated_completion": 1,
+    }
+    assert set(completion_filter["excluded_completion_ids"]) == {
+        "01-side",
+        "02-truncated",
+        "03-empty",
+    }
+    assert {
+        (item["completion_id"], item["reason"])
+        for item in completion_filter["excluded"]
+    } == {
+        ("01-side", "non_agent_side_completion"),
+        ("02-truncated", "persisted_truncated_completion"),
+        ("03-empty", "empty_completion"),
+    }
+
+
+def test_prefix_merge_returns_error_when_filter_removes_everything() -> None:
+    trajectory = _build([_side_read_record("00-side"), _empty_record("01-empty")])
+
+    assert trajectory.status == "ERROR"
+    assert trajectory.error == "no trainable completions after completion filter"
+    assert trajectory.traces == []
+    assert set(trajectory.metadata["completion_filter"]["excluded_completion_ids"]) == {
+        "00-side",
+        "01-empty",
+    }
+
+
 def test_prefix_merge_preserves_reasoning_loss_mask() -> None:
     records = [
         CompletionRecord(
@@ -198,3 +262,45 @@ def test_longest_matching_prefix_wins_for_grouping_collision() -> None:
         if trace.metadata["source_completion_ids"] == ["00-b1", "02-b2"]
     )
     assert merged.loss_mask == [1, 1, 0, 1, 1]
+
+
+def _side_read_record(completion_id: str) -> CompletionRecord:
+    request = {
+        "messages": [
+            {
+                "role": "user",
+                "content": "# Triton Ascend 基础知识参考手册\n\n本文档汇集 Triton Ascend 编程的基础知识。",
+            }
+        ],
+    }
+    return CompletionRecord(
+        completion_id=completion_id,
+        original_request=request,
+        request=request,
+        response={
+            "choices": [
+                {
+                    "input_token_ids": [1],
+                    "message": {"role": "assistant", "content": "doc review"},
+                    "finish_reason": "stop",
+                    "logprobs": {"content": [{"token_id": 10, "logprob": -0.1}]},
+                }
+            ]
+        },
+    )
+
+
+def _truncated_record(completion_id: str) -> CompletionRecord:
+    return CompletionRecord(
+        completion_id=completion_id,
+        request={"messages": [{"role": "user", "content": completion_id}]},
+        response={"id": "r1", "__truncated": True},
+    )
+
+
+def _empty_record(completion_id: str) -> CompletionRecord:
+    return CompletionRecord(
+        completion_id=completion_id,
+        request={"messages": [{"role": "user", "content": completion_id}]},
+        response={"id": "r1", "choices": []},
+    )
