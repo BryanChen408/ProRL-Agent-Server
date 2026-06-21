@@ -8,15 +8,12 @@ CANNBOT_SKILLS_MIGRATION_GUIDE.md (§B):
   input     src/{op}.py (+ .json)                  (framework-placed via prepare)
   submit    output/submission/{op}_impl.py         (class ModelNew; the ONLY artifact)
   eval      tools/triton_eval_pipeline.sh          (fixed entry -> judge_out/metrics.json)
-  reward    operator_judge evaluator re-runs it in a CLEAN judge runtime (anti-cheat)
+  reward    operator_judge evaluator re-runs it in a fresh judge runtime
 
-Placement (agent works on WRITABLE copies — no read-only write errors / wasted RL steps):
-  - The host skills dir is bind-mounted ``:ro`` ONLY as an immutable SOURCE at /opt/canonical
-    (never the agent's working tree).
-  - Each container cp's it into its OWN writable {workdir}/tools, so the agent runs + iterates with
-    zero permission friction. Anti-cheat lives at the JUDGE: it runs in a SEPARATE clean container
-    with a FRESH copy from the untouched source (= your _snapshot_canonical), so tampering an agent
-    copy can't move the reward.
+Placement:
+  - The host skills dir is bind-mounted at /opt/canonical.
+  - Each container copies the tools into its own writable {workdir}/tools.
+  - The judge runs in a separate fresh container and receives the submitted kernel.
   - skills_path=/opt/canonical/skills; the claude_code preset copies it into CLAUDE_CONFIG_DIR/skills
     (also a writable copy). Nothing is baked into the image.
 
@@ -47,16 +44,13 @@ WORKDIR = "/opt/workspace/agent_workdir"
 # BAN everything else. Bare tool names in --disallowedTools are removed from the model's context
 # ENTIRELY (Claude never sees them), and deny precedence holds even under --dangerously-skip-permissions
 # (claude_code preset maps settings.disallowed_tools -> --disallowedTools). Why each is banned:
-#   WebSearch / WebFetch          — non-reproducible external I/O; lets the agent look up answers (reward hacking)
-#   Agent                         — sub-agent calls ARE captured (same session token) but UNATTRIBUTED: they splice a
-#                                   different sub-agent system prompt into the per_request stream -> break rllm's
-#                                   prefix-merge (merge_compression_ratio) + pollute the train distribution. Not needed here.
+#   WebSearch / WebFetch          — non-reproducible external I/O
 #   AskUserQuestion               — no human in the RL loop; would stall the rollout
 #   EnterPlanMode / ExitPlanMode  — would wait for an approval that never comes
 #   Enter/ExitWorktree, Cron*,    — harness/session-management noise, meaningless in a one-shot rollout
 #     ScheduleWakeup, Task*, NotebookEdit
 _DISALLOWED_TOOLS = (
-    "Agent AskUserQuestion CronCreate CronDelete CronList EnterPlanMode EnterWorktree "
+    "AskUserQuestion CronCreate CronDelete CronList EnterPlanMode EnterWorktree "
     "ExitPlanMode ExitWorktree NotebookEdit ScheduleWakeup TaskCreate TaskGet TaskList "
     "TaskOutput TaskStop TaskUpdate WebFetch WebSearch"
 )
@@ -65,10 +59,7 @@ _DISALLOWED_TOOLS = (
 def _instruction(op: str) -> str:
     return (
         f"Implement a Triton operator for Ascend NPU. The reference task is at src/{op}.py. "
-        f"Write your implementation as class ModelNew to output/submission/{op}_impl.py. "
-        f"Use the triton-op-verifier skill (it runs tools/triton_eval_pipeline.sh) to test and iterate "
-        f"until correctness passes, then optimize for speed. Do NOT edit anything under tools/. "
-        f"Your kernel is scored by re-running the canonical pipeline in a clean environment."
+        f"Write your implementation as class ModelNew to output/submission/{op}_impl.py."
     )
 
 
@@ -91,8 +82,7 @@ def build_operator_request(
             {"type": "upload_file", "source": f"{tasks_dir}/{op_name}.json", "target": f"{WORKDIR}/src/{op_name}.json"}
         )
     mk = f"mkdir -p {WORKDIR}/output/submission {WORKDIR}/judge_out"
-    # eval engine = pipeline (tools/) + verifier scripts (.agents/skills/.../scripts, the pipeline's
-    # hardcoded VERIFIER_SCRIPTS path). Writable copy per container (no read-only write errors).
+    # eval engine = pipeline (tools/) + verifier scripts (.agents/skills/.../scripts).
     cp_eval = f"cp -r /opt/canonical/tools {WORKDIR}/tools && cp -r /opt/canonical/.agents {WORKDIR}/.agents"
     # orchestrator into the agent cwd so Claude Code reads it (skills_dir root has AGENTS.md)
     cp_agents = f"cp /opt/canonical/AGENTS.md {WORKDIR}/AGENTS.md"
@@ -111,19 +101,13 @@ def build_operator_request(
                 # Ascend per-card recipe (polar.runtime.ascend) — host flock allocates ONE free card
                 # from the pool to EACH container (agent + fresh judge), remapped to davinci0.
                 "ascend": {"pool": device_pool, "lock_dir": lock_dir},
-                # Immutable SOURCE only (read-only); never the agent's working tree. Each container cp's
-                # tools into its OWN writable {workdir}/tools, so the agent never hits a read-only write
-                # error (= no wasted RL steps). Anti-cheat is enforced by the JUDGE running in a SEPARATE
-                # clean container with a FRESH copy from this untouched source (= your _snapshot_canonical).
                 "volumes": [f"{skills_dir}:/opt/canonical:ro"],
             },
-            # agent: writable tools copy (run + iterate freely, zero permission friction).
+            # agent: writable tools copy.
             "prepare": [*place_task, {"type": "exec", "command": f"{mk} && {cp_eval} && {cp_agents} && command -v claude"}],
-            # judge (clean container): FRESH canonical tools from the untouched source -> authoritative.
+            # judge: separate fresh runtime.
             "eval_prepare": [*place_task, {"type": "exec", "command": f"{mk} && {cp_eval}"}],
         },
-        # skills_path is a read-only SOURCE; the claude_code preset cp's it into CLAUDE_CONFIG_DIR/skills
-        # (already a writable copy), so skills are no read-only hazard either.
         "agent": {
             "harness": "claude_code", "model_name": model_name, "skills_path": "/opt/canonical/skills",
             # restrict the rollout tool surface (see _DISALLOWED_TOOLS) — keep Read/Write/Edit/Bash/Glob/Grep/Skill.
@@ -131,7 +115,7 @@ def build_operator_request(
         },
         "evaluator": {
             "strategy": "operator_judge",
-            "refresh_runtime": True,  # fresh judge runtime (anti-cheat); inherits kwargs.ascend
+            "refresh_runtime": True,
             "config": {
                 "op_name": op_name,
                 "judge_command": judge_command,

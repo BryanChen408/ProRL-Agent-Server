@@ -3,8 +3,7 @@
 Flow (mirrors the user's openhands_sdk ``_judge_and_record``, but Polar-native):
 
   1. pull the agent's submitted kernel out of the AGENT runtime;
-  2. drop ONLY that file into a CLEAN judge runtime (``refresh_runtime``: the agent can't have
-     tampered with the canonical eval — that comes from the judge runtime's ``eval_prepare``);
+  2. drop that file into a fresh judge runtime when ``refresh_runtime`` is enabled;
   3. run the canonical eval pipeline THERE -> ``metrics.json``;
   4. map metrics -> reward via the shared, harness-agnostic ladder (:mod:`operator_reward`).
 
@@ -28,7 +27,7 @@ change freely. Config (``EvaluatorSpec.config``):
                   false-negative ``submission_missing``). Absolute paths pass through unchanged.
   judge_timeout   (float, default 1800)
 
-Set ``evaluator.refresh_runtime: true`` in the request so a fresh judge runtime is provided (anti-cheat).
+Set ``evaluator.refresh_runtime: true`` in the request so final scoring uses a fresh judge runtime.
 """
 
 from __future__ import annotations
@@ -102,8 +101,8 @@ class OperatorJudgeEvaluator(BaseTrajectoryEvaluator):
         judge_rt: BaseRuntime = fresh if isinstance(fresh, BaseRuntime) else source
         if judge_rt is source:
             logger.warning(
-                "operator_judge running in the AGENT runtime (no fresh judge): anti-cheat weakened; "
-                "set evaluator.refresh_runtime=true for the authoritative reward"
+                "operator_judge running in the agent runtime; "
+                "set evaluator.refresh_runtime=true for fresh-runtime final scoring"
             )
 
         artifacts_dir = Path(runtime["artifacts_dir"])
