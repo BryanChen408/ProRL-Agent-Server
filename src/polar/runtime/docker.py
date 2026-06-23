@@ -103,7 +103,10 @@ class DockerRuntime(BaseRuntime):
                 )
             else:
                 env = dict(ascend.get("env", {}) or {})
-                env.pop("ASCEND_RT_VISIBLE_DEVICES", None)
+                # Docker image ENV survives unless explicitly overridden. Clear any baked default
+                # here; pipeline-scoped leasing injects the selected physical card only for the
+                # child command that actually runs NPU work.
+                env["ASCEND_RT_VISIBLE_DEVICES"] = ""
                 create_args.extend(ascend_mount_create_args({**ascend, "env": env}))
                 logger.info("ascend: %s -> mount-only passthrough", self._container_name)
         create_args.extend([self.spec.image, "sleep", "infinity"])

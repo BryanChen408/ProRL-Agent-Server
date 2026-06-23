@@ -164,8 +164,7 @@ async def _test_docker_start_can_mount_ascend_without_start_lease(
     assert "/locks:/locks" in volumes
     assert "--privileged" in create
     env = dict(item.split("=", 1) for item in _values(create, "-e"))
-    assert env == {"CUSTOM_FLAG": "1"}
-    assert "ASCEND_RT_VISIBLE_DEVICES" not in env
+    assert env == {"ASCEND_RT_VISIBLE_DEVICES": "", "CUSTOM_FLAG": "1"}
 
     await runtime.stop()
 
