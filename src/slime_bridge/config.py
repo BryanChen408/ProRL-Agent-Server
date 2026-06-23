@@ -129,9 +129,7 @@ def _resolve_max_sessions_per_task(args: Any) -> int | None:
         if value <= 0:
             raise ValueError("polar_max_sessions_per_task must be greater than 0")
         return value
-
-    pool = _parse_device_pool(getattr(args, "polar_device_pool", None))
-    return len(pool) if pool else None
+    return None
 
 
 def _parse_device_pool(spec: Any) -> list[str]:

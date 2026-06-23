@@ -55,10 +55,10 @@ def test_resolve_polar_slime_config_computes_concurrency_and_normalizes_url() ->
     assert config.min_complete_accept_fraction == 0.0
 
 
-def test_resolve_polar_slime_config_infers_max_sessions_per_task_from_device_pool() -> None:
-    assert resolve_polar_slime_config(_args(polar_device_pool="8,9")).max_sessions_per_task == 2
-    assert resolve_polar_slime_config(_args(polar_device_pool="8-11")).max_sessions_per_task == 4
-    assert resolve_polar_slime_config(_args(polar_device_pool=[8, 9, 10])).max_sessions_per_task == 3
+def test_resolve_polar_slime_config_does_not_limit_sessions_by_device_pool() -> None:
+    assert resolve_polar_slime_config(_args(polar_device_pool="8,9")).max_sessions_per_task is None
+    assert resolve_polar_slime_config(_args(polar_device_pool="8-11")).max_sessions_per_task is None
+    assert resolve_polar_slime_config(_args(polar_device_pool=[8, 9, 10])).max_sessions_per_task is None
 
 
 def test_resolve_polar_slime_config_allows_explicit_max_sessions_per_task() -> None:

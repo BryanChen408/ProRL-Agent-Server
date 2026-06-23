@@ -52,11 +52,14 @@ def _mainline_args(**overrides):
                     "DISABLE_AUTOUPDATER": "1",
                     "CLAUDE_CODE_MAX_OUTPUT_TOKENS": "32768",
                     "POLAR_ANTHROPIC_DEFAULT_MAX_TOKENS": "32768",
+                    "POLAR_NPU_LEASE_POOL": "{args.polar_device_pool}",
+                    "POLAR_NPU_LOCK_DIR": "{args.polar_lock_dir}",
                 },
                 "kwargs": {
                     "ascend": {
                         "pool": "{args.polar_device_pool}",
                         "lock_dir": "{args.polar_lock_dir}",
+                        "lease_at_start": False,
                     },
                     "volumes": ["{args.polar_skills_dir}:/opt/canonical:ro"],
                 },
@@ -101,11 +104,14 @@ def _mainline_args(**overrides):
                     "workdir": "/opt/workspace/agent_workdir",
                     "env": {
                         "DISABLE_AUTOUPDATER": "1",
+                        "POLAR_NPU_LEASE_POOL": "{args.polar_eval_device_pool}",
+                        "POLAR_NPU_LOCK_DIR": "{args.polar_lock_dir}",
                     },
                     "kwargs": {
                         "ascend": {
                             "pool": "{args.polar_eval_device_pool}",
                             "lock_dir": "{args.polar_lock_dir}",
+                            "lease_at_start": False,
                         },
                         "volumes": ["{args.polar_skills_dir}:/opt/canonical:ro"],
                     },
@@ -172,7 +178,10 @@ def test_mainline_operator_payload_is_polar_docker_runtime_contract() -> None:
     assert request.runtime.kwargs["ascend"] == {
         "pool": "0",
         "lock_dir": "/dev/shm/npu-locks",
+        "lease_at_start": False,
     }
+    assert request.runtime.env["POLAR_NPU_LEASE_POOL"] == "0"
+    assert request.runtime.env["POLAR_NPU_LOCK_DIR"] == "/dev/shm/npu-locks"
     assert request.runtime.kwargs["volumes"] == ["/opt/polar-skills:/opt/canonical:ro"]
     assert request.runtime.prepare[1].command is not None
     assert "prepare_operator_workdir.py" in request.runtime.prepare[1].command
@@ -189,7 +198,10 @@ def test_mainline_operator_payload_is_polar_docker_runtime_contract() -> None:
     assert request.evaluator.runtime.kwargs["ascend"] == {
         "pool": "1",
         "lock_dir": "/dev/shm/npu-locks",
+        "lease_at_start": False,
     }
+    assert request.evaluator.runtime.env["POLAR_NPU_LEASE_POOL"] == "1"
+    assert request.evaluator.runtime.env["POLAR_NPU_LOCK_DIR"] == "/dev/shm/npu-locks"
     assert request.evaluator.runtime.prepare == []
     assert request.evaluator.runtime.eval_prepare is not None
     assert "--no-stub" in request.evaluator.runtime.eval_prepare[1].command
