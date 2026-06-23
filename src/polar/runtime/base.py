@@ -62,9 +62,9 @@ class BaseRuntime(ABC):
     @property
     def supports_ascend(self) -> bool:
         """True iff this backend implements the Ascend NPU passthrough recipe (``kwargs.ascend``:
-        host card-pool lease + ASCEND_RT_VISIBLE_DEVICES + driver mounts). Only DockerRuntime does;
-        the factory rejects ``kwargs.ascend`` on backends that return False, so a kernel rollout can
-        never silently run without its leased card (would collide on davinci0 / fail aclInit)."""
+        driver/device mounts plus optional runtime lifetime card lease). Only DockerRuntime does; the
+        factory rejects ``kwargs.ascend`` on backends that return False, so an operator rollout never
+        silently runs without the required Ascend environment."""
         return False
 
     @abstractmethod

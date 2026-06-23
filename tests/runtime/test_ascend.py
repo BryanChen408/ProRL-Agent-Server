@@ -31,7 +31,12 @@ except ModuleNotFoundError:  # standalone without pytest
 
     pytest = _Pytest()  # type: ignore[assignment]
 
-from polar.runtime.ascend import acquire_card, ascend_create_args, parse_pool  # noqa: E402
+from polar.runtime.ascend import (  # noqa: E402
+    acquire_card,
+    ascend_create_args,
+    ascend_mount_create_args,
+    parse_pool,
+)
 
 
 def _vals(args, flag):
@@ -79,6 +84,22 @@ def test_recipe_env_cannot_override_leased_device():
     assert env["ASCEND_RT_VISIBLE_DEVICES"] == "9"
     assert env["CUSTOM_FLAG"] == "1"
     assert "/host/tools:/tools:ro" in _vals(args, "-v")
+
+
+def test_mount_recipe_does_not_require_or_inject_device_id():
+    args = ascend_mount_create_args(
+        {
+            "env": {"CUSTOM_FLAG": "1"},
+            "mounts": ["/host/tools:/tools:ro"],
+        }
+    )
+
+    assert "--privileged" in args
+    assert "/dev:/dev" in _vals(args, "-v")
+    assert "/host/tools:/tools:ro" in _vals(args, "-v")
+    env = dict(p.split("=", 1) for p in _vals(args, "-e"))
+    assert env == {"CUSTOM_FLAG": "1"}
+    assert "ASCEND_RT_VISIBLE_DEVICES" not in env
 
 
 def test_no_per_card_device_remap():

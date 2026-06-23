@@ -6,11 +6,26 @@ import logging
 import os
 from pathlib import Path
 
-from polar.runtime.ascend import CardLock, acquire_card, ascend_create_args, parse_pool
+from polar.runtime.ascend import (
+    CardLock,
+    acquire_card,
+    ascend_create_args,
+    ascend_mount_create_args,
+    parse_pool,
+)
 from polar.runtime.base import BaseRuntime
 from polar.runtime.models import ExecResult, RuntimeSpec
 
 logger = logging.getLogger(__name__)
+
+
+def _lease_at_start(ascend: dict) -> bool:
+    raw = ascend.get("lease_at_start", True)
+    if isinstance(raw, bool):
+        return raw
+    if isinstance(raw, str):
+        return raw.strip().lower() not in {"0", "false", "no", "off"}
+    return bool(raw)
 
 
 class DockerRuntime(BaseRuntime):
@@ -47,7 +62,7 @@ class DockerRuntime(BaseRuntime):
 
     @property
     def supports_ascend(self) -> bool:
-        return True  # start() applies the kwargs.ascend passthrough recipe (acquire_card + RT + mounts)
+        return True  # start() applies kwargs.ascend passthrough; card lease is configurable.
 
     async def start(self) -> None:
         if self._destroyed:
@@ -67,20 +82,36 @@ class DockerRuntime(BaseRuntime):
         # Additional volumes from kwargs (e.g., Docker socket for agents that need DinD)
         for vol in self.spec.kwargs.get("volumes", []):
             create_args.extend(["-v", vol])
-        # Ascend NPU (operator-gen): allocate ONE free physical card from the pool (host flock,
-        # held for this container's lifetime), then apply the validated privileged + /dev:/dev
-        # passthrough recipe from polar.runtime.ascend. Concurrency safety comes from
-        # ASCEND_RT_VISIBLE_DEVICES plus the host lock, not hard per-device remapping.
+        # Ascend NPU (operator-gen): default behavior leases ONE free physical card for the
+        # container lifetime. Pipeline-scoped lease mode only applies the driver/device mounts; a
+        # child process such as triton_eval_pipeline.sh acquires a card when it actually needs one.
         ascend = self.spec.kwargs.get("ascend")
         if ascend is not None:
-            self._npu_lock = acquire_card(parse_pool(ascend.get("pool")), ascend.get("lock_dir", "/tmp/npu-locks"))
-            create_args.extend(ascend_create_args({**ascend, "device_id": self._npu_lock.device_id}))
-            logger.info("ascend: %s -> physical card %s", self._container_name, self._npu_lock.device_id)
+            lease_at_start = _lease_at_start(ascend)
+            if lease_at_start:
+                self._npu_lock = acquire_card(
+                    parse_pool(ascend.get("pool")),
+                    ascend.get("lock_dir", "/tmp/npu-locks"),
+                )
+                create_args.extend(
+                    ascend_create_args({**ascend, "device_id": self._npu_lock.device_id})
+                )
+                logger.info(
+                    "ascend: %s -> physical card %s",
+                    self._container_name,
+                    self._npu_lock.device_id,
+                )
+            else:
+                env = dict(ascend.get("env", {}) or {})
+                env.pop("ASCEND_RT_VISIBLE_DEVICES", None)
+                create_args.extend(ascend_mount_create_args({**ascend, "env": env}))
+                logger.info("ascend: %s -> mount-only passthrough", self._container_name)
         create_args.extend([self.spec.image, "sleep", "infinity"])
         rc, _, stderr = await self._run_local_command(
             *create_args, capture=True, timeout=self._START_TIMEOUT,
         )
         if rc != 0:
+            self._release_npu_lock()
             raise RuntimeError(f"docker create failed with exit code {rc}: {stderr}")
         rc, _, stderr = await self._run_local_command(
             "docker", "start", self._container_name,
@@ -134,6 +165,9 @@ class DockerRuntime(BaseRuntime):
                 self._container_name, rc, stderr,
             )
         # Release the held NPU card (after the container is gone) so the pool frees up.
+        self._release_npu_lock()
+
+    def _release_npu_lock(self) -> None:
         if self._npu_lock is not None:
             self._npu_lock.release()
             self._npu_lock = None

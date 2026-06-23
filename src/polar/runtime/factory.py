@@ -55,9 +55,9 @@ def _validate_runtime_capabilities(runtime: BaseRuntime) -> None:
     if spec.kwargs.get("ascend") and not runtime.supports_ascend:
         raise ValueError(
             f"runtime backend {backend!r} does not implement Ascend NPU passthrough "
-            "(kwargs.ascend); only the 'docker' backend leases a card + sets "
-            "ASCEND_RT_VISIBLE_DEVICES + mounts drivers. Running an operator rollout on this "
-            "backend would silently get no card isolation (davinci0 collision / aclInit failure)."
+            "(kwargs.ascend); only the 'docker' backend exposes the required driver/device mounts "
+            "and optional runtime lifetime card lease. Running an operator rollout on this backend "
+            "would silently miss the required Ascend environment."
         )
     if not spec.allow_internet:
         if not runtime.can_disable_internet:

@@ -22,10 +22,12 @@ Tradeoff: all cards are visible inside the container (soft, RT-based isolation r
 device isolation). A generated Triton kernel honors ASCEND_RT_VISIBLE_DEVICES (it doesn't open device
 files directly), and this is the user's proven OpenHands setup, so it's acceptable.
 
-Card ALLOCATION is host-level: ``acquire_card`` flock's a free physical card from a pool (held by the
-gateway process for the container lifetime, auto-released on crash) — the equivalent of OpenHands'
-``npu_lease``. DockerRuntime acquires at start() and releases at stop(), then passes the leased card
-as ``ASCEND_RT_VISIBLE_DEVICES``. Config: ``RuntimeSpec.kwargs['ascend'] = {pool, lock_dir}``.
+Card ALLOCATION can be host-level: ``acquire_card`` flock's a free physical card from a pool (held by
+the gateway process for the container lifetime, auto-released on crash) — the equivalent of
+OpenHands' ``npu_lease``. DockerRuntime's default path acquires at start() and releases at stop(),
+then passes the leased card as ``ASCEND_RT_VISIBLE_DEVICES``. Pipeline-scoped leasing can opt out of
+the runtime lifetime card lease with ``RuntimeSpec.kwargs['ascend']['lease_at_start'] = False`` while
+still using the same driver/device mounts.
 """
 
 from __future__ import annotations
@@ -60,6 +62,30 @@ def parse_pool(spec: Any) -> list[str]:
     return [p.strip() for p in s.split(",") if p.strip() != ""]
 
 
+def ascend_mount_create_args(cfg: dict) -> list[str]:
+    """``docker create`` args exposing the Ascend runtime without selecting a card.
+
+    This is the shared mount-only recipe used by both runtime lifetime leasing and pipeline-scoped
+    leasing. It intentionally preserves caller-provided env as-is; card scoping belongs in
+    ``ascend_create_args`` or a pipeline lease helper.
+    """
+    if not isinstance(cfg, dict):
+        raise TypeError(f"ascend cfg must be a dict, got {type(cfg).__name__}")
+    args: list[str] = ["--privileged"]
+    if cfg.get("ipc", "host"):
+        args += ["--ipc", str(cfg.get("ipc", "host"))]
+    if cfg.get("shm_size", "500g"):
+        args += ["--shm-size", str(cfg.get("shm_size", "500g"))]
+    for mount in _DRIVER_MOUNTS:
+        args += ["-v", mount]
+    for mount in cfg.get("mounts", []) or []:
+        args += ["-v", str(mount)]
+    env = dict(cfg.get("env", {}) or {})
+    for key, value in env.items():
+        args += ["-e", f"{key}={value}"]
+    return args
+
+
 def ascend_create_args(cfg: dict) -> list[str]:
     """``docker create`` args giving a container Ascend NPU access scoped to ONE physical card.
 
@@ -72,22 +98,11 @@ def ascend_create_args(cfg: dict) -> list[str]:
     device_id = str(cfg.get("device_id", "")).strip()
     if device_id == "":
         raise ValueError("ascend.device_id required (the physical NPU card to scope to, e.g. 9)")
-
-    args: list[str] = ["--privileged"]
-    if cfg.get("ipc", "host"):
-        args += ["--ipc", str(cfg.get("ipc", "host"))]
-    if cfg.get("shm_size", "500g"):
-        args += ["--shm-size", str(cfg.get("shm_size", "500g"))]
-    for mount in _DRIVER_MOUNTS:
-        args += ["-v", mount]
-    for mount in cfg.get("mounts", []) or []:
-        args += ["-v", str(mount)]
-    env = dict(cfg.get("env", {}) or {})
+    scoped_cfg = {**cfg, "env": dict(cfg.get("env", {}) or {})}
+    env = scoped_cfg["env"]
     # Always scope to the leased card, even if callers pass a generic env block.
     env["ASCEND_RT_VISIBLE_DEVICES"] = device_id
-    for key, value in env.items():
-        args += ["-e", f"{key}={value}"]
-    return args
+    return ascend_mount_create_args(scoped_cfg)
 
 
 class CardLock:
