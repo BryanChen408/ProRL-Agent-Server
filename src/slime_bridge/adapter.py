@@ -130,6 +130,23 @@ def _build_sample(
         loss_mask = [0] * len(response_ids)
     trainable_tokens = sum(1 for value in loss_mask if int(value) != 0)
     masked_context_tokens = len(loss_mask) - trainable_tokens
+
+    # Diagnostic: log when a trainable trace has zero trainable tokens.
+    if trainable and trainable_tokens == 0 and response_ids:
+        logger.warning(
+            "0-STEP-DIAG session=%s trace=%d builder=%s response_len=%d "
+            "loss_mask_sum=%d loss_mask_first20=%s response_ids_first20=%s "
+            "finish_reason=%s response_msgs=%d",
+            result.session_id,
+            trace_index,
+            getattr(result.trajectory.metadata, "builder", "unknown"),
+            len(response_ids),
+            sum(loss_mask),
+            loss_mask[:20],
+            response_ids[:20],
+            trace.finish_reason,
+            len(response_messages),
+        )
     response_log_probs = _extract_rollout_log_probs(
         trace,
         response_len=len(response_ids),

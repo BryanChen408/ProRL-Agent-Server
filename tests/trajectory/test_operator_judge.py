@@ -165,6 +165,51 @@ def test_refresh_without_fresh_runtime_raises():
         raise AssertionError("expected RuntimeError when refresh_runtime=true but no fresh runtime")
 
 
+def test_host_submission_artifact_skips_agent_download():
+    ev = OperatorJudgeEvaluator(op_name=OP, judge_command="bash pipeline.sh", metrics_path=METRICS)
+    agent = FakeRuntime(files={})
+    judge = FakeRuntime(files={METRICS: json.dumps({"success": True, "perf_data": {"speedup_vs_torch": 2.0}})})
+    with tempfile.TemporaryDirectory() as d:
+        host_impl = Path(d) / "submission_impl.py"
+        host_impl.write_text("# host artifact")
+        res = asyncio.run(ev.evaluate(
+            Trajectory(status="COMPLETED", traces=[]),
+            runtime=None,
+            fresh_eval_runtime=judge,
+            refresh_runtime=True,
+            artifacts_dir=d,
+            env={},
+            timeout_seconds=None,
+            session_id="s",
+            task_id="t",
+            submission_host_path=str(host_impl),
+            submission_used=SUB,
+        ))
+    assert res.outcome_reward == 1.0
+    assert res.metadata["submission_used"] == SUB
+    assert judge.uploaded and judge.uploaded[0][1] == SUB
+    assert agent.files == {}
+
+
+def test_missing_submission_artifact_scores_without_judge_runtime():
+    ev = OperatorJudgeEvaluator(op_name=OP, judge_command="bash pipeline.sh", metrics_path=METRICS)
+    with tempfile.TemporaryDirectory() as d:
+        res = asyncio.run(ev.evaluate(
+            Trajectory(status="COMPLETED", traces=[]),
+            runtime=None,
+            fresh_eval_runtime=None,
+            refresh_runtime=True,
+            artifacts_dir=d,
+            env={},
+            timeout_seconds=None,
+            session_id="s",
+            task_id="t",
+            submission_missing=True,
+        ))
+    assert res.outcome_reward == 0.2
+    assert res.metadata["error_type"] == "submission_missing"
+
+
 if __name__ == "__main__":
     if not _DEPS:
         print(f"[skip] polar/pydantic not importable: {_IMPORT_ERR}")

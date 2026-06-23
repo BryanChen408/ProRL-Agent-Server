@@ -5,10 +5,12 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import posixpath
 import shutil
 from contextlib import suppress
 from pathlib import Path
 from tempfile import mkdtemp
+from typing import Any
 
 import httpx
 
@@ -320,7 +322,8 @@ class GatewayNodeManager:
             if runtime is None:
                 raise RuntimeError("runtime is required for execution")
 
-            self._start_eval_prewarm(managed)
+            if not self._use_lazy_eval_runtime(request):
+                self._start_eval_prewarm(managed)
             harness = self._resolve_agent_harness(request)
 
             # Setup
@@ -416,11 +419,22 @@ class GatewayNodeManager:
         request = managed.request
         if request.evaluator is None or not request.evaluator.refresh_runtime:
             return
+        if self._use_lazy_eval_runtime(request):
+            return
         if managed.eval_prewarm_task is not None:
             return
         managed.eval_prewarm_task = asyncio.create_task(
             self._prepare_eval_runtime(managed)
         )
+
+    @staticmethod
+    def _use_lazy_eval_runtime(request: SessionDispatchRequest) -> bool:
+        evaluator = request.evaluator
+        if evaluator is None or not evaluator.refresh_runtime:
+            return False
+        if evaluator.strategy != "operator_judge":
+            return False
+        return bool(evaluator.config.get("lazy_refresh_runtime"))
 
     async def _prepare_eval_runtime(
         self, managed: ManagedSession
@@ -659,6 +673,14 @@ class GatewayNodeManager:
         eval_runtime_spec = self._resolve_runtime_spec(request)
         if evaluator_spec.refresh_runtime:
             eval_runtime_spec = self._resolve_eval_runtime_spec(request)
+            if self._use_lazy_eval_runtime(request):
+                return await self._run_lazy_eval(
+                    request,
+                    trajectory,
+                    agent_result=agent_result,
+                    managed=managed,
+                    eval_runtime_spec=eval_runtime_spec,
+                )
             fresh_eval_runtime = await self._acquire_prepared_eval_runtime(managed)
             if fresh_eval_runtime is None:
                 return trajectory.model_copy(
@@ -704,6 +726,163 @@ class GatewayNodeManager:
             )
 
         return self._merge_eval_result(trajectory, eval_result, evaluator_spec)
+
+    async def _run_lazy_eval(
+        self,
+        request: SessionDispatchRequest,
+        trajectory: Trajectory,
+        *,
+        agent_result: AgentRunResult,
+        managed: ManagedSession,
+        eval_runtime_spec: RuntimeSpec,
+    ) -> Trajectory:
+        evaluator_spec = request.evaluator
+        if evaluator_spec is None:
+            return trajectory
+
+        live_runtime = managed.runtime
+        if live_runtime is None:
+            raise RuntimeError("runtime is required for lazy evaluation")
+
+        submission_context = await self._extract_operator_judge_submission(
+            managed, evaluator_spec
+        )
+
+        # Harness postrun steps still belong to the agent runtime. Run them
+        # before stopping the runtime, then clear the list so teardown does not
+        # repeat them.
+        await self._run_postrun_steps(managed)
+        managed.postrun_steps = []
+
+        try:
+            await live_runtime.stop()
+        except Exception as exc:  # noqa: BLE001
+            return trajectory.model_copy(
+                update={
+                    "status": "ERROR",
+                    "error": (
+                        "lazy refresh_runtime could not stop agent runtime before "
+                        f"starting evaluator runtime: {exc}"
+                    ),
+                }
+            )
+        managed.runtime = None
+
+        strategy_spec = StrategySpec(
+            strategy=evaluator_spec.strategy,
+            config=evaluator_spec.config,
+        )
+
+        fresh_eval_runtime: BaseRuntime | None = None
+        try:
+            if not submission_context.get("submission_missing"):
+                fresh_eval_runtime = await self._prepare_eval_runtime(managed)
+                if fresh_eval_runtime is None:
+                    return trajectory.model_copy(
+                        update={
+                            "status": "ERROR",
+                            "error": (
+                                "refresh_runtime=true requires a fresh runtime: "
+                                "lazy eval runtime did not produce a usable runtime"
+                            ),
+                        }
+                    )
+
+            evaluator = self.evaluators.create(strategy_spec)
+            eval_result = await self._await_with_budget(
+                evaluator.evaluate(
+                    trajectory,
+                    session_id=request.session_id,
+                    task_id=request.task_id,
+                    session_dir=managed.session_dir,
+                    artifacts_dir=managed.artifacts_dir,
+                    agent_result=agent_result,
+                    env=dict(evaluator_spec.env),
+                    timeout_seconds=self._remaining_budget(managed),
+                    runtime=None,
+                    fresh_eval_runtime=fresh_eval_runtime,
+                    runtime_spec=eval_runtime_spec,
+                    refresh_runtime=evaluator_spec.refresh_runtime,
+                    **submission_context,
+                ),
+                managed,
+            )
+        except Exception as exc:
+            logger.exception(
+                "Evaluator %s failed for session %s",
+                evaluator_spec.strategy,
+                request.session_id,
+            )
+            return trajectory.model_copy(
+                update={"status": "ERROR", "error": f"evaluator failed: {exc}"}
+            )
+        finally:
+            if fresh_eval_runtime is not None:
+                await self._stop_runtime_best_effort(
+                    fresh_eval_runtime, request.session_id, "eval runtime"
+                )
+
+        return self._merge_eval_result(trajectory, eval_result, evaluator_spec)
+
+    async def _extract_operator_judge_submission(
+        self,
+        managed: ManagedSession,
+        evaluator_spec: EvaluatorSpec,
+    ) -> dict[str, Any]:
+        runtime = managed.runtime
+        if runtime is None:
+            raise RuntimeError("runtime is required to extract operator submission")
+
+        candidates = self._operator_judge_submission_candidates(evaluator_spec)
+        artifact_dir = managed.artifacts_dir / "operator_judge"
+        artifact_dir.mkdir(parents=True, exist_ok=True)
+        local_impl = artifact_dir / "submission_impl.py"
+        if local_impl.exists():
+            local_impl.unlink()
+
+        for logical_path, runtime_path in candidates:
+            try:
+                await runtime.download_file(runtime_path, str(local_impl))
+                return {
+                    "submission_host_path": str(local_impl),
+                    "submission_used": logical_path,
+                }
+            except Exception:
+                logger.debug(
+                    "operator_judge lazy submission candidate missing for session %s: %s",
+                    managed.request.session_id,
+                    runtime_path,
+                    exc_info=True,
+                )
+
+        return {"submission_missing": True, "submission_used": None}
+
+    def _operator_judge_submission_candidates(
+        self,
+        evaluator_spec: EvaluatorSpec,
+    ) -> list[tuple[str, str]]:
+        config = evaluator_spec.config
+        op_name = str(config.get("op_name") or "").strip()
+        submission_path = str(
+            config.get("submission_path") or f"output/submission/{op_name}_impl.py"
+        )
+        workdir_value = config.get("workdir")
+        workdir = str(workdir_value) if workdir_value else None
+
+        logical_candidates: list[str] = []
+        if submission_path.endswith(".py"):
+            logical_candidates.append(submission_path[:-3] + ".best.py")
+        logical_candidates.append(submission_path)
+        return [
+            (path, self._operator_judge_abs_path(path, workdir))
+            for path in logical_candidates
+        ]
+
+    @staticmethod
+    def _operator_judge_abs_path(path: str, workdir: str | None) -> str:
+        if workdir and not posixpath.isabs(path):
+            return posixpath.join(workdir, path)
+        return path
 
     @staticmethod
     def _merge_eval_result(

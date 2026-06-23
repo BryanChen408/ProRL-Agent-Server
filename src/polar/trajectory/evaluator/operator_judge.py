@@ -2,7 +2,8 @@
 
 Flow (mirrors the user's openhands_sdk ``_judge_and_record``, but Polar-native):
 
-  1. pull the agent's submitted kernel out of the AGENT runtime;
+  1. pull the agent's submitted kernel out of the AGENT runtime, unless the gateway
+     already supplied a host ``submission_host_path`` for lazy fresh-runtime judging;
   2. drop that file into a fresh judge runtime when ``refresh_runtime`` is enabled;
   3. run the canonical eval pipeline THERE -> ``metrics.json``;
   4. map metrics -> reward via the shared, harness-agnostic ladder (:mod:`operator_reward`).
@@ -93,13 +94,25 @@ class OperatorJudgeEvaluator(BaseTrajectoryEvaluator):
 
     async def evaluate(self, trajectory: Trajectory, **runtime: Any) -> EvalResult:
         source = runtime.get("runtime")
-        if not isinstance(source, BaseRuntime):
-            raise RuntimeError("operator_judge requires a live agent runtime")
         fresh = runtime.get("fresh_eval_runtime")
-        if bool(runtime.get("refresh_runtime")) and not isinstance(fresh, BaseRuntime):
+        refresh_runtime = bool(runtime.get("refresh_runtime"))
+        submission_host_path = runtime.get("submission_host_path")
+        submission_missing = bool(runtime.get("submission_missing"))
+        if (
+            not submission_missing
+            and submission_host_path is None
+            and not isinstance(source, BaseRuntime)
+        ):
+            raise RuntimeError("operator_judge requires a live agent runtime")
+        if refresh_runtime and not submission_missing and not isinstance(fresh, BaseRuntime):
             raise RuntimeError("operator_judge: refresh_runtime=true but no fresh_eval_runtime provided")
-        judge_rt: BaseRuntime = fresh if isinstance(fresh, BaseRuntime) else source
-        if judge_rt is source:
+        judge_rt = fresh if isinstance(fresh, BaseRuntime) else source
+        if not isinstance(judge_rt, BaseRuntime):
+            if submission_missing:
+                judge_rt = None
+            else:
+                raise RuntimeError("operator_judge requires a live judge runtime")
+        if isinstance(judge_rt, BaseRuntime) and judge_rt is source:
             logger.warning(
                 "operator_judge running in the agent runtime; "
                 "set evaluator.refresh_runtime=true for fresh-runtime final scoring"
@@ -111,25 +124,7 @@ class OperatorJudgeEvaluator(BaseTrajectoryEvaluator):
         timeout_cap = runtime.get("timeout_seconds")
         timeout = self.judge_timeout if timeout_cap is None else min(self.judge_timeout, float(timeout_cap))
 
-        # 1) pull the submitted kernel out of the AGENT runtime. R1 anti-regression (mirrors
-        #    _judge_and_record): prefer the best-so-far successful impl the fixed entry saves on each
-        #    success ({op}_impl.best.py) so a later optimization that breaks the kernel can't drag the
-        #    reward below what was already achieved; fall back to the final impl. Absent == agent
-        #    delivered nothing -> OPERATOR failure (floor reward), NOT infra.
-        candidates = []
-        if self.submission_path.endswith(".py"):
-            candidates.append(self.submission_path[:-3] + ".best.py")
-        candidates.append(self.submission_path)
-        local_impl = artifacts_dir / "submission_impl.py"
-        picked: str | None = None
-        for cand in candidates:
-            try:
-                await source.download_file(self._abs(cand), str(local_impl))
-                picked = cand  # report the logical (relative) path; _abs is a transfer detail
-                break
-            except Exception:  # noqa: BLE001 — try the next candidate (best -> final)
-                continue
-        if picked is None:
+        if submission_missing:
             return self._scored(
                 {"success": False, "ast_check_ok": False, "correctness_ok": False,
                  "error_type": "submission_missing",
@@ -137,8 +132,49 @@ class OperatorJudgeEvaluator(BaseTrajectoryEvaluator):
                 artifacts_dir, submission_used=None,
             )
 
+        # 1) pull the submitted kernel out of the AGENT runtime. R1 anti-regression (mirrors
+        #    _judge_and_record): prefer the best-so-far successful impl the fixed entry saves on each
+        #    success ({op}_impl.best.py) so a later optimization that breaks the kernel can't drag the
+        #    reward below what was already achieved; fall back to the final impl. Absent == agent
+        #    delivered nothing -> OPERATOR failure (floor reward), NOT infra.
+        local_impl = artifacts_dir / "submission_impl.py"
+        picked: str | None
+        if submission_host_path is not None:
+            local_impl = Path(str(submission_host_path))
+            if not local_impl.is_file():
+                return self._scored(
+                    {"success": False, "ast_check_ok": False, "correctness_ok": False,
+                     "error_type": "submission_missing",
+                     "error": f"host submission artifact is missing: {local_impl}"},
+                    artifacts_dir, submission_used=None,
+                )
+            picked_value = runtime.get("submission_used")
+            picked = str(picked_value) if picked_value else str(local_impl)
+        else:
+            assert isinstance(source, BaseRuntime)
+            candidates = []
+            if self.submission_path.endswith(".py"):
+                candidates.append(self.submission_path[:-3] + ".best.py")
+            candidates.append(self.submission_path)
+            picked = None
+            for cand in candidates:
+                try:
+                    await source.download_file(self._abs(cand), str(local_impl))
+                    picked = cand  # report the logical (relative) path; _abs is a transfer detail
+                    break
+                except Exception:  # noqa: BLE001 — try the next candidate (best -> final)
+                    continue
+            if picked is None:
+                return self._scored(
+                    {"success": False, "ast_check_ok": False, "correctness_ok": False,
+                     "error_type": "submission_missing",
+                     "error": f"no submission at {self.submission_path} (or .best.py)"},
+                    artifacts_dir, submission_used=None,
+                )
+
         # 2) place ONLY the impl into the judge runtime (canonical pipeline comes from eval_prepare).
-        if judge_rt is not source:
+        assert isinstance(judge_rt, BaseRuntime)
+        if judge_rt is not source or submission_host_path is not None:
             await judge_rt.upload_file(str(local_impl), self._abs(self.submission_dest))
 
         # 3) run the canonical eval pipeline inside the judge runtime -> metrics.json.
