@@ -588,7 +588,7 @@ async def get_session(session_id: str):
 
 
 @app.delete("/sessions/{session_id}", response_model=SessionDeleteResponse)
-async def delete_session(session_id: str):
+async def delete_session(session_id: str, reason: str | None = Query(default=None)):
     state = get_state()
     try:
         safe_session_id = clean_session_id(session_id)
@@ -597,13 +597,24 @@ async def delete_session(session_id: str):
     if safe_session_id is None:
         raise HTTPException(status_code=400, detail="Session ID cannot be empty")
 
-    await state.node_manager.cancel(safe_session_id)
+    cancel_reason = reason.strip() if isinstance(reason, str) and reason.strip() else None
+    cancelled_active = await state.node_manager.cancel(
+        safe_session_id,
+        reason=cancel_reason,
+    )
     info = state.session_registry.get(safe_session_id)
-    deleted_count = state.storage.delete_session(safe_session_id)
+    preserve_for_postrun = (
+        cancelled_active
+        and cancel_reason == "pipeline_budget_exceeded"
+        and info is not None
+        and str(info.status) in SessionStatus.active()
+    )
+    deleted_count = 0 if preserve_for_postrun else state.storage.delete_session(safe_session_id)
     if info is None and deleted_count == 0:
         raise HTTPException(status_code=404, detail="Session not found")
 
-    state.session_registry.remove(safe_session_id)
+    if not preserve_for_postrun:
+        state.session_registry.remove(safe_session_id)
     return SessionDeleteResponse(
         session_id=safe_session_id,
         deleted=True,

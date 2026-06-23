@@ -201,8 +201,8 @@ class GatewayNodeManager:
                 await self._remove_session_dir_best_effort(session_dir, session_id)
             raise
 
-    async def cancel(self, session_id: str) -> bool:
-        return await self._dispatcher.cancel(session_id)
+    async def cancel(self, session_id: str, *, reason: str | None = None) -> bool:
+        return await self._dispatcher.cancel(session_id, reason=reason)
 
     async def active_sessions(self) -> int:
         return await self._dispatcher.active_count()
@@ -520,7 +520,7 @@ class GatewayNodeManager:
         try:
             if result is None:
                 if managed.cancel_requested:
-                    result = self._cancelled_result(request, managed.timer)
+                    result = await self._build_cancelled_session_result(managed)
                 else:
                     result = await self._build_session_result(managed)
         except GatewayExecutionTimeout as exc:
@@ -641,6 +641,52 @@ class GatewayNodeManager:
             node_id=self.node_id,
             error=error,
             metadata=dict(request.metadata),
+        )
+
+    async def _build_cancelled_session_result(self, managed: ManagedSession) -> SessionResult:
+        request = managed.request
+        if managed.cancel_reason != "pipeline_budget_exceeded":
+            return self._cancelled_result(request, managed.timer)
+
+        if managed.agent_result is None:
+            managed.agent_result = AgentRunResult(
+                status="failed",
+                return_code=-1,
+                error="pipeline budget exceeded",
+            )
+
+        result = await self._build_session_result(managed)
+        if not result.trajectory.traces:
+            return self._error_result(
+                request,
+                managed.timer,
+                "pipeline budget exceeded before any trainable traces were captured",
+            )
+
+        trajectory_metadata = {
+            **result.trajectory.metadata,
+            "termination_reason": "pipeline_budget_exceeded",
+            "cancelled_partial": True,
+        }
+        trajectory = result.trajectory.model_copy(
+            update={
+                "status": "COMPLETED",
+                "error": None,
+                "metadata": trajectory_metadata,
+            }
+        )
+        metadata = {
+            **result.metadata,
+            "termination_reason": "pipeline_budget_exceeded",
+            "cancelled_partial": True,
+        }
+        return result.model_copy(
+            update={
+                "status": SessionStatus.COMPLETED,
+                "trajectory": trajectory,
+                "error": None,
+                "metadata": metadata,
+            }
         )
 
     def _build_trajectory(self, request: SessionDispatchRequest) -> Trajectory:

@@ -70,6 +70,7 @@ class ManagedSession:
     postrun_steps: list[ExecInput] = field(default_factory=list)
     eval_prewarm_task: asyncio.Task | None = None
     cancel_requested: bool = False
+    cancel_reason: str | None = None
     cancel_event: asyncio.Event = field(default_factory=asyncio.Event)
     execution_deadline: float | None = None
     stage: SessionStage = SessionStage.INIT
@@ -145,7 +146,7 @@ class SessionDispatcher:
             self._sessions[managed.session_id] = managed
         await self._init_queue.put(managed.session_id)
 
-    async def cancel(self, session_id: str) -> bool:
+    async def cancel(self, session_id: str, *, reason: str | None = None) -> bool:
         should_enqueue_postrun = False
         async with self._lock:
             managed = self._sessions.get(session_id)
@@ -154,6 +155,7 @@ class SessionDispatcher:
             if managed.cancel_requested:
                 return True
             managed.cancel_requested = True
+            managed.cancel_reason = reason
             managed.cancel_event.set()
             # If the session is parked in READY (holding a ready slot), release it
             # and transition to POSTRUN so the postrun worker picks it up.
