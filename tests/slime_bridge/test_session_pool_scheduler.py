@@ -573,6 +573,15 @@ def test_finish_policy_update_updates_local_worker_version_before_resume(monkeyp
     assert worker._session_pool_draining() is False
 
 
+def test_group_mode_snapshot_does_not_emit_session_pool_metrics() -> None:
+    worker = AsyncPolarRolloutWorker(
+        _args(polar_scheduler_mode="group", polar_max_active_sessions=None),
+        FakeDataSource([]),
+    )
+
+    assert not any(key.startswith("polar/session_pool/") for key in worker.snapshot_metrics())
+
+
 def test_session_pool_staleness_filtering_happens_in_drain_completed() -> None:
     worker = ControlledSessionPoolWorker(
         _args(rollout_batch_size=1, n_samples_per_prompt=1, update_weights_interval=1),

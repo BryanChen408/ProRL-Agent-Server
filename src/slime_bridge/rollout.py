@@ -856,7 +856,6 @@ class AsyncPolarRolloutWorker:
         self._session_pool_open_groups = 0
         self._session_pool_partial_open_groups = 0
         self._session_pool_pending_sessions = 0
-        self._session_pool_submitted_sessions = 0
         # Per-task callback plumbing: event fires when the rollout server POSTs
         # the terminal TaskResult to our local listener.
         self._task_events: dict[str, asyncio.Event] = {}
@@ -997,12 +996,13 @@ class AsyncPolarRolloutWorker:
             out["polar/scheduler/deferred_queue"] = float(self.deferred_queue.qsize())
             out["polar/scheduler/policy_version"] = float(self._policy_version)
             out["polar/scheduler/admission_paused"] = float(self._admission_paused)
-            out["polar/session_pool/active_sessions"] = float(self._active_sessions)
-            out["polar/session_pool/open_groups"] = float(self._session_pool_open_groups)
-            out["polar/session_pool/partial_open_groups"] = float(self._session_pool_partial_open_groups)
-            out["polar/session_pool/pending_sessions"] = float(self._session_pool_pending_sessions)
-            out.setdefault("polar/session_pool/submitted_sessions", 0.0)
-            out.setdefault("polar/session_pool/completed_sessions", 0.0)
+            if self.config.scheduler_mode == "session_pool":
+                out["polar/session_pool/active_sessions"] = float(self._active_sessions)
+                out["polar/session_pool/open_groups"] = float(self._session_pool_open_groups)
+                out["polar/session_pool/partial_open_groups"] = float(self._session_pool_partial_open_groups)
+                out["polar/session_pool/pending_sessions"] = float(self._session_pool_pending_sessions)
+                out.setdefault("polar/session_pool/submitted_sessions", 0.0)
+                out.setdefault("polar/session_pool/completed_sessions", 0.0)
             return out
 
     # -- internal --------------------------------------------------------------
