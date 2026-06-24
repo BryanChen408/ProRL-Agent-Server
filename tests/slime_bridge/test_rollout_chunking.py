@@ -47,6 +47,9 @@ def _config(max_sessions_per_task: int | None = 2) -> PolarSlimeConfig:
         tokenizer_name_or_path=None,
         add_generation_prompt=True,
         eval_dataset_name="eval",
+        scheduler_mode="group",
+        max_active_sessions=4,
+        session_pool_pause_policy="drain_open_groups",
     )
 
 

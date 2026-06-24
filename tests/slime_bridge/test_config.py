@@ -50,6 +50,9 @@ def test_resolve_polar_slime_config_computes_concurrency_and_normalizes_url() ->
     assert config.max_concurrency == 6
     assert config.max_session_concurrency == 24
     assert config.max_sessions_per_task is None
+    assert config.scheduler_mode == "group"
+    assert config.max_active_sessions == 24
+    assert config.session_pool_pause_policy == "drain_open_groups"
     assert config.max_off_policy_steps == 7
     assert config.request_timeout == 60.0
     assert config.min_complete_accept_fraction == 0.0
@@ -75,6 +78,38 @@ def test_resolve_polar_slime_config_allows_explicit_max_sessions_per_task() -> N
 def test_resolve_polar_slime_config_rejects_invalid_max_sessions_per_task() -> None:
     with pytest.raises(ValueError, match="polar_max_sessions_per_task"):
         resolve_polar_slime_config(_args(polar_max_sessions_per_task=0))
+
+
+def test_resolve_polar_slime_config_accepts_session_pool_scheduler() -> None:
+    config = resolve_polar_slime_config(
+        _args(
+            polar_scheduler_mode="session_pool",
+            polar_max_active_sessions=16,
+            polar_session_pool_pause_policy="drain_open_groups",
+        )
+    )
+
+    assert config.scheduler_mode == "session_pool"
+    assert config.max_active_sessions == 16
+    assert config.max_session_concurrency == 24
+    assert config.max_sessions_per_task is None
+    assert config.session_pool_pause_policy == "drain_open_groups"
+
+
+def test_resolve_polar_slime_config_rejects_invalid_scheduler_mode() -> None:
+    with pytest.raises(ValueError, match="polar_scheduler_mode"):
+        resolve_polar_slime_config(_args(polar_scheduler_mode="round_robin"))
+
+
+@pytest.mark.parametrize("value", [0, -1])
+def test_resolve_polar_slime_config_rejects_invalid_max_active_sessions(value) -> None:
+    with pytest.raises(ValueError, match="polar_max_active_sessions"):
+        resolve_polar_slime_config(_args(polar_max_active_sessions=value))
+
+
+def test_resolve_polar_slime_config_rejects_unimplemented_session_pool_pause_policy() -> None:
+    with pytest.raises(ValueError, match="polar_session_pool_pause_policy"):
+        resolve_polar_slime_config(_args(polar_session_pool_pause_policy="drop_partial_group"))
 
 
 def test_resolve_polar_slime_config_requires_agent_template() -> None:

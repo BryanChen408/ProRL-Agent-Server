@@ -33,6 +33,9 @@ class PolarSlimeConfig:
     tokenizer_name_or_path: str | None
     add_generation_prompt: bool
     eval_dataset_name: str
+    scheduler_mode: str
+    max_active_sessions: int
+    session_pool_pause_policy: str
 
 
 def resolve_polar_slime_config(args: Any) -> PolarSlimeConfig:
@@ -71,6 +74,15 @@ def resolve_polar_slime_config(args: Any) -> PolarSlimeConfig:
     max_concurrency = rollout_batch_size * max_async_level
     max_session_concurrency = max_concurrency * group_size
     max_sessions_per_task = _resolve_max_sessions_per_task(args)
+    scheduler_mode = str(getattr(args, "polar_scheduler_mode", "group")).strip().lower()
+    if scheduler_mode not in {"group", "session_pool"}:
+        raise ValueError("polar_scheduler_mode must be 'group' or 'session_pool'")
+    max_active_sessions = _resolve_max_active_sessions(args, default=max_session_concurrency)
+    session_pool_pause_policy = str(
+        getattr(args, "polar_session_pool_pause_policy", "drain_open_groups")
+    ).strip().lower()
+    if session_pool_pause_policy != "drain_open_groups":
+        raise ValueError("polar_session_pool_pause_policy must be 'drain_open_groups'")
     max_off_policy_steps = max_async_level + update_weights_interval
 
     request_timeout = getattr(args, "polar_request_timeout", None)
@@ -119,6 +131,9 @@ def resolve_polar_slime_config(args: Any) -> PolarSlimeConfig:
         tokenizer_name_or_path=getattr(args, "hf_checkpoint", None),
         add_generation_prompt=bool(getattr(args, "polar_add_generation_prompt", True)),
         eval_dataset_name=str(getattr(args, "polar_eval_dataset_name", "polar_eval")),
+        scheduler_mode=scheduler_mode,
+        max_active_sessions=max_active_sessions,
+        session_pool_pause_policy=session_pool_pause_policy,
     )
 
 
@@ -130,6 +145,16 @@ def _resolve_max_sessions_per_task(args: Any) -> int | None:
             raise ValueError("polar_max_sessions_per_task must be greater than 0")
         return value
     return None
+
+
+def _resolve_max_active_sessions(args: Any, *, default: int) -> int:
+    configured = getattr(args, "polar_max_active_sessions", None)
+    if configured in (None, ""):
+        return int(default)
+    value = int(configured)
+    if value <= 0:
+        raise ValueError("polar_max_active_sessions must be greater than 0")
+    return value
 
 
 def _parse_device_pool(spec: Any) -> list[str]:
