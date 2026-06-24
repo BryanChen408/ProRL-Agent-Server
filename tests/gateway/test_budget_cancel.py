@@ -113,12 +113,21 @@ def test_budget_delete_preserves_active_storage(monkeypatch) -> None:
             self.calls.append((session_id, reason))
             return True
 
+    class FakeInflight:
+        def __init__(self):
+            self.calls = []
+
+        async def close_session(self, session_id: str, *, reason: str | None = None) -> int:
+            self.calls.append((session_id, reason))
+            return 0
+
     storage = SessionStore()
     storage.ensure_session("s", None, None, None, task_id="t")
     storage.save_message("s", {"model": "m"}, {"choices": []}, task_id="t")
     registry = SessionRegistry()
     registry.register("s", task_id="t", status=SessionStatus.RUNNING)
     node_manager = FakeNodeManager()
+    inflight = FakeInflight()
     monkeypatch.setattr(
         server,
         "get_state",
@@ -126,6 +135,7 @@ def test_budget_delete_preserves_active_storage(monkeypatch) -> None:
             node_manager=node_manager,
             session_registry=registry,
             storage=storage,
+            inflight=inflight,
         ),
     )
 
@@ -134,6 +144,7 @@ def test_budget_delete_preserves_active_storage(monkeypatch) -> None:
     assert response.deleted is True
     assert response.messages_deleted == 0
     assert node_manager.calls == [("s", "pipeline_budget_exceeded")]
+    assert inflight.calls == []
     assert registry.get("s") is not None
     assert len(storage.load_completion_session("s").completions) == 1
     assert storage.is_session_closed("s") is False
@@ -143,21 +154,36 @@ def test_manual_delete_removes_storage(monkeypatch) -> None:
     from polar.gateway import server
 
     class FakeNodeManager:
+        def __init__(self):
+            self.calls = []
+
         async def cancel(self, session_id: str, *, reason: str | None = None) -> bool:
+            self.calls.append((session_id, reason))
             return True
+
+    class FakeInflight:
+        def __init__(self):
+            self.calls = []
+
+        async def close_session(self, session_id: str, *, reason: str | None = None) -> int:
+            self.calls.append((session_id, reason))
+            return 1
 
     storage = SessionStore()
     storage.ensure_session("s", None, None, None, task_id="t")
     storage.save_message("s", {"model": "m"}, {"choices": []}, task_id="t")
     registry = SessionRegistry()
     registry.register("s", task_id="t", status=SessionStatus.RUNNING)
+    node_manager = FakeNodeManager()
+    inflight = FakeInflight()
     monkeypatch.setattr(
         server,
         "get_state",
         lambda: SimpleNamespace(
-            node_manager=FakeNodeManager(),
+            node_manager=node_manager,
             session_registry=registry,
             storage=storage,
+            inflight=inflight,
         ),
     )
 
@@ -165,6 +191,8 @@ def test_manual_delete_removes_storage(monkeypatch) -> None:
 
     assert response.deleted is True
     assert response.messages_deleted == 1
+    assert node_manager.calls == [("s", None)]
+    assert inflight.calls == [("s", "delete_session")]
     assert registry.get("s") is None
     assert storage.load_completion_session("s").completions == []
     assert storage.is_session_closed("s") is True

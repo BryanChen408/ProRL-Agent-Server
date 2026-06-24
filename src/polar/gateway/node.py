@@ -20,6 +20,7 @@ from polar.gateway.dispatcher import (
     SessionDispatcher,
     SessionStage,
 )
+from polar.gateway.inflight import InflightGenerationTracker
 from polar.gateway.session import SessionRegistry
 from polar.gateway.storage import SessionStore
 from polar.agent.base import BaseHarness
@@ -66,6 +67,7 @@ class GatewayNodeManager:
         session_base_dir: str | None = None,
         rollout_server_url: str | None = None,
         heartbeat_interval_seconds: int = 30,
+        inflight: InflightGenerationTracker | None = None,
     ) -> None:
         self.node_id = node_id
         self.gateway_url = gateway_url.rstrip("/")
@@ -73,6 +75,7 @@ class GatewayNodeManager:
         self.max_run_workers = max_run_workers
         self.max_postrun_workers = max_postrun_workers
         self.storage = storage
+        self.inflight = inflight
         self.session_registry = session_registry
         self.builders = builders
         self.evaluators = evaluators
@@ -202,7 +205,10 @@ class GatewayNodeManager:
             raise
 
     async def cancel(self, session_id: str, *, reason: str | None = None) -> bool:
-        return await self._dispatcher.cancel(session_id, reason=reason)
+        cancelled = await self._dispatcher.cancel(session_id, reason=reason)
+        if cancelled and reason != "pipeline_budget_exceeded":
+            await self._close_inflight_generations(session_id, reason=reason or "cancel")
+        return cancelled
 
     async def active_sessions(self) -> int:
         return await self._dispatcher.active_count()
@@ -566,6 +572,7 @@ class GatewayNodeManager:
                 }
             )
             self.session_registry.set_result(request.session_id, normalized)
+            await self._close_inflight_generations(request.session_id, reason="postrun_result")
             self.storage.mark_session_closed(request.session_id, reason="postrun_result")
             self.storage.delete_session(request.session_id)
             if await self._push_result(request.callback_url, normalized):
@@ -575,6 +582,23 @@ class GatewayNodeManager:
         finally:
             await self._remove_session_dir_best_effort(
                 managed.session_dir, request.session_id
+            )
+
+    async def _close_inflight_generations(
+        self,
+        session_id: str,
+        *,
+        reason: str | None = None,
+    ) -> None:
+        if self.inflight is None:
+            return
+        try:
+            await self.inflight.close_session(session_id, reason=reason)
+        except Exception:
+            logger.warning(
+                "Failed to close inflight generations for session %s",
+                session_id,
+                exc_info=True,
             )
 
     async def _build_session_result(self, managed: ManagedSession) -> SessionResult:

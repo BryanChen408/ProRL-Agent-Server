@@ -118,6 +118,7 @@ def _build_state(topology: TopologyConfig, node_id: str | None) -> GatewayState:
         # 建的 logs/agent → claude 的 `tee logs/agent/claude-code.txt` 失败 → step exit 1。
         # 默认 None(=/tmp,仅适用无 DooD 的 LocalRuntime)。
         session_base_dir=os.environ.get("POLAR_SESSION_BASE_DIR") or None,
+        inflight=inflight,
     )
     return GatewayState(
         topology=topology,
@@ -300,6 +301,10 @@ def _upstream_error_response(api_type: APIType, exc: Exception) -> JSONResponse:
     )
 
 
+def _closed_session_response(api_type: APIType, session_id: str) -> JSONResponse:
+    return _upstream_error_response(api_type, UpstreamError(f"session {session_id} is closed"))
+
+
 def _stream_error_output(api_type: APIType, exc: Exception) -> str:
     message = str(exc)
     error_type = _error_type_name(exc)
@@ -444,6 +449,11 @@ async def inference_generation_status():
         "inflight_generations": state.inflight.status(),
         "late_completions": state.storage.late_completion_summary(),
     }
+
+
+@app.get("/admin/inference/inflight")
+async def inference_inflight_status():
+    return get_state().inflight.status()
 
 
 @app.post("/admin/inference/pause")
@@ -635,6 +645,10 @@ async def delete_session(session_id: str, reason: str | None = Query(default=Non
     if preserve_for_postrun:
         deleted_count = 0
     else:
+        await state.inflight.close_session(
+            safe_session_id,
+            reason=cancel_reason or "delete_session",
+        )
         state.storage.mark_session_closed(
             safe_session_id,
             reason=cancel_reason or "delete_session",
@@ -725,6 +739,8 @@ async def _handle_non_streaming(
     session_info: Any | None,
 ) -> JSONResponse:
     state = get_state()
+    if state.storage.is_session_closed(session_id):
+        return _closed_session_response(api_type, session_id)
     try:
         generation = await state.inflight.run(
             session_id,
@@ -769,6 +785,8 @@ async def _handle_streaming(
     session_info: Any | None,
 ) -> StreamingResponse | JSONResponse:
     state = get_state()
+    if state.storage.is_session_closed(session_id):
+        return _closed_session_response(api_type, session_id)
     non_stream_request = {k: v for k, v in openai_request.items() if k != "stream_options"}
     non_stream_request["stream"] = False
     try:

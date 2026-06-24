@@ -4,6 +4,7 @@ import asyncio
 from types import SimpleNamespace
 
 from polar.gateway.inflight import InflightGenerationTracker, request_fingerprint
+from polar.gateway.node import GatewayNodeManager
 from polar.gateway.proxy import UpstreamError
 from polar.gateway.storage import SessionStore
 from polar.gateway.transform.openai_chat import OpenAIChatTransformer
@@ -154,5 +155,79 @@ def test_non_streaming_handler_coalesces_duplicate_request_and_saves_once(monkey
         session = storage.load_completion_session("sess1")
         assert len(session.completions) == 1
         assert tracker.status()["coalesced_request_count"] == 1
+
+    asyncio.run(_run())
+
+
+def test_non_streaming_handler_rejects_closed_session_without_upstream(monkeypatch) -> None:
+    async def _run() -> None:
+        tracker = InflightGenerationTracker()
+        storage = SessionStore()
+        storage.mark_session_closed("sess1", reason="postrun_result")
+        calls = 0
+
+        class FakeInference:
+            async def completion(self, request: dict) -> dict:
+                nonlocal calls
+                calls += 1
+                return {"choices": []}
+
+        monkeypatch.setattr(
+            gateway_server,
+            "get_state",
+            lambda: SimpleNamespace(
+                inference=FakeInference(),
+                inflight=tracker,
+                storage=storage,
+            ),
+        )
+
+        response = await gateway_server._handle_non_streaming(
+            gateway_server.APIType.OPENAI_CHAT,
+            OpenAIChatTransformer(),
+            {"model": "served", "messages": []},
+            {"model": "requested", "messages": []},
+            "sess1",
+            original_model="requested",
+            session_info=None,
+        )
+
+        assert response.status_code == 502
+        assert calls == 0
+
+    asyncio.run(_run())
+
+
+def test_inflight_status_endpoint_returns_tracker_status(monkeypatch) -> None:
+    tracker = InflightGenerationTracker()
+    monkeypatch.setattr(
+        gateway_server,
+        "get_state",
+        lambda: SimpleNamespace(inflight=tracker),
+    )
+
+    payload = asyncio.run(gateway_server.inference_inflight_status())
+
+    assert payload["active"] == 0
+    assert payload["coalesced_request_count"] == 0
+
+
+def test_node_manager_close_inflight_generations_is_best_effort() -> None:
+    async def _run() -> None:
+        class FakeInflight:
+            def __init__(self):
+                self.calls = []
+
+            async def close_session(self, session_id: str, *, reason: str | None = None) -> int:
+                self.calls.append((session_id, reason))
+                return 1
+
+        inflight = FakeInflight()
+        manager = GatewayNodeManager.__new__(GatewayNodeManager)
+        manager.inflight = inflight
+
+        await manager._close_inflight_generations("sess1", reason="postrun_result")
+
+        assert inflight.calls == [("sess1", "postrun_result")]
 
     asyncio.run(_run())
