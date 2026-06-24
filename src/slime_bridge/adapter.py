@@ -258,7 +258,15 @@ def _reward_value(trace: "Trace") -> float:
 
 
 def _scheduler_metadata(result: "SessionResult", trace: "Trace | None") -> dict[str, Any]:
-    keys = {"group_id", "policy_version", "rollout_step"}
+    keys = {
+        "group_id",
+        "policy_version",
+        "rollout_step",
+        "session_pool",
+        "parent_task_id",
+        "sample_pos",
+        "group_size",
+    }
     merged: dict[str, Any] = {}
     for source in (
         getattr(result, "metadata", None),

@@ -79,6 +79,68 @@ class _CompletedGroup:
     session_count: int
     completed_at: float = field(default_factory=time.monotonic)
 
+
+@dataclass(slots=True)
+class _PendingSessionUnit:
+    group_id: int
+    group_pos: int
+    sample_pos: int
+    sample: Any
+    parent_group: list[Any]
+    parent_task_id: str
+    task_id: str
+    submitted_rollout_id: int
+    policy_version: int
+
+
+@dataclass(slots=True)
+class _SessionSlotResult:
+    task_result: TaskResult
+    samples: list[Any]
+
+
+@dataclass(slots=True)
+class _SessionGroupAccumulator:
+    group_id: int
+    group_pos: int
+    group: list[Any]
+    submitted_rollout_id: int
+    policy_version: int
+    parent_task_id: str
+    next_submit_pos: int = 0
+    slots: dict[int, _SessionSlotResult] = field(default_factory=dict)
+    result_paths: list[str] = field(default_factory=list)
+    rejected_reason: str | None = None
+    cancelled_by_pause_policy: bool = False
+
+    @property
+    def group_size(self) -> int:
+        return len(self.group)
+
+    @property
+    def submitted_count(self) -> int:
+        return self.next_submit_pos
+
+    @property
+    def completed_count(self) -> int:
+        return len(self.slots)
+
+    @property
+    def fully_submitted(self) -> bool:
+        return self.next_submit_pos >= self.group_size
+
+    @property
+    def complete(self) -> bool:
+        return self.completed_count >= self.group_size
+
+    @property
+    def partial(self) -> bool:
+        return not self.fully_submitted
+
+    @property
+    def terminal(self) -> bool:
+        return self.complete or self.rejected_reason is not None
+
 # ---------------------------------------------------------------------------
 # Global worker singleton
 # ---------------------------------------------------------------------------
@@ -290,18 +352,228 @@ def _attach_scheduler_metadata(
     group_id: int,
     policy_version: int,
     rollout_step: int,
+    extra: dict[str, Any] | None = None,
 ) -> None:
     metadata = payload.get("metadata")
     if metadata is None:
         metadata = {}
     if not isinstance(metadata, dict):
         raise ValueError("polar task metadata must be a mapping when provided")
-    payload["metadata"] = {
-        **metadata,
+    scheduler_metadata = {
         "group_id": group_id,
         "policy_version": policy_version,
         "rollout_step": rollout_step,
     }
+    if extra:
+        scheduler_metadata.update(extra)
+    payload["metadata"] = {
+        **metadata,
+        **scheduler_metadata,
+    }
+
+
+def _make_session_pool_task_id(base_task_id: str, *, group_id: int, sample_pos: int) -> str:
+    return f"{base_task_id}--g{group_id:06d}-sp{sample_pos:03d}"
+
+
+def _new_session_group_accumulator(
+    *,
+    args: Any,
+    config: PolarSlimeConfig,
+    group_id: int,
+    group_pos: int,
+    group: list[Any],
+    submitted_rollout_id: int,
+    policy_version: int,
+) -> _SessionGroupAccumulator:
+    payload = _build_task_payload(
+        args=args,
+        config=config,
+        group=group,
+        rollout_id=group_id,
+        task_position=0,
+    )
+    return _SessionGroupAccumulator(
+        group_id=group_id,
+        group_pos=group_pos,
+        group=group,
+        submitted_rollout_id=submitted_rollout_id,
+        policy_version=policy_version,
+        parent_task_id=str(payload["task_id"]),
+    )
+
+
+def _next_session_pool_unit(accumulator: _SessionGroupAccumulator) -> _PendingSessionUnit | None:
+    if accumulator.fully_submitted:
+        return None
+    sample_pos = accumulator.next_submit_pos
+    accumulator.next_submit_pos += 1
+    return _PendingSessionUnit(
+        group_id=accumulator.group_id,
+        group_pos=accumulator.group_pos,
+        sample_pos=sample_pos,
+        sample=accumulator.group[sample_pos],
+        parent_group=accumulator.group,
+        parent_task_id=accumulator.parent_task_id,
+        task_id=_make_session_pool_task_id(
+            accumulator.parent_task_id,
+            group_id=accumulator.group_id,
+            sample_pos=sample_pos,
+        ),
+        submitted_rollout_id=accumulator.submitted_rollout_id,
+        policy_version=accumulator.policy_version,
+    )
+
+
+def _build_session_unit_payload(
+    *,
+    args: Any,
+    config: PolarSlimeConfig,
+    unit: _PendingSessionUnit,
+) -> dict[str, Any]:
+    payload = _build_task_payload(
+        args=args,
+        config=config,
+        group=[unit.sample],
+        rollout_id=unit.group_id,
+        task_position=unit.sample_pos,
+    )
+    payload["num_samples"] = 1
+    payload["task_id"] = unit.task_id
+    _attach_scheduler_metadata(
+        payload,
+        group_id=unit.group_id,
+        policy_version=unit.policy_version,
+        rollout_step=unit.submitted_rollout_id,
+        extra={
+            "session_pool": True,
+            "parent_task_id": unit.parent_task_id,
+            "sample_pos": unit.sample_pos,
+            "group_size": len(unit.parent_group),
+        },
+    )
+    return payload
+
+
+def _flatten_session_pool_units(
+    *,
+    args: Any,
+    config: PolarSlimeConfig,
+    groups: list[list[Any]],
+    first_group_id: int,
+    submitted_rollout_id: int,
+    policy_version: int,
+) -> list[_PendingSessionUnit]:
+    units: list[_PendingSessionUnit] = []
+    for group_pos, group in enumerate(groups):
+        accumulator = _new_session_group_accumulator(
+            args=args,
+            config=config,
+            group_id=first_group_id + group_pos,
+            group_pos=group_pos,
+            group=group,
+            submitted_rollout_id=submitted_rollout_id,
+            policy_version=policy_version,
+        )
+        while True:
+            unit = _next_session_pool_unit(accumulator)
+            if unit is None:
+                break
+            units.append(unit)
+    return units
+
+
+def _record_session_unit_result(
+    *,
+    config: PolarSlimeConfig,
+    accumulator: _SessionGroupAccumulator,
+    unit: _PendingSessionUnit,
+    task_result: TaskResult,
+    max_tokens: int | None = None,
+) -> None:
+    if task_result.status != "completed":
+        raise PolarRolloutSchedulerError(
+            f"Task {task_result.task_id} cannot be accepted: task status={task_result.status}"
+        )
+    if len(task_result.results) != 1:
+        raise PolarRolloutSchedulerError(
+            f"Task {task_result.task_id} cannot be accepted: session count "
+            f"{len(task_result.results)} != expected 1"
+        )
+    samples = _convert_task_result_to_samples(
+        config,
+        task_result,
+        [unit.sample],
+        max_tokens=max_tokens,
+    )
+    if not samples:
+        raise PolarRolloutSchedulerError(f"Task {task_result.task_id} converted to zero samples")
+    accumulator.slots[unit.sample_pos] = _SessionSlotResult(
+        task_result=task_result,
+        samples=samples,
+    )
+    accumulator.result_paths.extend(task_result.result_paths)
+
+
+def _synthetic_session_pool_task_result(accumulator: _SessionGroupAccumulator) -> TaskResult:
+    ordered_slots = [accumulator.slots[pos] for pos in range(accumulator.group_size)]
+    results = [
+        result
+        for slot in ordered_slots
+        for result in slot.task_result.results
+    ]
+    result_paths = [
+        path
+        for slot in ordered_slots
+        for path in slot.task_result.result_paths
+    ]
+    status = "completed" if all(slot.task_result.status == "completed" for slot in ordered_slots) else "failed"
+    return TaskResult(
+        task_id=accumulator.parent_task_id,
+        status=status,
+        results=results,
+        result_paths=result_paths,
+    )
+
+
+def _completed_group_from_session_accumulator(
+    config: PolarSlimeConfig,
+    accumulator: _SessionGroupAccumulator,
+) -> _CompletedGroup:
+    if not accumulator.complete:
+        raise PolarRolloutSchedulerError(
+            f"Session pool group {accumulator.group_id} is not complete"
+        )
+    task_result = _synthetic_session_pool_task_result(accumulator)
+    group_samples = [
+        sample
+        for pos in range(accumulator.group_size)
+        for sample in accumulator.slots[pos].samples
+    ]
+    if not group_samples:
+        raise PolarRolloutSchedulerError(f"Task {task_result.task_id} converted to zero samples")
+    if not _has_trainable_tokens(group_samples):
+        raise PolarRolloutSchedulerError(
+            f"Task {task_result.task_id} produced zero trainable tokens"
+        )
+    rejection_reason = _low_complete_accept_fraction_rejection_reason(
+        config,
+        task_result,
+        group_samples,
+    )
+    if rejection_reason is not None:
+        raise PolarLowCompleteAcceptFractionError(
+            f"Task {task_result.task_id} cannot be accepted: {rejection_reason}"
+        )
+    return _CompletedGroup(
+        group_id=accumulator.group_id,
+        group=accumulator.group,
+        samples=group_samples,
+        task_id=task_result.task_id,
+        submitted_rollout_id=accumulator.submitted_rollout_id,
+        policy_version=accumulator.policy_version,
+        session_count=len(task_result.results),
+    )
 
 
 async def _submit_and_wait_for_task(
