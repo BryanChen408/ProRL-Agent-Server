@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 from typing import Any
 
 import httpx
@@ -65,21 +66,52 @@ class InferenceClient:
     request params and canonicalizes responses.
     """
 
-    _LIVENESS_TIMEOUT_SECONDS = 900.0
+    _DEFAULT_LIVENESS_TIMEOUT_SECONDS = 900.0
+    _LIVENESS_TIMEOUT_ENV = "POLAR_INFERENCE_REQUEST_TIMEOUT_SECONDS"
 
-    def __init__(self, base_url: str, engine: InferenceEngine):
+    def __init__(
+        self,
+        base_url: str,
+        engine: InferenceEngine,
+        *,
+        liveness_timeout_seconds: float | None = None,
+    ):
         self.base_url = base_url.rstrip("/")
         self.engine = engine
+        self._liveness_timeout_seconds = (
+            self._coerce_liveness_timeout_seconds(liveness_timeout_seconds)
+            if liveness_timeout_seconds is not None
+            else self._read_liveness_timeout_seconds()
+        )
         self._client: httpx.AsyncClient | None = None
         self._generation_paused = False
         self._inflight_generations = 0
         self._generation_condition = asyncio.Condition()
 
+    @classmethod
+    def _read_liveness_timeout_seconds(cls) -> float:
+        raw = os.environ.get(cls._LIVENESS_TIMEOUT_ENV)
+        if raw is None or raw.strip() == "":
+            return cls._DEFAULT_LIVENESS_TIMEOUT_SECONDS
+        try:
+            return cls._coerce_liveness_timeout_seconds(float(raw))
+        except ValueError as exc:
+            raise ValueError(
+                f"{cls._LIVENESS_TIMEOUT_ENV} must be a positive number of seconds"
+            ) from exc
+
+    @staticmethod
+    def _coerce_liveness_timeout_seconds(value: float) -> float:
+        timeout = float(value)
+        if timeout <= 0:
+            raise ValueError("liveness timeout must be greater than 0")
+        return timeout
+
     async def _get_client(self) -> httpx.AsyncClient:
         if self._client is None or self._client.is_closed:
             self._client = httpx.AsyncClient(
                 base_url=self.base_url,
-                timeout=httpx.Timeout(self._LIVENESS_TIMEOUT_SECONDS, connect=30),
+                timeout=httpx.Timeout(self._liveness_timeout_seconds, connect=30),
             )
         return self._client
 
@@ -168,6 +200,7 @@ class InferenceClient:
             "inflight": self._inflight_generations,
             "base_url": self.base_url,
             "engine": self.engine.name,
+            "request_timeout_seconds": self._liveness_timeout_seconds,
         }
 
     async def list_models(self) -> dict[str, Any]:
