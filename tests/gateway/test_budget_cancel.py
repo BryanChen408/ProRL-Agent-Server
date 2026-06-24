@@ -136,6 +136,7 @@ def test_budget_delete_preserves_active_storage(monkeypatch) -> None:
     assert node_manager.calls == [("s", "pipeline_budget_exceeded")]
     assert registry.get("s") is not None
     assert len(storage.load_completion_session("s").completions) == 1
+    assert storage.is_session_closed("s") is False
 
 
 def test_manual_delete_removes_storage(monkeypatch) -> None:
@@ -166,3 +167,6 @@ def test_manual_delete_removes_storage(monkeypatch) -> None:
     assert response.messages_deleted == 1
     assert registry.get("s") is None
     assert storage.load_completion_session("s").completions == []
+    assert storage.is_session_closed("s") is True
+    assert storage.save_message("s", {"model": "m"}, {"choices": []}, task_id="t") is None
+    assert storage.late_completion_summary()["late_message_drop_count"] == 1

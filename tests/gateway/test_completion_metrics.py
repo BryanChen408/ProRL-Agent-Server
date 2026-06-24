@@ -65,6 +65,34 @@ def test_session_store_exposes_completion_metrics() -> None:
     assert session_metrics["latest"]["sequence"] == 2
 
 
+def test_session_store_drops_late_completion_after_close() -> None:
+    store = SessionStore()
+    first_id = store.save_message(
+        "sess1",
+        {"model": "served", "messages": []},
+        _response(10, 4),
+        task_id="task1",
+    )
+    assert first_id is not None
+
+    store.mark_session_closed("sess1", reason="postrun_result")
+    assert store.delete_session("sess1") == 1
+
+    late_id = store.save_message(
+        "sess1",
+        {"model": "served", "messages": []},
+        _response(20, 6),
+        task_id="task1",
+    )
+
+    assert late_id is None
+    assert store.load_completion_session("sess1").completions == []
+    summary = store.late_completion_summary()
+    assert summary["late_message_drop_count"] == 1
+    assert summary["recent_closed_sessions"][-1]["session_id"] == "sess1"
+    assert summary["recent_closed_sessions"][-1]["reason"] == "postrun_result"
+
+
 def test_gateway_completion_metrics_endpoint_returns_summary(monkeypatch) -> None:
     store = SessionStore()
     store.save_message(

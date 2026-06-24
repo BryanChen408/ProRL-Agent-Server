@@ -436,7 +436,11 @@ async def health():
 
 @app.get("/admin/inference/status")
 async def inference_generation_status():
-    return get_state().inference.generation_status()
+    state = get_state()
+    return {
+        **state.inference.generation_status(),
+        "late_completions": state.storage.late_completion_summary(),
+    }
 
 
 @app.post("/admin/inference/pause")
@@ -625,7 +629,14 @@ async def delete_session(session_id: str, reason: str | None = Query(default=Non
         and info is not None
         and str(info.status) in SessionStatus.active()
     )
-    deleted_count = 0 if preserve_for_postrun else state.storage.delete_session(safe_session_id)
+    if preserve_for_postrun:
+        deleted_count = 0
+    else:
+        state.storage.mark_session_closed(
+            safe_session_id,
+            reason=cancel_reason or "delete_session",
+        )
+        deleted_count = state.storage.delete_session(safe_session_id)
     if info is None and deleted_count == 0:
         raise HTTPException(status_code=404, detail="Session not found")
 

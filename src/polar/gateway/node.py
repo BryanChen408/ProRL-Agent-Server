@@ -566,6 +566,7 @@ class GatewayNodeManager:
                 }
             )
             self.session_registry.set_result(request.session_id, normalized)
+            self.storage.mark_session_closed(request.session_id, reason="postrun_result")
             self.storage.delete_session(request.session_id)
             if await self._push_result(request.callback_url, normalized):
                 # Rollout server has acked; free the heavy payload but keep

@@ -6,6 +6,7 @@ import threading
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+import os
 from typing import Any
 
 from polar.gateway.completion_writer import CompletionWriter
@@ -33,12 +34,29 @@ class _SessionState:
     )
 
 
+@dataclass(slots=True)
+class _ClosedSessionState:
+    session_id: str
+    closed_at: str
+    reason: str | None = None
+
+
 class SessionStore:
     """Thread-safe in-memory storage for active gateway sessions."""
 
     def __init__(self, *, completion_writer: CompletionWriter | None = None) -> None:
         self._lock = threading.RLock()
         self._sessions: dict[str, _SessionState] = {}
+        self._closed_sessions: dict[str, _ClosedSessionState] = {}
+        self._drop_late_completions = self._env_flag(
+            "POLAR_GATEWAY_DROP_LATE_COMPLETIONS",
+            default=True,
+        )
+        self._closed_session_cache_size = self._env_int(
+            "POLAR_GATEWAY_CLOSED_SESSION_CACHE_SIZE",
+            default=10000,
+        )
+        self._late_message_drop_count = 0
         self._completion_writer = completion_writer
 
     def close(self) -> None:
@@ -132,7 +150,7 @@ class SessionStore:
         metadata: dict[str, Any] | None = None,
         latency_ms: float | None = None,
         streaming: bool = False,
-    ) -> str:
+    ) -> str | None:
         """Append one completion record to the in-memory session."""
         effective_model_used = model_used or request.get("model", "unknown")
         record = CompletionRecord.model_validate(
@@ -147,6 +165,9 @@ class SessionStore:
         )
 
         with self._lock:
+            if self._should_drop_late_message_locked(session_id):
+                self._late_message_drop_count += 1
+                return None
             state = self._get_or_create_session_locked(session_id, created_at=created_at)
             self._merge_metadata_locked(
                 state,
@@ -201,6 +222,35 @@ class SessionStore:
             )
         return record.completion_id
 
+    def mark_session_closed(self, session_id: str, *, reason: str | None = None) -> None:
+        """Remember that a session is final so late upstream completions are ignored."""
+        if not session_id:
+            return
+        with self._lock:
+            self._mark_session_closed_locked(session_id, reason=reason)
+
+    def is_session_closed(self, session_id: str) -> bool:
+        with self._lock:
+            return session_id in self._closed_sessions
+
+    def late_completion_summary(self) -> dict[str, Any]:
+        with self._lock:
+            recent_closed = [
+                {
+                    "session_id": state.session_id,
+                    "closed_at": state.closed_at,
+                    "reason": state.reason,
+                }
+                for state in list(self._closed_sessions.values())[-20:]
+            ]
+            return {
+                "drop_late_completions": self._drop_late_completions,
+                "closed_session_count": len(self._closed_sessions),
+                "closed_session_cache_size": self._closed_session_cache_size,
+                "late_message_drop_count": self._late_message_drop_count,
+                "recent_closed_sessions": recent_closed,
+            }
+
     def get_session_metadata(self, session_id: str) -> dict[str, Any] | None:
         """Return session metadata if present."""
         with self._lock:
@@ -236,6 +286,25 @@ class SessionStore:
             if state is None:
                 return 0
             return len(state.completions)
+
+    def _mark_session_closed_locked(
+        self,
+        session_id: str,
+        *,
+        reason: str | None = None,
+    ) -> None:
+        if not self._drop_late_completions:
+            return
+        self._closed_sessions[session_id] = _ClosedSessionState(
+            session_id=session_id,
+            closed_at=datetime.now(timezone.utc).isoformat(),
+            reason=reason,
+        )
+        while len(self._closed_sessions) > self._closed_session_cache_size:
+            self._closed_sessions.pop(next(iter(self._closed_sessions)))
+
+    def _should_drop_late_message_locked(self, session_id: str) -> bool:
+        return self._drop_late_completions and session_id in self._closed_sessions
 
     def _get_or_create_session_locked(
         self,
@@ -304,3 +373,21 @@ class SessionStore:
         if existing in (None, "", "unknown"):
             return incoming
         return existing
+
+    @staticmethod
+    def _env_flag(name: str, *, default: bool) -> bool:
+        raw = os.environ.get(name)
+        if raw is None:
+            return default
+        return raw.strip().lower() not in {"0", "false", "no", "off"}
+
+    @staticmethod
+    def _env_int(name: str, *, default: int) -> int:
+        raw = os.environ.get(name)
+        if raw is None:
+            return default
+        try:
+            value = int(raw)
+        except ValueError:
+            return default
+        return max(1, value)
