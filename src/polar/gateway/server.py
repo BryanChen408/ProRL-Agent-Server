@@ -5,11 +5,9 @@ from __future__ import annotations
 import asyncio
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
-import hashlib
 import json
 import logging
 import os
-import time
 from datetime import datetime, timezone
 from typing import Any
 
@@ -20,6 +18,7 @@ from polar.config import GatewayNodeConfig, TopologyConfig
 from polar.gateway.completion_writer import CompletionWriter
 from polar.gateway.detection import APIType, detect, extract_model
 from polar.gateway.engine import get_engine
+from polar.gateway.inflight import InflightGenerationTracker
 from polar.gateway.node import GatewayNodeManager
 from polar.gateway.proxy import (
     InferenceClient,
@@ -61,6 +60,7 @@ class GatewayState:
     node: GatewayNodeConfig
     inference: InferenceClient
     storage: SessionStore
+    inflight: InflightGenerationTracker
     transform_manager: TransformManager
     session_registry: SessionRegistry
     node_manager: GatewayNodeManager
@@ -92,6 +92,7 @@ def _build_state(topology: TopologyConfig, node_id: str | None) -> GatewayState:
         enabled=persistence_config.enabled and bool(save_dir),
     )
     storage = SessionStore(completion_writer=completion_writer)
+    inflight = InflightGenerationTracker()
     transform_manager = TransformManager()
     session_registry = SessionRegistry()
     builder_registry = default_builder_registry()
@@ -123,6 +124,7 @@ def _build_state(topology: TopologyConfig, node_id: str | None) -> GatewayState:
         node=node,
         inference=inference,
         storage=storage,
+        inflight=inflight,
         transform_manager=transform_manager,
         session_registry=session_registry,
         node_manager=node_manager,
@@ -439,6 +441,7 @@ async def inference_generation_status():
     state = get_state()
     return {
         **state.inference.generation_status(),
+        "inflight_generations": state.inflight.status(),
         "late_completions": state.storage.late_completion_summary(),
     }
 
@@ -722,28 +725,35 @@ async def _handle_non_streaming(
     session_info: Any | None,
 ) -> JSONResponse:
     state = get_state()
-    started = time.perf_counter()
     try:
-        response = await state.inference.completion(openai_request)
+        generation = await state.inflight.run(
+            session_id,
+            openai_request,
+            lambda: state.inference.completion(openai_request),
+        )
     except UpstreamError as exc:
         logger.warning("Non-streaming upstream error for session %s: %s", session_id, exc)
         return _upstream_error_response(api_type, exc)
-    latency_ms = (time.perf_counter() - started) * 1000.0
+    response = generation.response
 
-    state.storage.save_message(
-        session_id,
-        openai_request,
-        response,
-        original_request=original_request,
-        model_requested=original_model,
-        model_used=openai_request["model"],
-        api_type=api_type.value,
-        task_id=session_info.task_id if session_info else None,
-        created_at=session_info.created_at.isoformat() if session_info else None,
-        metadata=_completion_metadata(session_info),
-        latency_ms=latency_ms,
-        streaming=False,
-    )
+    if generation.should_save:
+        metadata = _completion_metadata(session_info)
+        metadata["generation_fingerprint"] = generation.fingerprint
+        metadata["coalesced_generation"] = generation.coalesced
+        state.storage.save_message(
+            session_id,
+            openai_request,
+            response,
+            original_request=original_request,
+            model_requested=original_model,
+            model_used=openai_request["model"],
+            api_type=api_type.value,
+            task_id=session_info.task_id if session_info else None,
+            created_at=session_info.created_at.isoformat() if session_info else None,
+            metadata=metadata,
+            latency_ms=generation.latency_ms,
+            streaming=False,
+        )
     transformed = transformer.transform_response(response, original_request)
     return JSONResponse(transformed)
 
@@ -761,28 +771,35 @@ async def _handle_streaming(
     state = get_state()
     non_stream_request = {k: v for k, v in openai_request.items() if k != "stream_options"}
     non_stream_request["stream"] = False
-    started = time.perf_counter()
     try:
-        response = await state.inference.completion(non_stream_request)
+        generation = await state.inflight.run(
+            session_id,
+            non_stream_request,
+            lambda: state.inference.completion(non_stream_request),
+        )
     except UpstreamError as exc:
         logger.warning("Upstream error for streaming session %s: %s", session_id, exc)
         return _upstream_error_response(api_type, exc)
-    latency_ms = (time.perf_counter() - started) * 1000.0
+    response = generation.response
 
-    state.storage.save_message(
-        session_id,
-        openai_request,
-        response,
-        original_request=original_request,
-        model_requested=original_model,
-        model_used=openai_request["model"],
-        api_type=api_type.value,
-        task_id=session_info.task_id if session_info else None,
-        created_at=session_info.created_at.isoformat() if session_info else None,
-        metadata=_completion_metadata(session_info),
-        latency_ms=latency_ms,
-        streaming=True,
-    )
+    if generation.should_save:
+        metadata = _completion_metadata(session_info)
+        metadata["generation_fingerprint"] = generation.fingerprint
+        metadata["coalesced_generation"] = generation.coalesced
+        state.storage.save_message(
+            session_id,
+            openai_request,
+            response,
+            original_request=original_request,
+            model_requested=original_model,
+            model_used=openai_request["model"],
+            api_type=api_type.value,
+            task_id=session_info.task_id if session_info else None,
+            created_at=session_info.created_at.isoformat() if session_info else None,
+            metadata=metadata,
+            latency_ms=generation.latency_ms,
+            streaming=True,
+        )
 
     synthetic_chunk = _response_to_stream_chunk(response)
     stream_state = transformer.create_stream_state(original_request)
