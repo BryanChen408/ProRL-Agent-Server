@@ -55,7 +55,10 @@ def configure_server(topology_path: str = "topology.yaml") -> None:
 
 def _build_state(topology: TopologyConfig) -> RolloutState:
     rollout = topology.rollout
-    scheduler = NodeScheduler(bootstrap_nodes=topology.bootstrap_nodes)
+    scheduler = NodeScheduler(
+        bootstrap_nodes=topology.bootstrap_nodes,
+        allow_dynamic_nodes=False,
+    )
     event_bus = EventBus()
     pipeline = Pipeline(
         callback_url=f"{rollout.public_url}/callbacks/session_result",
@@ -135,7 +138,10 @@ async def rollout_status():
 
 @app.post("/nodes/register", response_model=GatewayNodeInfo)
 async def register_node(request: NodeRegistrationRequest):
-    return get_state().scheduler.register_node(request)
+    try:
+        return get_state().scheduler.register_node(request)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
 @app.post("/nodes/{node_id}/heartbeat", response_model=GatewayNodeInfo)

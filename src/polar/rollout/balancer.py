@@ -59,11 +59,13 @@ class NodeScheduler:
         self,
         *,
         bootstrap_nodes: list[dict[str, object]] | None = None,
+        allow_dynamic_nodes: bool = True,
         stale_factor: float = 2.5,
     ) -> None:
         self._nodes: dict[str, GatewayNode] = {}
         self._lock = threading.RLock()
         self._stale_factor = stale_factor
+        self._allow_dynamic_nodes = allow_dynamic_nodes
 
         for node in bootstrap_nodes or []:
             node_id = str(node["node_id"])
@@ -83,6 +85,8 @@ class NodeScheduler:
         now = _utcnow()
         with self._lock:
             existing = self._nodes.get(request.node_id)
+            if existing is None and not self._allow_dynamic_nodes:
+                raise KeyError(f"Unknown gateway node: {request.node_id}")
             draining = existing.draining if existing is not None else False
             metrics = existing.metrics.model_copy() if existing is not None else NodeStageMetrics()
             self._nodes[request.node_id] = GatewayNode(

@@ -32,6 +32,7 @@ class _WriteItem:
     sequence: int
     completion_id: str
     payload: dict[str, Any]
+    kind: str = "completion"
 
 
 def _approx_byte_size(value: Any) -> int:
@@ -159,6 +160,39 @@ class CompletionWriter:
             return False
         return True
 
+    def enqueue_metric(
+        self,
+        *,
+        task_id: str | None,
+        session_id: str,
+        completion_id: str,
+        metric: dict[str, Any],
+    ) -> bool:
+        """Persist one lightweight completion metric event as JSONL."""
+        if not self.enabled:
+            return False
+        if not task_id:
+            return False
+        if self._queue is None or self._loop is None:
+            return False
+        sequence = int(metric.get("sequence") or 0)
+        if sequence <= 0:
+            with self._seq_lock:
+                sequence = self._sequences.get(session_id, 0)
+        item = _WriteItem(
+            task_id=task_id,
+            session_id=session_id,
+            sequence=sequence,
+            completion_id=completion_id,
+            payload=dict(metric),
+            kind="metric",
+        )
+        try:
+            self._loop.call_soon_threadsafe(self._put_nowait_or_drop, item)
+        except RuntimeError:
+            return False
+        return True
+
     def _put_nowait_or_drop(self, item: _WriteItem) -> None:
         if self._queue is None:
             return
@@ -182,6 +216,14 @@ class CompletionWriter:
     def _path_for(self, item: _WriteItem) -> Path | None:
         if self.save_dir is None:
             return None
+        if item.kind == "metric":
+            return (
+                self.save_dir
+                / f"task_{item.task_id}"
+                / "sessions"
+                / item.session_id
+                / "completion_metrics.jsonl"
+            )
         return (
             self.save_dir
             / f"task_{item.task_id}"
@@ -213,6 +255,11 @@ class CompletionWriter:
         path.parent.mkdir(parents=True, exist_ok=True)
         payload = dict(item.payload)
         payload.setdefault("__written_at", datetime.now(timezone.utc).isoformat())
+        if item.kind == "metric":
+            with path.open("a", encoding="utf-8") as handle:
+                handle.write(json.dumps(payload, default=str))
+                handle.write("\n")
+            return
         path.write_text(json.dumps(payload, default=str))
 
 

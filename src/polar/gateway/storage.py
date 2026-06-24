@@ -9,6 +9,11 @@ from datetime import datetime, timezone
 from typing import Any
 
 from polar.gateway.completion_writer import CompletionWriter
+from polar.gateway.completion_metrics import (
+    CompletionMetricsAggregate,
+    build_completion_metric_event,
+    combine_completion_metrics,
+)
 from polar.trajectory.models import CompletionRecord, CompletionSession
 
 
@@ -23,6 +28,9 @@ class _SessionState:
     api_type: str | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
     completions: list[CompletionRecord] = field(default_factory=list)
+    completion_metrics: CompletionMetricsAggregate = field(
+        default_factory=CompletionMetricsAggregate
+    )
 
 
 class SessionStore:
@@ -50,6 +58,40 @@ class SessionStore:
             if state is None:
                 return []
             return [c.model_dump(mode="json") for c in state.completions]
+
+    def list_completion_metrics(
+        self,
+        *,
+        task_id: str | None = None,
+        session_id: str | None = None,
+    ) -> list[dict[str, Any]]:
+        with self._lock:
+            rows = []
+            for state in self._sessions.values():
+                if task_id and state.task_id != task_id:
+                    continue
+                if session_id and state.session_id != session_id:
+                    continue
+                rows.append(self._metrics_payload_locked(state))
+            rows.sort(
+                key=lambda row: (
+                    str(row.get("task_id") or ""),
+                    str(row.get("session_id") or ""),
+                )
+            )
+            return rows
+
+    def completion_metrics_summary(
+        self,
+        *,
+        task_id: str | None = None,
+        session_id: str | None = None,
+    ) -> dict[str, Any]:
+        rows = self.list_completion_metrics(task_id=task_id, session_id=session_id)
+        return {
+            "summary": combine_completion_metrics(rows),
+            "sessions": rows,
+        }
 
     def ensure_session(
         self,
@@ -88,6 +130,8 @@ class SessionStore:
         task_id: str | None = None,
         created_at: str | None = None,
         metadata: dict[str, Any] | None = None,
+        latency_ms: float | None = None,
+        streaming: bool = False,
     ) -> str:
         """Append one completion record to the in-memory session."""
         effective_model_used = model_used or request.get("model", "unknown")
@@ -114,6 +158,19 @@ class SessionStore:
             )
             state.completions.append(record)
             state.completion_count = len(state.completions)
+            metric_event = build_completion_metric_event(
+                session_id=session_id,
+                task_id=state.task_id,
+                completion_id=record.completion_id,
+                sequence=state.completion_count,
+                api_type=api_type,
+                model_requested=model_requested,
+                model_used=effective_model_used,
+                response=response,
+                latency_ms=latency_ms,
+                streaming=streaming,
+            )
+            state.completion_metrics.update(metric_event)
             effective_task_id = state.task_id
 
         # Off the hot path: best-effort persist to disk.
@@ -135,6 +192,12 @@ class SessionStore:
                     "response": response,
                     "metadata": dict(metadata or {}),
                 },
+            )
+            self._completion_writer.enqueue_metric(
+                task_id=effective_task_id,
+                session_id=session_id,
+                completion_id=record.completion_id,
+                metric=metric_event,
             )
         return record.completion_id
 
@@ -220,6 +283,18 @@ class SessionStore:
             "model_used": state.model_used,
             "api_type": state.api_type,
             "metadata": dict(state.metadata),
+            "completion_metrics": state.completion_metrics.as_dict(),
+        }
+
+    def _metrics_payload_locked(self, state: _SessionState) -> dict[str, Any]:
+        return {
+            "session_id": state.session_id,
+            "task_id": state.task_id,
+            "model_requested": state.model_requested,
+            "model_used": state.model_used,
+            "api_type": state.api_type,
+            "completion_count": len(state.completions),
+            "completion_metrics": state.completion_metrics.as_dict(),
         }
 
     @staticmethod

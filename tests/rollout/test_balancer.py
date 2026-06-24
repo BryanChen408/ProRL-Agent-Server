@@ -86,3 +86,32 @@ def test_postrun_backlog_blocks_admission() -> None:
     )
 
     assert scheduler.acquire_node() is None
+
+
+def test_strict_scheduler_rejects_unknown_dynamic_node() -> None:
+    scheduler = NodeScheduler(
+        bootstrap_nodes=[
+            {
+                "node_id": "ascend-node-01",
+                "gateway_url": "http://127.0.0.1:8100",
+                "max_init_workers": 8,
+                "max_run_workers": 32,
+                "max_postrun_workers": 32,
+                "heartbeat_interval_seconds": 30,
+            }
+        ],
+        allow_dynamic_nodes=False,
+    )
+
+    _register(scheduler, "ascend-node-01", max_run_workers=32)
+
+    try:
+        _register(scheduler, "profile-node-01")
+    except KeyError as exc:
+        assert "profile-node-01" in str(exc)
+    else:
+        raise AssertionError("strict scheduler accepted an unknown dynamic node")
+
+    nodes = scheduler.list_nodes()
+    assert [node.node_id for node in nodes] == ["ascend-node-01"]
+    assert nodes[0].healthy is True

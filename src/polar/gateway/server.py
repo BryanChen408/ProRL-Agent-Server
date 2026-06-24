@@ -9,6 +9,7 @@ import hashlib
 import json
 import logging
 import os
+import time
 from datetime import datetime, timezone
 from typing import Any
 
@@ -481,6 +482,7 @@ async def list_sessions(
         rows.append({
             **entry,
             "completion_count": int(metadata.get("completion_count") or 0),
+            "completion_metrics": metadata.get("completion_metrics") or {},
             "model_requested": metadata.get("model_requested"),
             "model_used": metadata.get("model_used"),
             "api_type": metadata.get("api_type"),
@@ -488,6 +490,20 @@ async def list_sessions(
             "node_id": state.node.id,
         })
     return {"sessions": rows[:limit], "node_id": state.node.id}
+
+
+@app.get("/completion_metrics")
+async def list_completion_metrics(
+    task_id: str | None = Query(default=None),
+    session_id: str | None = Query(default=None),
+) -> dict[str, Any]:
+    """Lightweight per-session token/latency metrics for live gateway completions."""
+    state = get_state()
+    payload = state.storage.completion_metrics_summary(task_id=task_id, session_id=session_id)
+    return {
+        **payload,
+        "node_id": state.node.id,
+    }
 
 
 @app.get("/sessions/{session_id}/completions")
@@ -695,11 +711,13 @@ async def _handle_non_streaming(
     session_info: Any | None,
 ) -> JSONResponse:
     state = get_state()
+    started = time.perf_counter()
     try:
         response = await state.inference.completion(openai_request)
     except UpstreamError as exc:
         logger.warning("Non-streaming upstream error for session %s: %s", session_id, exc)
         return _upstream_error_response(api_type, exc)
+    latency_ms = (time.perf_counter() - started) * 1000.0
 
     state.storage.save_message(
         session_id,
@@ -712,6 +730,8 @@ async def _handle_non_streaming(
         task_id=session_info.task_id if session_info else None,
         created_at=session_info.created_at.isoformat() if session_info else None,
         metadata=_completion_metadata(session_info),
+        latency_ms=latency_ms,
+        streaming=False,
     )
     transformed = transformer.transform_response(response, original_request)
     return JSONResponse(transformed)
@@ -730,11 +750,13 @@ async def _handle_streaming(
     state = get_state()
     non_stream_request = {k: v for k, v in openai_request.items() if k != "stream_options"}
     non_stream_request["stream"] = False
+    started = time.perf_counter()
     try:
         response = await state.inference.completion(non_stream_request)
     except UpstreamError as exc:
         logger.warning("Upstream error for streaming session %s: %s", session_id, exc)
         return _upstream_error_response(api_type, exc)
+    latency_ms = (time.perf_counter() - started) * 1000.0
 
     state.storage.save_message(
         session_id,
@@ -747,6 +769,8 @@ async def _handle_streaming(
         task_id=session_info.task_id if session_info else None,
         created_at=session_info.created_at.isoformat() if session_info else None,
         metadata=_completion_metadata(session_info),
+        latency_ms=latency_ms,
+        streaming=True,
     )
 
     synthetic_chunk = _response_to_stream_chunk(response)
