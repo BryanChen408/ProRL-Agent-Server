@@ -180,7 +180,14 @@ def prepare_policy_update(args: Any, policy_version: int) -> None:
     with _worker_lock:
         worker = _global_async_worker
         if worker is not None:
-            worker.pause_admission()
+            if worker.config.scheduler_mode == "session_pool":
+                worker.begin_policy_update_drain(policy_version)
+            else:
+                worker.pause_admission()
+
+    if worker is not None and worker.config.scheduler_mode == "session_pool":
+        timeout_seconds = float(getattr(args, "polar_weight_update_pause_timeout", 300.0))
+        worker.wait_for_policy_update_drain(timeout=timeout_seconds)
 
     try:
         _pause_gateway_generation(args)
@@ -192,19 +199,29 @@ def prepare_policy_update(args: Any, policy_version: int) -> None:
         with _worker_lock:
             worker = _global_async_worker
             if worker is not None:
-                worker.resume_admission()
+                if worker.config.scheduler_mode == "session_pool":
+                    worker.finish_policy_update_drain()
+                else:
+                    worker.resume_admission()
         raise
 
 
 def finish_policy_update(args: Any, policy_version: int) -> None:
     """Optional hook called by Slime after overlapping inference weight sync."""
     try:
+        with _worker_lock:
+            worker = _global_async_worker
+            if worker is not None and worker.config.scheduler_mode == "session_pool":
+                worker.update_policy_version(policy_version)
         _resume_gateway_generation(args)
     finally:
         with _worker_lock:
             worker = _global_async_worker
             if worker is not None:
-                worker.resume_admission()
+                if worker.config.scheduler_mode == "session_pool":
+                    worker.finish_policy_update_drain()
+                else:
+                    worker.resume_admission()
     logger.info("Finished Polar bridge policy_version=%s weight update", policy_version)
 
 
@@ -831,6 +848,15 @@ class AsyncPolarRolloutWorker:
         self._active_sessions = 0
         self._completed_buffer_size = 0
         self._admission_paused = False
+        self._policy_update_draining = False
+        self._policy_update_target_version: int | None = None
+        self._policy_update_drain_started_at: float | None = None
+        self._policy_update_drain_complete = threading.Event()
+        self._policy_update_drain_complete.set()
+        self._session_pool_open_groups = 0
+        self._session_pool_partial_open_groups = 0
+        self._session_pool_pending_sessions = 0
+        self._session_pool_submitted_sessions = 0
         # Per-task callback plumbing: event fires when the rollout server POSTs
         # the terminal TaskResult to our local listener.
         self._task_events: dict[str, asyncio.Event] = {}
@@ -871,6 +897,33 @@ class AsyncPolarRolloutWorker:
     def resume_admission(self) -> None:
         with self._state_lock:
             self._admission_paused = False
+
+    def begin_policy_update_drain(self, policy_version: int) -> None:
+        with self._state_lock:
+            self._policy_update_draining = True
+            self._policy_update_target_version = int(policy_version)
+            self._policy_update_drain_started_at = time.monotonic()
+            self._policy_update_drain_complete.clear()
+            self._metrics["polar/session_pool/policy_update_drains"] = (
+                self._metrics.get("polar/session_pool/policy_update_drains", 0.0) + 1.0
+            )
+            self._metrics["polar/scheduler/admission_pauses"] = (
+                self._metrics.get("polar/scheduler/admission_pauses", 0.0) + 1.0
+            )
+
+    def wait_for_policy_update_drain(self, *, timeout: float | None) -> None:
+        if not self._policy_update_drain_complete.wait(timeout=timeout):
+            raise PolarRolloutSchedulerError(
+                "Timed out waiting for Polar session_pool scheduler to drain "
+                "open groups before policy update"
+            )
+
+    def finish_policy_update_drain(self) -> None:
+        with self._state_lock:
+            self._policy_update_draining = False
+            self._policy_update_target_version = None
+            self._policy_update_drain_started_at = None
+            self._policy_update_drain_complete.set()
 
     def raise_if_failed(self) -> None:
         if self._fatal_error is not None:
@@ -944,6 +997,12 @@ class AsyncPolarRolloutWorker:
             out["polar/scheduler/deferred_queue"] = float(self.deferred_queue.qsize())
             out["polar/scheduler/policy_version"] = float(self._policy_version)
             out["polar/scheduler/admission_paused"] = float(self._admission_paused)
+            out["polar/session_pool/active_sessions"] = float(self._active_sessions)
+            out["polar/session_pool/open_groups"] = float(self._session_pool_open_groups)
+            out["polar/session_pool/partial_open_groups"] = float(self._session_pool_partial_open_groups)
+            out["polar/session_pool/pending_sessions"] = float(self._session_pool_pending_sessions)
+            out.setdefault("polar/session_pool/submitted_sessions", 0.0)
+            out.setdefault("polar/session_pool/completed_sessions", 0.0)
             return out
 
     # -- internal --------------------------------------------------------------
@@ -952,6 +1011,12 @@ class AsyncPolarRolloutWorker:
         asyncio.run(self._async_loop())
 
     async def _async_loop(self) -> None:
+        if self.config.scheduler_mode == "session_pool":
+            await self._async_session_pool_loop()
+            return
+        await self._async_group_loop()
+
+    async def _async_group_loop(self) -> None:
         logger.info("Async Polar rollout worker started")
         active: dict[asyncio.Task[None], _PendingGroup] = {}
         active_session_cost = 0
@@ -1035,6 +1100,122 @@ class AsyncPolarRolloutWorker:
                 logger.warning("Callback listener did not shut down within 5s")
         logger.info("Async Polar rollout worker stopped")
 
+    async def _async_session_pool_loop(self) -> None:
+        logger.info("Async Polar session-pool rollout worker started")
+        active: dict[asyncio.Task[TaskResult], _PendingSessionUnit] = {}
+        open_groups: dict[int, _SessionGroupAccumulator] = {}
+        wakeup = asyncio.Event()
+
+        callback_server, callback_task = await self._start_callback_listener()
+        timeout = None if self.config.request_timeout is None else httpx.Timeout(self.config.request_timeout)
+        try:
+            async with httpx.AsyncClient(timeout=timeout) as client:
+                while self._running:
+                    done = [t for t in active if t.done()]
+                    for task in done:
+                        unit = active.pop(task)
+                        accumulator = open_groups.get(unit.group_id)
+                        try:
+                            task_result = task.result()
+                            if accumulator is not None and accumulator.rejected_reason is None:
+                                _record_session_unit_result(
+                                    config=self.config,
+                                    accumulator=accumulator,
+                                    unit=unit,
+                                    task_result=task_result,
+                                    max_tokens=_resolve_max_tokens(self.args),
+                                )
+                                self._inc_metric("polar/session_pool/completed_sessions")
+                        except Exception as exc:
+                            logger.warning(
+                                "Dropping Polar session_pool group %s after unit %s failed: %s",
+                                unit.group_id,
+                                unit.task_id,
+                                exc,
+                            )
+                            if accumulator is not None and accumulator.rejected_reason is None:
+                                accumulator.rejected_reason = str(exc)
+                                self._drop_session_pool_group(
+                                    accumulator,
+                                    "hard unit failure",
+                                    category_metric="polar/dropped_failed_groups",
+                                )
+
+                    await self._finish_terminal_session_pool_groups(open_groups)
+                    self._record_session_pool_counts(active, open_groups)
+                    self._maybe_mark_policy_update_drain_complete(open_groups, active)
+
+                    while self._running and self._can_admit_session_pool_unit(active, open_groups):
+                        accumulator = self._current_partial_group(open_groups)
+                        if accumulator is None:
+                            if self._session_pool_draining():
+                                break
+                            if self._session_pool_owned_group_count(open_groups) >= (
+                                self._batch_size * self.config.max_async_level
+                            ):
+                                break
+                            try:
+                                next_group = self._next_group_for_submission()
+                            except Exception as exc:
+                                self._set_fatal(exc)
+                                self._running = False
+                                break
+                            if next_group is None:
+                                break
+                            with self._state_lock:
+                                if self._policy_update_draining:
+                                    self.deferred_queue.put(next_group)
+                                    break
+                                gid = self._group_counter
+                                self._group_counter += 1
+                                submitted_rollout_id = self._current_rollout_id
+                                policy_version = self._policy_version
+                            accumulator = _new_session_group_accumulator(
+                                args=self.args,
+                                config=self.config,
+                                group_id=gid,
+                                group_pos=gid,
+                                group=next_group.group,
+                                submitted_rollout_id=submitted_rollout_id,
+                                policy_version=policy_version,
+                            )
+                            open_groups[gid] = accumulator
+
+                        unit = _next_session_pool_unit(accumulator)
+                        if unit is None:
+                            continue
+                        task = asyncio.create_task(
+                            self._submit_session_unit(client, unit),
+                            name=f"polar-session-unit-{unit.group_id}-{unit.sample_pos}",
+                        )
+                        task.add_done_callback(lambda _: wakeup.set())
+                        active[task] = unit
+                        self._inc_metric("polar/session_pool/submitted_sessions")
+                        self._record_session_pool_counts(active, open_groups)
+                        if len(active) >= self.config.max_active_sessions:
+                            break
+
+                    self._record_session_pool_counts(active, open_groups)
+                    self._maybe_mark_policy_update_drain_complete(open_groups, active)
+
+                    if self._running:
+                        try:
+                            await asyncio.wait_for(wakeup.wait(), timeout=0.5)
+                        except asyncio.TimeoutError:
+                            pass
+                        wakeup.clear()
+
+            if active:
+                logger.info("Waiting for %d in-flight Polar session_pool tasks", len(active))
+                await asyncio.gather(*active.keys(), return_exceptions=True)
+        finally:
+            callback_server.should_exit = True
+            try:
+                await asyncio.wait_for(callback_task, timeout=5.0)
+            except asyncio.TimeoutError:
+                logger.warning("Callback listener did not shut down within 5s")
+        logger.info("Async Polar session-pool rollout worker stopped")
+
     async def _start_callback_listener(self) -> tuple[uvicorn.Server, asyncio.Task[None]]:
         """Bind a FastAPI listener for TaskResult callbacks."""
         app = FastAPI()
@@ -1108,6 +1289,169 @@ class AsyncPolarRolloutWorker:
             last_error,
         )
         return
+
+    async def _submit_session_unit(
+        self,
+        client: httpx.AsyncClient,
+        unit: _PendingSessionUnit,
+    ) -> TaskResult:
+        payload = _build_session_unit_payload(
+            args=self.args,
+            config=self.config,
+            unit=unit,
+        )
+        return await self._submit_with_callback(client, payload)
+
+    async def _finish_terminal_session_pool_groups(
+        self,
+        open_groups: dict[int, _SessionGroupAccumulator],
+    ) -> None:
+        for group_id in sorted(list(open_groups)):
+            accumulator = open_groups[group_id]
+            if accumulator.rejected_reason is not None:
+                open_groups.pop(group_id, None)
+                continue
+            if not accumulator.complete:
+                break
+            try:
+                completed = _completed_group_from_session_accumulator(
+                    self.config,
+                    accumulator,
+                )
+                await self._emit_completed(completed)
+                self._inc_metric("polar/session_pool/completed_groups")
+            except Exception as exc:
+                if _is_zero_trainable_error(exc):
+                    category_metric = "polar/dropped_zero_trainable_groups"
+                    reason = "zero trainable tokens"
+                elif isinstance(exc, PolarLowCompleteAcceptFractionError):
+                    category_metric = "polar/dropped_low_complete_fraction_groups"
+                    reason = "low complete accept fraction"
+                elif isinstance(exc, RolloutLogprobError):
+                    category_metric = "polar/dropped_logprob_error_groups"
+                    reason = "rollout logprob error"
+                else:
+                    category_metric = "polar/dropped_failed_groups"
+                    reason = "task failure"
+                self._drop_session_pool_group(
+                    accumulator,
+                    reason,
+                    category_metric=category_metric,
+                )
+            finally:
+                open_groups.pop(group_id, None)
+
+    def _drop_session_pool_group(
+        self,
+        accumulator: _SessionGroupAccumulator,
+        reason: str,
+        *,
+        category_metric: str,
+    ) -> None:
+        if accumulator.rejected_reason is None:
+            accumulator.rejected_reason = reason
+        self._inc_metric("polar/dropped_groups")
+        self._inc_metric("polar/session_pool/dropped_groups")
+        self._inc_metric(category_metric)
+        dropped_sessions = max(accumulator.group_size, accumulator.submitted_count)
+        self._inc_metric("polar/dropped_sessions", dropped_sessions)
+        self._inc_metric("polar/session_pool/dropped_sessions", dropped_sessions)
+        logger.warning(
+            "Dropping Polar session_pool group %s task=%s because of %s: %s",
+            accumulator.group_id,
+            accumulator.parent_task_id,
+            reason,
+            accumulator.rejected_reason,
+        )
+
+    def _current_partial_group(
+        self,
+        open_groups: dict[int, _SessionGroupAccumulator],
+    ) -> _SessionGroupAccumulator | None:
+        partials = [
+            accumulator
+            for accumulator in open_groups.values()
+            if accumulator.rejected_reason is None and accumulator.partial
+        ]
+        if len(partials) > 1:
+            raise PolarRolloutSchedulerError(
+                f"session_pool invariant violated: {len(partials)} partial open groups"
+            )
+        if not partials:
+            return None
+        return min(partials, key=lambda acc: acc.group_id)
+
+    def _can_admit_session_pool_unit(
+        self,
+        active: dict[asyncio.Task[TaskResult], _PendingSessionUnit],
+        open_groups: dict[int, _SessionGroupAccumulator],
+    ) -> bool:
+        with self._state_lock:
+            admission_paused = self._admission_paused
+        if admission_paused:
+            return False
+        if len(active) >= self.config.max_active_sessions:
+            return False
+        if self._current_partial_group(open_groups) is None and self._session_pool_owned_group_count(open_groups) >= (
+            self._batch_size * self.config.max_async_level
+        ):
+            return False
+        return True
+
+    def _session_pool_owned_group_count(
+        self,
+        open_groups: dict[int, _SessionGroupAccumulator],
+    ) -> int:
+        return (
+            len(open_groups)
+            + self.output_queue.qsize()
+            + self._shared_completed_buffer_size()
+        )
+
+    def _session_pool_draining(self) -> bool:
+        with self._state_lock:
+            return self._policy_update_draining
+
+    def _maybe_mark_policy_update_drain_complete(
+        self,
+        open_groups: dict[int, _SessionGroupAccumulator],
+        active: dict[asyncio.Task[TaskResult], _PendingSessionUnit],
+    ) -> None:
+        with self._state_lock:
+            if not self._policy_update_draining:
+                return
+            if open_groups or active:
+                return
+            started_at = self._policy_update_drain_started_at
+            if started_at is not None:
+                self._metrics["polar/session_pool/policy_update_drain_seconds"] = (
+                    self._metrics.get("polar/session_pool/policy_update_drain_seconds", 0.0)
+                    + (time.monotonic() - started_at)
+                )
+                self._policy_update_drain_started_at = None
+            self._policy_update_drain_complete.set()
+
+    def _record_session_pool_counts(
+        self,
+        active: dict[asyncio.Task[TaskResult], _PendingSessionUnit],
+        open_groups: dict[int, _SessionGroupAccumulator],
+    ) -> None:
+        partial_open_groups = sum(
+            1
+            for accumulator in open_groups.values()
+            if accumulator.rejected_reason is None and accumulator.partial
+        )
+        pending_sessions = sum(
+            max(0, accumulator.group_size - accumulator.submitted_count)
+            for accumulator in open_groups.values()
+            if accumulator.rejected_reason is None
+        )
+        with self._state_lock:
+            self._active_groups = len(open_groups)
+            self._active_sessions = len(active)
+            self._session_pool_open_groups = len(open_groups)
+            self._session_pool_partial_open_groups = partial_open_groups
+            self._session_pool_pending_sessions = pending_sessions
 
     async def _submit_attempt(
         self,
