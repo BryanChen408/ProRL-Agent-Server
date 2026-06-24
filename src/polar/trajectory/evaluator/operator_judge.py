@@ -60,6 +60,7 @@ class OperatorJudgeEvaluator(BaseTrajectoryEvaluator):
         submission_path: str | None = None,
         submission_dest: str | None = None,
         metrics_path: str = "judge_out/metrics.json",
+        metrics_error_path: str = "judge_out/metrics_error.log",
         workdir: str | None = None,
         judge_timeout: float = 1800.0,
         **_: Any,
@@ -73,6 +74,7 @@ class OperatorJudgeEvaluator(BaseTrajectoryEvaluator):
         self.submission_path = submission_path or f"output/submission/{op_name}_impl.py"
         self.submission_dest = submission_dest or self.submission_path
         self.metrics_path = metrics_path
+        self.metrics_error_path = metrics_error_path
         self.workdir = workdir
         self.judge_timeout = float(judge_timeout)
 
@@ -196,9 +198,27 @@ class OperatorJudgeEvaluator(BaseTrajectoryEvaluator):
                 f"(judge exit={result.return_code}; see {artifacts_dir / 'judge.stdout.log'}): {exc!r}"
             ) from exc
 
-        return self._scored(metrics, artifacts_dir, submission_used=picked)
+        local_metrics_error = artifacts_dir / "metrics_error.log"
+        try:
+            await judge_rt.download_file(self._abs(self.metrics_error_path), str(local_metrics_error))
+        except Exception:
+            local_metrics_error = None
 
-    def _scored(self, metrics: dict, artifacts_dir: Path, *, submission_used: str | None = None) -> EvalResult:
+        return self._scored(
+            metrics,
+            artifacts_dir,
+            submission_used=picked,
+            metrics_error_path=str(local_metrics_error) if local_metrics_error is not None else None,
+        )
+
+    def _scored(
+        self,
+        metrics: dict,
+        artifacts_dir: Path,
+        *,
+        submission_used: str | None = None,
+        metrics_error_path: str | None = None,
+    ) -> EvalResult:
         """metrics -> EvalResult; infra failures raise (=> session ERROR => retry)."""
         (artifacts_dir / "metrics.json").write_text(json.dumps(metrics, ensure_ascii=False, indent=2))
         outcome = judge_outcome(metrics)
@@ -218,6 +238,7 @@ class OperatorJudgeEvaluator(BaseTrajectoryEvaluator):
                 "speedup_vs_torch": (metrics.get("perf_data") or {}).get("speedup_vs_torch"),
                 "submission_used": submission_used,  # which impl scored (best-so-far vs final)
                 "metrics_path": str(artifacts_dir / "metrics.json"),
+                "metrics_error_path": metrics_error_path,
                 "judge_stdout_path": str(artifacts_dir / "judge.stdout.log"),
                 "metrics": metrics,
             },

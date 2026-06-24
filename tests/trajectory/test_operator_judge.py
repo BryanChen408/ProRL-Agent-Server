@@ -100,6 +100,31 @@ def test_operator_failure_scored_not_raised():
     assert res2.outcome_reward == 0.4
 
 
+def test_downloads_metrics_error_log_artifact():
+    ev = OperatorJudgeEvaluator(op_name=OP, judge_command="bash pipeline.sh", metrics_path=METRICS)
+    agent = FakeRuntime(files={SUB: "# kernel"})
+    judge = FakeRuntime(files={
+        METRICS: json.dumps({"success": False, "ast_check_ok": True, "correctness_ok": False,
+                             "error_type": "correctness_failed"}),
+        "judge_out/metrics_error.log": "shape mismatch detail",
+    })
+    with tempfile.TemporaryDirectory() as d:
+        res = asyncio.run(ev.evaluate(
+            Trajectory(status="COMPLETED", traces=[]),
+            runtime=agent,
+            fresh_eval_runtime=judge,
+            refresh_runtime=True,
+            artifacts_dir=d,
+            env={},
+            timeout_seconds=None,
+            session_id="s",
+            task_id="t",
+        ))
+        metrics_error_path = Path(res.metadata["metrics_error_path"])
+        assert metrics_error_path.is_file()
+        assert metrics_error_path.read_text() == "shape mismatch detail"
+
+
 def test_infra_no_metrics_raises():
     try:
         _run(None)  # judge produced no metrics.json
