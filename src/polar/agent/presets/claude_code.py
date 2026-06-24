@@ -14,6 +14,9 @@ from polar.runtime.models import ExecInput
 class ClaudeCodeHarness(BaseHarness):
     """Run Claude Code CLI in non-interactive mode."""
 
+    _DEFAULT_API_TIMEOUT_MS = "14400000"  # 4h; avoid 10-minute long-context retries.
+    _DEFAULT_MAX_RETRIES = "1"
+
     def __init__(self, agent_spec: AgentSpec) -> None:
         super().__init__(agent_spec)
         # Absolute path outside the workspace — $HOME won't expand in docker
@@ -81,6 +84,8 @@ class ClaudeCodeHarness(BaseHarness):
             # to api.anthropic.com even when ANTHROPIC_BASE_URL points elsewhere.
             "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
         }
+        env.setdefault("API_TIMEOUT_MS", self._DEFAULT_API_TIMEOUT_MS)
+        env.setdefault("CLAUDE_CODE_MAX_RETRIES", self._DEFAULT_MAX_RETRIES)
         if self.settings.get("max_thinking_tokens"):
             env["MAX_THINKING_TOKENS"] = str(self.settings["max_thinking_tokens"])
 
