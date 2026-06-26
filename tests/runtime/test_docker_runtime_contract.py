@@ -72,6 +72,7 @@ async def _test_docker_start_builds_mainline_ascend_create_args(monkeypatch, tmp
     assert "/skills:/opt/canonical:ro" in volumes
     assert "/dev:/dev" in volumes
     assert "/usr/local/Ascend/driver:/usr/local/Ascend/driver:ro" in volumes
+    assert "/locks:/locks" in volumes
     assert "--privileged" in create
     env = dict(item.split("=", 1) for item in _values(create, "-e"))
     assert env["ASCEND_RT_VISIBLE_DEVICES"] == "11"
@@ -169,6 +170,39 @@ async def _test_docker_start_can_mount_ascend_without_start_lease(
     await runtime.stop()
 
     assert ["docker", "kill", "polar-session"] in created_commands
+
+
+def test_docker_exec_merges_runtime_env(monkeypatch, tmp_path: Path) -> None:
+    asyncio.run(_test_docker_exec_merges_runtime_env(monkeypatch, tmp_path))
+
+
+async def _test_docker_exec_merges_runtime_env(monkeypatch, tmp_path: Path) -> None:
+    commands: list[list[str]] = []
+
+    async def fake_run_local_command(self, *args, **kwargs):
+        commands.append(list(args))
+        return 0, "ok", ""
+
+    monkeypatch.setattr(DockerRuntime, "_run_local_command", fake_run_local_command)
+
+    spec = RuntimeSpec(
+        backend="docker",
+        image="sandbox:v1",
+        env={"POLAR_NPU_LEASE_POOL": "8,9", "POLAR_NPU_LOCK_DIR": "/locks", "A": "runtime"},
+    )
+    runtime = DockerRuntime(spec, "session", tmp_path)
+
+    result = await runtime.exec("echo ok", env={"A": "step", "B": "override"})
+
+    assert result.return_code == 0
+    args = commands[0]
+    env = dict(item.split("=", 1) for item in _values(args, "-e"))
+    assert env == {
+        "POLAR_NPU_LEASE_POOL": "8,9",
+        "POLAR_NPU_LOCK_DIR": "/locks",
+        "A": "step",
+        "B": "override",
+    }
 
 
 def test_docker_start_releases_lock_when_create_fails(monkeypatch, tmp_path: Path) -> None:

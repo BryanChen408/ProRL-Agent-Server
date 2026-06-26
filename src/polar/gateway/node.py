@@ -777,7 +777,7 @@ class GatewayNodeManager:
                     session_dir=managed.session_dir,
                     artifacts_dir=managed.artifacts_dir,
                     agent_result=agent_result,
-                    env=dict(evaluator_spec.env),
+                    env=self._evaluator_env(evaluator_spec, eval_runtime_spec),
                     timeout_seconds=self._remaining_budget(managed),
                     runtime=live_runtime,
                     fresh_eval_runtime=fresh_eval_runtime,
@@ -868,7 +868,7 @@ class GatewayNodeManager:
                     session_dir=managed.session_dir,
                     artifacts_dir=managed.artifacts_dir,
                     agent_result=agent_result,
-                    env=dict(evaluator_spec.env),
+                    env=self._evaluator_env(evaluator_spec, eval_runtime_spec),
                     timeout_seconds=self._remaining_budget(managed),
                     runtime=None,
                     fresh_eval_runtime=fresh_eval_runtime,
@@ -1036,6 +1036,16 @@ class GatewayNodeManager:
             "AGENT_LOG_DIR": agent_log_dir,
             **{key: str(value) for key, value in runtime_env.items()},
             **{key: str(value) for key, value in agent_env.items()},
+        }
+
+    @staticmethod
+    def _evaluator_env(
+        evaluator_spec: EvaluatorSpec,
+        runtime_spec: RuntimeSpec,
+    ) -> dict[str, str]:
+        return {
+            **{key: str(value) for key, value in runtime_spec.env.items()},
+            **{key: str(value) for key, value in evaluator_spec.env.items()},
         }
 
     @staticmethod

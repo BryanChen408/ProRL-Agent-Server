@@ -284,7 +284,6 @@ def test_non_lazy_fresh_judge_receives_pipeline_lease_env(tmp_path: Path) -> Non
     request = _request(
         lazy=False,
         eval_runtime=_pipeline_lease_eval_runtime(),
-        evaluator_env=PIPELINE_ENV,
     )
     agent = FakeRuntime(
         "agent",
@@ -392,7 +391,6 @@ def test_lazy_fresh_judge_uses_pipeline_lease_spec_after_agent_stop(
     request = _request(
         lazy=True,
         eval_runtime=_pipeline_lease_eval_runtime(),
-        evaluator_env=PIPELINE_ENV,
     )
     agent = FakeRuntime(
         "agent",
@@ -452,3 +450,57 @@ def test_lazy_fresh_judge_uses_pipeline_lease_spec_after_agent_stop(
     ]
     assert len(judge_calls) == 1
     assert judge_calls[0]["env"] == PIPELINE_ENV
+
+
+def test_evaluator_env_overrides_runtime_env_for_judge_command(tmp_path: Path) -> None:
+    events: list[str] = []
+    request = _request(
+        lazy=False,
+        eval_runtime=_pipeline_lease_eval_runtime(),
+        evaluator_env={"POLAR_NPU_LEASE_POOL": "10", "EXTRA": "1"},
+    )
+    agent = FakeRuntime(
+        "agent",
+        events,
+        tmp_path / "agent",
+        files={f"{WORKDIR}/{SUB}": "# final kernel"},
+    )
+    judge = FakeRuntime(
+        "judge",
+        events,
+        tmp_path / "judge",
+        files={
+            f"{WORKDIR}/{METRICS}": json.dumps(
+                {"success": True, "perf_data": {"speedup_vs_torch": 2.0}}
+            )
+        },
+    )
+    manager = _run_manager()
+    manager.evaluators = default_evaluator_registry()
+    managed = _managed(request, agent, tmp_path)
+    trajectory = Trajectory(status="COMPLETED", traces=[])
+    agent_result = AgentRunResult(status="completed", return_code=0)
+
+    async def run_eval() -> Trajectory:
+        managed.eval_prewarm_task = asyncio.create_task(_ready_runtime(judge))
+        return await manager._run_eval(
+            request,
+            trajectory,
+            agent_result=agent_result,
+            managed=managed,
+        )
+
+    updated = asyncio.run(run_eval())
+
+    assert updated.metadata["evaluation"]["outcome_reward"] == 1.0
+    judge_calls = [
+        call
+        for call in judge.exec_calls
+        if call["command"] == request.evaluator.config["judge_command"]
+    ]
+    assert len(judge_calls) == 1
+    assert judge_calls[0]["env"] == {
+        **PIPELINE_ENV,
+        "POLAR_NPU_LEASE_POOL": "10",
+        "EXTRA": "1",
+    }

@@ -49,6 +49,24 @@ _DRIVER_MOUNTS = (
 )
 
 
+def _mount_source_dest(mount: str) -> tuple[str, str]:
+    parts = str(mount).split(":")
+    if len(parts) >= 2:
+        return parts[0], parts[1]
+    return parts[0], parts[0]
+
+
+def _lock_dir_mount(cfg: dict, mounts: list[str]) -> str | None:
+    lock_dir = str(cfg.get("lock_dir") or "").strip()
+    if not lock_dir.startswith("/"):
+        return None
+    for mount in mounts:
+        source, dest = _mount_source_dest(mount)
+        if source == lock_dir or dest == lock_dir:
+            return None
+    return f"{lock_dir}:{lock_dir}"
+
+
 def parse_pool(spec: Any) -> list[str]:
     """'8,9,10,11' | [8,9,10,11] | '8-11' -> ['8','9','10','11']."""
     if isinstance(spec, (list, tuple)):
@@ -76,10 +94,13 @@ def ascend_mount_create_args(cfg: dict) -> list[str]:
         args += ["--ipc", str(cfg.get("ipc", "host"))]
     if cfg.get("shm_size", "500g"):
         args += ["--shm-size", str(cfg.get("shm_size", "500g"))]
-    for mount in _DRIVER_MOUNTS:
+    mounts = [str(mount) for mount in _DRIVER_MOUNTS]
+    lock_mount = _lock_dir_mount(cfg, mounts + [str(mount) for mount in cfg.get("mounts", []) or []])
+    if lock_mount is not None:
+        mounts.append(lock_mount)
+    mounts.extend(str(mount) for mount in cfg.get("mounts", []) or [])
+    for mount in mounts:
         args += ["-v", mount]
-    for mount in cfg.get("mounts", []) or []:
-        args += ["-v", str(mount)]
     env = dict(cfg.get("env", {}) or {})
     for key, value in env.items():
         args += ["-e", f"{key}={value}"]

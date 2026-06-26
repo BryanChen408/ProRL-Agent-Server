@@ -200,7 +200,8 @@ class DockerRuntime(BaseRuntime):
         effective_workdir = cwd or self.spec.workdir or self.runtime_session_dir
         if effective_workdir:
             args.extend(["-w", effective_workdir])
-        for key, value in (env or {}).items():
+        effective_env = {**self.spec.env, **(env or {})}
+        for key, value in effective_env.items():
             args.extend(["-e", f"{key}={value}"])
         args.extend([self._container_name, "bash", "-lc", command])
         rc, stdout, stderr = await self._run_local_command(
