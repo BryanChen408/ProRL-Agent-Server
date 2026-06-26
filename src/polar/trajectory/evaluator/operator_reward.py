@@ -26,7 +26,39 @@ INFRA_ERROR_TYPES = frozenset({
     "judge_container_failed",    # the judge container itself crashed
     "judge_metrics_unreadable",  # judge ran but metrics.json corrupt
     "judge_no_metrics",          # judge produced no metrics.json
+    "npu_runtime_unavailable",   # Ascend runtime/device visibility failed before operator code ran
 })
+
+
+def classify_infra_error_text(text: str | None) -> str | None:
+    """Classify known infra failures from the full judge error log.
+
+    The Triton pipeline wraps verify failures with "correctness" wording, so an Ascend init
+    failure can otherwise be mislabeled as ``correctness_failed`` even though no submitted operator
+    code ran. Keep this intentionally narrow: only device/runtime-init signatures map to infra.
+    """
+    if not text:
+        return None
+    lowered = str(text).lower().replace(" ", "")
+    spaced = str(text).lower()
+    if (
+        "aclinit" in lowered
+        and (
+            "invaliddeviceid" in lowered
+            or "deviceiderror" in lowered
+            or "getdevicecntfailed" in lowered
+            or "resource_busy" in lowered
+            or "rtgetdevmsgexecutionfailed" in lowered
+        )
+    ):
+        return "npu_runtime_unavailable"
+    if "ptacallaclapifailed" in lowered and "invaliddeviceid" in lowered:
+        return "npu_runtime_unavailable"
+    if "inputerrordeviceid" in lowered or (
+        "invalid device id" in spaced and "torch_npu/csrc/core/npu/sys_ctrl" in spaced
+    ):
+        return "npu_runtime_unavailable"
+    return None
 
 
 def reward_from_metrics(metrics: dict) -> float:
@@ -101,6 +133,7 @@ def test_is_infra_failure():
     assert is_infra_failure(None) is True
     assert is_infra_failure({"error_type": "judge_container_failed"}) is True
     assert is_infra_failure({"error_type": "task_missing"}) is True
+    assert is_infra_failure({"error_type": "npu_runtime_unavailable"}) is True
     assert is_infra_failure({"error_type": "correctness_failed"}) is False    # operator
     assert is_infra_failure({"error_type": "submission_missing"}) is False    # operator (agent didn't deliver)
     assert is_infra_failure({"success": True, "error_type": None}) is False
@@ -111,6 +144,16 @@ def test_judge_outcome_infra_retries_not_scored():
     assert o["status"] == "ERROR" and o["retry"] is True and o["reward"] is None
     o2 = judge_outcome(None)
     assert o2["status"] == "ERROR" and o2["retry"] is True
+    o3 = judge_outcome({"error_type": "npu_runtime_unavailable", "success": False})
+    assert o3["status"] == "ERROR" and o3["retry"] is True and o3["reward"] is None
+
+
+def test_classify_infra_error_text_detects_npu_init_not_shape_mismatch():
+    text = "RuntimeError: aclInit, error code is 107001\n[Error]: Invalid device ID."
+    assert classify_infra_error_text(text) == "npu_runtime_unavailable"
+    wrapped = "数值验证失败: PTA call acl api failed\ninput error deviceId:0"
+    assert classify_infra_error_text(wrapped) == "npu_runtime_unavailable"
+    assert classify_infra_error_text("验证失败: mismatch max diff 0.1") is None
 
 
 def test_judge_outcome_operator_failure_scored():

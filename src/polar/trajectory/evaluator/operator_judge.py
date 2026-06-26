@@ -41,7 +41,10 @@ from typing import Any
 
 from polar.runtime.base import BaseRuntime
 from polar.trajectory.evaluator.base import BaseTrajectoryEvaluator
-from polar.trajectory.evaluator.operator_reward import judge_outcome
+from polar.trajectory.evaluator.operator_reward import (
+    classify_infra_error_text,
+    judge_outcome,
+)
 from polar.trajectory.models import EvalResult, Trajectory
 
 logger = logging.getLogger(__name__)
@@ -203,6 +206,9 @@ class OperatorJudgeEvaluator(BaseTrajectoryEvaluator):
             await judge_rt.download_file(self._abs(self.metrics_error_path), str(local_metrics_error))
         except Exception:
             local_metrics_error = None
+        if local_metrics_error is not None:
+            metrics = self._with_error_log_infra_classification(metrics, local_metrics_error)
+            local_metrics.write_text(json.dumps(metrics, ensure_ascii=False, indent=2))
 
         return self._scored(
             metrics,
@@ -210,6 +216,22 @@ class OperatorJudgeEvaluator(BaseTrajectoryEvaluator):
             submission_used=picked,
             metrics_error_path=str(local_metrics_error) if local_metrics_error is not None else None,
         )
+
+    @staticmethod
+    def _with_error_log_infra_classification(metrics: dict, error_log_path: Path) -> dict:
+        """Correct stale/over-broad pipeline labels using the full error log.
+
+        Older pipeline copies wrapped every verify failure as correctness_failed. When the full log
+        shows an Ascend init/device-visibility failure, no operator code ran, so the judge must retry
+        instead of scoring a false correctness failure.
+        """
+        try:
+            infra_type = classify_infra_error_text(error_log_path.read_text(encoding="utf-8", errors="replace"))
+        except Exception:
+            return metrics
+        if not infra_type or metrics.get("error_type") == infra_type:
+            return metrics
+        return {**metrics, "original_error_type": metrics.get("error_type"), "error_type": infra_type}
 
     def _scored(
         self,

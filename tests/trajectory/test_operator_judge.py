@@ -125,6 +125,41 @@ def test_downloads_metrics_error_log_artifact():
         assert metrics_error_path.read_text() == "shape mismatch detail"
 
 
+def test_npu_init_failure_reclassified_as_infra_retry():
+    ev = OperatorJudgeEvaluator(op_name=OP, judge_command="bash pipeline.sh", metrics_path=METRICS)
+    agent = FakeRuntime(files={SUB: "# kernel"})
+    judge = FakeRuntime(files={
+        METRICS: json.dumps({"success": False, "ast_check_ok": True, "correctness_ok": False,
+                             "error_type": "correctness_failed"}),
+        "judge_out/metrics_error.log": (
+            "数值验证失败: RuntimeError: aclInit, error code is 107001\n"
+            "[ERROR] PTA call acl api failed\n"
+            "[Error]: Invalid device ID.\n"
+            "input error deviceId:0 is err:0x7010003\n"
+        ),
+    })
+    with tempfile.TemporaryDirectory() as d:
+        try:
+            asyncio.run(ev.evaluate(
+                Trajectory(status="COMPLETED", traces=[]),
+                runtime=agent,
+                fresh_eval_runtime=judge,
+                refresh_runtime=True,
+                artifacts_dir=d,
+                env={},
+                timeout_seconds=None,
+                session_id="s",
+                task_id="t",
+            ))
+        except RuntimeError as e:
+            assert "npu_runtime_unavailable" in str(e)
+        else:
+            raise AssertionError("expected RuntimeError on NPU init infra failure")
+        metrics = json.loads((Path(d) / "metrics.json").read_text())
+        assert metrics["error_type"] == "npu_runtime_unavailable"
+        assert metrics["original_error_type"] == "correctness_failed"
+
+
 def test_infra_no_metrics_raises():
     try:
         _run(None)  # judge produced no metrics.json
