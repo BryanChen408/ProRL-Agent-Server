@@ -36,6 +36,7 @@ class PolarSlimeConfig:
     scheduler_mode: str
     max_active_sessions: int
     session_pool_pause_policy: str
+    session_pool_release_on_postrun: bool = False
 
 
 def resolve_polar_slime_config(args: Any) -> PolarSlimeConfig:
@@ -83,6 +84,11 @@ def resolve_polar_slime_config(args: Any) -> PolarSlimeConfig:
     ).strip().lower()
     if session_pool_pause_policy != "drain_open_groups":
         raise ValueError("polar_session_pool_pause_policy must be 'drain_open_groups'")
+    session_pool_release_on_postrun = _resolve_bool(
+        args,
+        "polar_session_pool_release_on_postrun",
+        default=False,
+    )
     max_off_policy_steps = max_async_level + update_weights_interval
 
     request_timeout = getattr(args, "polar_request_timeout", None)
@@ -134,6 +140,7 @@ def resolve_polar_slime_config(args: Any) -> PolarSlimeConfig:
         scheduler_mode=scheduler_mode,
         max_active_sessions=max_active_sessions,
         session_pool_pause_policy=session_pool_pause_policy,
+        session_pool_release_on_postrun=session_pool_release_on_postrun,
     )
 
 
@@ -155,6 +162,22 @@ def _resolve_max_active_sessions(args: Any, *, default: int) -> int:
     if value <= 0:
         raise ValueError("polar_max_active_sessions must be greater than 0")
     return value
+
+
+def _resolve_bool(args: Any, name: str, *, default: bool) -> bool:
+    configured = getattr(args, name, default)
+    if configured in (None, ""):
+        return default
+    if isinstance(configured, bool):
+        return configured
+    if isinstance(configured, int):
+        return bool(configured)
+    value = str(configured).strip().lower()
+    if value in {"1", "true", "yes", "y", "on"}:
+        return True
+    if value in {"0", "false", "no", "n", "off"}:
+        return False
+    raise ValueError(f"{name} must be a boolean")
 
 
 def _parse_device_pool(spec: Any) -> list[str]:

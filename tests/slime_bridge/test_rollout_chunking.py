@@ -50,6 +50,7 @@ def _config(max_sessions_per_task: int | None = 2) -> PolarSlimeConfig:
         scheduler_mode="group",
         max_active_sessions=4,
         session_pool_pause_policy="drain_open_groups",
+        session_pool_release_on_postrun=False,
     )
 
 

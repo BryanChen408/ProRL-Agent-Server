@@ -94,6 +94,29 @@ def test_resolve_polar_slime_config_accepts_session_pool_scheduler() -> None:
     assert config.max_session_concurrency == 24
     assert config.max_sessions_per_task is None
     assert config.session_pool_pause_policy == "drain_open_groups"
+    assert config.session_pool_release_on_postrun is False
+
+
+@pytest.mark.parametrize("value", [True, "true", "1", "yes", "on"])
+def test_resolve_polar_slime_config_accepts_session_pool_release_flag(value) -> None:
+    config = resolve_polar_slime_config(
+        _args(
+            polar_scheduler_mode="session_pool",
+            polar_session_pool_release_on_postrun=value,
+        )
+    )
+
+    assert config.session_pool_release_on_postrun is True
+
+
+def test_resolve_polar_slime_config_rejects_invalid_session_pool_release_flag() -> None:
+    with pytest.raises(ValueError, match="polar_session_pool_release_on_postrun"):
+        resolve_polar_slime_config(
+            _args(
+                polar_scheduler_mode="session_pool",
+                polar_session_pool_release_on_postrun="maybe",
+            )
+        )
 
 
 def test_resolve_polar_slime_config_rejects_invalid_scheduler_mode() -> None:

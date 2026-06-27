@@ -14,12 +14,18 @@ import httpx
 
 from polar.platform.events import EventBus
 from polar.rollout.balancer import NodeScheduler
-from polar.rollout.models import SessionContext, SessionDispatchRequest, SessionResult, SessionStatus
+from polar.rollout.models import (
+    SessionContext,
+    SessionDispatchRequest,
+    SessionResult,
+    SessionStatus,
+)
 from polar.trajectory.models import Trajectory
 
 logger = logging.getLogger(__name__)
 
 ResultCallback = Callable[[SessionResult], Awaitable[None] | None]
+StateCallback = Callable[[str, str, str], None]
 
 
 def _trajectory_status(status: str) -> str:
@@ -86,10 +92,11 @@ class Pipeline:
         sessions: list[SessionContext],
         *,
         on_result: ResultCallback | None = None,
+        on_state: StateCallback | None = None,
     ) -> list[SessionResult]:
         await self.start()
         return await asyncio.gather(
-            *(self._dispatch_and_collect(session, on_result) for session in sessions)
+            *(self._dispatch_and_collect(session, on_result, on_state) for session in sessions)
         )
 
     async def accept_callback_result(self, result: SessionResult) -> bool:
@@ -113,6 +120,7 @@ class Pipeline:
         self,
         session: SessionContext,
         callback: ResultCallback | None,
+        state_callback: StateCallback | None,
     ) -> SessionResult:
         if self._client is None:
             raise RuntimeError("pipeline has not been started")
@@ -124,13 +132,19 @@ class Pipeline:
             self._pending[session.session_id] = future
 
         session.timer.mark("dispatch", "started")
+        self._notify_state(session, "DISPATCHING", state_callback)
         await self._emit(
             "session.state_changed",
-            {"task_id": session.task_id, "session_id": session.session_id, "status": "DISPATCHING"},
+            {
+                "task_id": session.task_id,
+                "session_id": session.session_id,
+                "status": "DISPATCHING",
+            },
         )
         try:
             dispatch_request = await self._dispatch_session(session)
             session.timer.mark("dispatch", "finished")
+            self._notify_state(session, str(SessionStatus.REGISTERED), state_callback)
             await self._emit(
                 "session.state_changed",
                 {
@@ -140,7 +154,12 @@ class Pipeline:
                     "node_id": session.node_id,
                 },
             )
-            result = await self._wait_for_result(session, dispatch_request, future)
+            result = await self._wait_for_result(
+                session,
+                dispatch_request,
+                future,
+                state_callback,
+            )
         except TimeoutError as exc:
             logger.warning("Session %s timed out in rollout pipeline", session.session_id)
             result = self._failure_result(session, status=SessionStatus.TIMEOUT, error=str(exc))
@@ -266,11 +285,21 @@ class Pipeline:
         )
         return True
 
+    def _notify_state(
+        self,
+        session: SessionContext,
+        status: str,
+        callback: StateCallback | None,
+    ) -> None:
+        if callback is not None:
+            callback(session.task_id, session.session_id, status)
+
     async def _wait_for_result(
         self,
         session: SessionContext,
         dispatch_request: SessionDispatchRequest,
         future: asyncio.Future[SessionResult],
+        state_callback: StateCallback | None,
     ) -> SessionResult:
         if session.gateway_url is None:
             raise RuntimeError("session gateway_url was not assigned")
@@ -286,7 +315,11 @@ class Pipeline:
         execution_timeout_started = False
         callback_deadline: float | None = None
         pre_init_poll_interval = self.dispatch_poll_interval_seconds
-        result_poll_interval = max(self.dispatch_poll_interval_seconds, 5.0)
+        result_poll_interval = (
+            self.dispatch_poll_interval_seconds
+            if state_callback is not None
+            else max(self.dispatch_poll_interval_seconds, 5.0)
+        )
 
         while True:
             if execution_timeout_started:
@@ -314,6 +347,8 @@ class Pipeline:
                 )
                 status = None
                 result = None
+            if status is not None:
+                self._notify_state(session, status, state_callback)
             if result is not None:
                 if not future.done():
                     future.set_result(result)

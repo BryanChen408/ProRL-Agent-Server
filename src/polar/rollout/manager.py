@@ -182,16 +182,12 @@ class RolloutManager:
             )
 
     def session_state_changed(self, task_id: str, session_id: str, status: str) -> None:
-        """Hook invoked from the pipeline whenever a session changes state."""
+        """Update live task session-state cache from pipeline status polls."""
         with self._lock:
             record = self._tasks.get(task_id)
             if record is not None:
                 record.session_states[session_id] = status
                 record.updated_at = time.time()
-        self._emit(
-            "session.state_changed",
-            {"task_id": task_id, "session_id": session_id, "status": status},
-        )
 
     async def _execute_task(self, request: TaskRequest) -> TaskResult:
         sessions = [
@@ -233,8 +229,17 @@ class RolloutManager:
                 },
             )
 
+        state_callback = (
+            self.session_state_changed
+            if bool(request.metadata.get("session_pool"))
+            else None
+        )
         try:
-            results = await self.pipeline.run_batch(sessions, on_result=_on_result)
+            results = await self.pipeline.run_batch(
+                sessions,
+                on_result=_on_result,
+                on_state=state_callback,
+            )
         except Exception:
             with self._lock:
                 self._tasks[request.task_id].status = "failed"

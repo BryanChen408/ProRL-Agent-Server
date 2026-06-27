@@ -49,6 +49,7 @@ def _args(**overrides) -> SimpleNamespace:
         "polar_scheduler_mode": "session_pool",
         "polar_max_active_sessions": 16,
         "polar_session_pool_pause_policy": "drain_open_groups",
+        "polar_session_pool_release_on_postrun": False,
         "polar_max_async_level": 1,
         "rollout_batch_size": 4,
         "n_samples_per_prompt": 8,
@@ -85,6 +86,7 @@ def _config(*, threshold: float = 0.0) -> PolarSlimeConfig:
         scheduler_mode="session_pool",
         max_active_sessions=16,
         session_pool_pause_policy="drain_open_groups",
+        session_pool_release_on_postrun=False,
     )
 
 
@@ -173,6 +175,8 @@ class ControlledSessionPoolWorker(AsyncPolarRolloutWorker):
         super().__init__(args, data_source)
         self.submitted_units = []
         self.inflight: dict[str, asyncio.Future[TaskResult]] = {}
+        self.live_status: dict[str, str] = {}
+        self.status_poll_failures = False
         self.max_seen_active = 0
         self.stop_after_groups = 4
 
@@ -191,7 +195,14 @@ class ControlledSessionPoolWorker(AsyncPolarRolloutWorker):
         self.max_seen_active = max(self.max_seen_active, len(self.inflight) + 1)
         future: asyncio.Future[TaskResult] = asyncio.get_running_loop().create_future()
         self.inflight[unit.task_id] = future
+        self.live_status[unit.task_id] = str(SessionStatus.RUNNING)
         return await future
+
+    async def _session_pool_task_status(self, client, task_id: str):  # noqa: ANN001, ANN202
+        del client
+        if self.status_poll_failures:
+            raise RuntimeError("status poll failed")
+        return self.live_status.get(task_id)
 
     async def _emit_completed(self, completed):  # noqa: ANN001, ANN202
         await super()._emit_completed(completed)
@@ -210,6 +221,7 @@ class ControlledSessionPoolWorker(AsyncPolarRolloutWorker):
     def complete_task(self, task_id: str, *, status: str = "completed") -> None:
         future = self.inflight.pop(task_id)
         unit = next(unit for unit in self.submitted_units if unit.task_id == task_id)
+        self.live_status[task_id] = str(SessionStatus.COMPLETED)
         future.set_result(_task_result(unit, status=status))
 
     def complete_all(self) -> None:
@@ -447,6 +459,138 @@ def test_session_pool_worker_caps_active_sessions_and_admits_group_contiguous(mo
 
         worker.complete_all()
         worker.stop_after_groups = 0
+        worker._running = False
+        await asyncio.wait_for(loop_task, timeout=2.0)
+
+    asyncio.run(run())
+
+
+def test_session_pool_worker_run_release_admits_before_final_result(monkeypatch) -> None:
+    monkeypatch.setattr(adapter, "_load_sample_type", lambda: FakeSample)
+    monkeypatch.setattr(rollout_module, "_SESSION_POOL_RUN_RELEASE_POLL_SECONDS", 0.01)
+
+    async def run() -> None:
+        worker = ControlledSessionPoolWorker(
+            _args(
+                polar_max_active_sessions=1,
+                rollout_batch_size=1,
+                n_samples_per_prompt=2,
+                polar_session_pool_release_on_postrun=True,
+            ),
+            FakeDataSource(_groups(1, 2)),
+        )
+        loop_task = asyncio.create_task(worker._async_session_pool_loop())
+        await _wait_until(lambda: len(worker.submitted_units) == 1)
+
+        first_task_id = worker.submitted_units[0].task_id
+        worker.live_status[first_task_id] = str(SessionStatus.POST_RUN)
+        await _wait_until(lambda: len(worker.submitted_units) == 2)
+
+        assert first_task_id in worker.inflight
+        assert worker.snapshot_metrics()["polar/session_pool/run_pending_sessions"] == 1.0
+        assert worker.snapshot_metrics()["polar/session_pool/final_pending_sessions"] == 2.0
+
+        worker.complete_all()
+        worker._running = False
+        await asyncio.wait_for(loop_task, timeout=2.0)
+
+    asyncio.run(run())
+
+
+def test_session_pool_worker_run_release_poll_failure_falls_back_to_final_result(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(adapter, "_load_sample_type", lambda: FakeSample)
+    monkeypatch.setattr(rollout_module, "_SESSION_POOL_RUN_RELEASE_POLL_SECONDS", 0.01)
+
+    async def run() -> None:
+        worker = ControlledSessionPoolWorker(
+            _args(
+                polar_max_active_sessions=1,
+                rollout_batch_size=1,
+                n_samples_per_prompt=2,
+                polar_session_pool_release_on_postrun=True,
+            ),
+            FakeDataSource(_groups(1, 2)),
+        )
+        worker.status_poll_failures = True
+        loop_task = asyncio.create_task(worker._async_session_pool_loop())
+        await _wait_until(lambda: len(worker.submitted_units) == 1)
+
+        first_task_id = worker.submitted_units[0].task_id
+        worker.live_status[first_task_id] = str(SessionStatus.POST_RUN)
+        await asyncio.sleep(0.05)
+        assert len(worker.submitted_units) == 1
+
+        worker.status_poll_failures = False
+        worker.complete_task(first_task_id)
+        await _wait_until(lambda: len(worker.submitted_units) == 2)
+
+        worker.complete_all()
+        worker._running = False
+        await asyncio.wait_for(loop_task, timeout=2.0)
+
+    asyncio.run(run())
+
+
+def test_session_pool_worker_run_release_preserves_owned_group_cap(monkeypatch) -> None:
+    monkeypatch.setattr(adapter, "_load_sample_type", lambda: FakeSample)
+    monkeypatch.setattr(rollout_module, "_SESSION_POOL_RUN_RELEASE_POLL_SECONDS", 0.01)
+
+    async def run() -> None:
+        worker = ControlledSessionPoolWorker(
+            _args(
+                polar_max_active_sessions=2,
+                rollout_batch_size=1,
+                n_samples_per_prompt=2,
+                polar_session_pool_release_on_postrun=True,
+            ),
+            FakeDataSource(_groups(2, 2)),
+        )
+        loop_task = asyncio.create_task(worker._async_session_pool_loop())
+        await _wait_until(lambda: len(worker.submitted_units) == 2)
+
+        for unit in list(worker.submitted_units):
+            worker.live_status[unit.task_id] = str(SessionStatus.POST_RUN)
+        await _wait_until(
+            lambda: worker.snapshot_metrics()["polar/session_pool/run_pending_sessions"] == 0.0
+        )
+        await asyncio.sleep(0.05)
+
+        assert len(worker.submitted_units) == 2
+
+        worker.complete_all()
+        worker._running = False
+        await asyncio.wait_for(loop_task, timeout=2.0)
+
+    asyncio.run(run())
+
+
+def test_session_pool_policy_update_drain_waits_for_run_release_only(monkeypatch) -> None:
+    monkeypatch.setattr(adapter, "_load_sample_type", lambda: FakeSample)
+    monkeypatch.setattr(rollout_module, "_SESSION_POOL_RUN_RELEASE_POLL_SECONDS", 0.01)
+
+    async def run() -> None:
+        worker = ControlledSessionPoolWorker(
+            _args(
+                polar_max_active_sessions=1,
+                rollout_batch_size=1,
+                n_samples_per_prompt=1,
+                polar_session_pool_release_on_postrun=True,
+            ),
+            FakeDataSource(_groups(1, 1)),
+        )
+        loop_task = asyncio.create_task(worker._async_session_pool_loop())
+        await _wait_until(lambda: len(worker.submitted_units) == 1)
+
+        worker.begin_policy_update_drain(policy_version=9)
+        first_task_id = worker.submitted_units[0].task_id
+        worker.live_status[first_task_id] = str(SessionStatus.POST_RUN)
+        await asyncio.to_thread(worker.wait_for_policy_update_drain, timeout=2.0)
+
+        assert first_task_id in worker.inflight
+
+        worker.complete_all()
         worker._running = False
         await asyncio.wait_for(loop_task, timeout=2.0)
 
