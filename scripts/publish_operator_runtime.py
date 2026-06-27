@@ -17,7 +17,7 @@ from typing import Any
 DEFAULT_SOURCE = Path("/home/docker/polar_debug/Workspace/skills-rl-deploy")
 DEFAULT_OUTPUT = Path("/home/docker/polar_e2e/operator_runtime")
 
-PUBLISHED_ENTRIES = ("CLAUDE.md", "skills", "tools", "runtime")
+PUBLISHED_ENTRIES = ("CLAUDE.md", ".agents", "skills", "tools", "runtime")
 IGNORE_NAMES = {"__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache"}
 IGNORE_SUFFIXES = {".pyc", ".pyo"}
 
@@ -29,6 +29,11 @@ REQUIRED_PATHS = (
     "skills/npu-arch/references/npu-hardware-params.md",
     "tools/triton_eval_pipeline.sh",
     "runtime/prepare_operator_workdir.py",
+    ".agents/skills/triton-op-verifier/scripts/validate_triton_impl.py",
+    ".agents/skills/triton-op-verifier/scripts/verify.py",
+    ".agents/skills/triton-op-verifier/scripts/benchmark.py",
+    ".agents/skills/triton-op-verifier/scripts/_common_utils.py",
+    ".agents/skills/triton-op-verifier/scripts/_log_utils.py",
 )
 
 
