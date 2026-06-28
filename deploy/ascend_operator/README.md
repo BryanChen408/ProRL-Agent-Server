@@ -7,6 +7,7 @@ It is part of the Polar repo and is safe to move with the repo.
 
 - `../../operator_runtime/`: committed Claude Code runtime assets mounted read-only into agent containers.
 - `PHASE3_RUNTIME_SOURCE.md`: current runtime source-of-truth and legacy boundary notes.
+- `PHASE4_LEGACY_PATHS.md`: non-destructive migration away from old host deploy paths.
 - `polar_config.yaml`: Slime bridge config template. Slime should only need Polar rollout URL and rollout scheduling knobs.
 - `topology.yaml`: single-host Polar topology template.
 - `topology.dual64polar.yaml`: dual-host template where one host runs Polar and another host runs Slime/SGLang.
@@ -88,7 +89,9 @@ POLAR_ROLLOUT_URL=http://<polar-host>:8080
 When Polar runs on another host, sync the Polar repo to that host at any path. Do not sync a separate `polar_e2e` tree.
 
 ```bash
-rsync -a --delete --exclude .git --exclude output/ ProRL-Agent-Server/ root@80.48.5.64:/path/to/ProRL-Agent-Server/
+deploy/ascend_operator/sync_polar_repo.sh root@80.48.5.64:/path/to/ProRL-Agent-Server/
 ```
 
-Then generate or sync `output/ascend_operator/op_assets/` on the Polar host before starting services.
+The script excludes `output/`; runtime output is generated on the target host.
+Operator datasets are Slime-owned and should be provided through
+`OPERATOR_TASK_JSONL` and `OPERATOR_TASKS_DIR`.
