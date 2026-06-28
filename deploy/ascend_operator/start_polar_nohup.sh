@@ -146,8 +146,8 @@ start_one() {
 start_one rollout serve_rollout -c "${TOPOLOGY}"
 start_one gateway serve_gateway -c "${TOPOLOGY}" --node-id ascend-node-01
 
-POLAR_GATEWAY_URL="${GATEWAY_URL}" bash "${ROOT}/start_pipeline_budget_watcher.sh"
-POLAR_GATEWAY_URL="${GATEWAY_URL}" bash "${ROOT}/start_observer.sh"
+POLAR_GATEWAY_URL="${GATEWAY_URL}" bash "${POLAR_DEPLOY_DIR}/start_pipeline_budget_watcher.sh"
+POLAR_GATEWAY_URL="${GATEWAY_URL}" bash "${POLAR_DEPLOY_DIR}/start_observer.sh"
 
 info_log "health: curl -s ${ROLLOUT_URL%/}/health"
 info_log "health: curl -s ${GATEWAY_URL%/}/health"
