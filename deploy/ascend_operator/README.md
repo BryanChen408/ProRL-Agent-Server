@@ -6,6 +6,7 @@ It is part of the Polar repo and is safe to move with the repo.
 ## Layout
 
 - `../../operator_runtime/`: committed Claude Code runtime assets mounted read-only into agent containers.
+- `PHASE3_RUNTIME_SOURCE.md`: current runtime source-of-truth and legacy boundary notes.
 - `polar_config.yaml`: Slime bridge config template. Slime should only need Polar rollout URL and rollout scheduling knobs.
 - `topology.yaml`: single-host Polar topology template.
 - `topology.dual64polar.yaml`: dual-host template where one host runs Polar and another host runs Slime/SGLang.

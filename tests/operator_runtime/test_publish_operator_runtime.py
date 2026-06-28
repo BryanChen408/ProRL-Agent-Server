@@ -25,7 +25,7 @@ def _write(path: Path, text: str = "x\n", mode: int | None = None) -> None:
 
 
 def _source(root: Path) -> Path:
-    source = root / "skills-rl-deploy"
+    source = root / "operator_runtime_src"
     _write(source / "CLAUDE.md", "claude\n")
     verifier = source / ".agents/skills/triton-op-verifier/scripts"
     _write(verifier / "validate_triton_impl.py", "validate\n")
