@@ -5,7 +5,7 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[2]
-SCRIPT = ROOT / "examples" / "ascend" / "polar_dockerruntime_e2e" / "prepare_readonly_tools.py"
+SCRIPT = ROOT / "deploy" / "ascend_operator" / "prepare_readonly_tools.py"
 
 
 def _load_module():

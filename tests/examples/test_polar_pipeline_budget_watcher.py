@@ -6,7 +6,7 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[2]
-WATCHER = ROOT / "examples" / "ascend" / "polar_dockerruntime_e2e" / "tools" / "polar_pipeline_budget_watcher.py"
+WATCHER = ROOT / "deploy" / "ascend_operator" / "tools" / "polar_pipeline_budget_watcher.py"
 
 
 def _load_module():

@@ -9,7 +9,7 @@ import yaml
 
 
 ROOT = Path(__file__).resolve().parents[2]
-EXAMPLE = ROOT / "examples" / "ascend" / "polar_dockerruntime_e2e"
+EXAMPLE = ROOT / "deploy" / "ascend_operator"
 SCRIPT = EXAMPLE / "check_render_contract.py"
 POLAR_ROOT = ROOT
 PLAN_TASK_DISALLOWED_TOOLS = (
@@ -316,7 +316,7 @@ def test_render_contract_rejects_runtime_workers_tied_to_eval_card_count(tmp_pat
                 "--topology",
                 str(bad_topology),
                 "--skills-dir",
-                "/home/docker/polar_e2e/operator_runtime",
+                str(ROOT / "operator_runtime"),
                 "--tasks-dir",
                 str(fixture / "op_tasks"),
                 "--task-jsonl",
@@ -353,7 +353,7 @@ def test_render_contract_main_with_bundled_fixture() -> None:
             "--topology",
             str(EXAMPLE / "topology.yaml"),
             "--skills-dir",
-            "/home/docker/polar_e2e/operator_runtime",
+            str(ROOT / "operator_runtime"),
             "--tasks-dir",
             str(fixture / "op_tasks"),
             "--task-jsonl",

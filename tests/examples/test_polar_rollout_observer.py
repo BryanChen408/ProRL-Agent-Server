@@ -8,7 +8,7 @@ import os
 
 
 ROOT = Path(__file__).resolve().parents[2]
-SCRIPT = ROOT / "examples" / "ascend" / "polar_dockerruntime_e2e" / "tools" / "polar_rollout_observer.py"
+SCRIPT = ROOT / "deploy" / "ascend_operator" / "tools" / "polar_rollout_observer.py"
 
 
 def _load_module():

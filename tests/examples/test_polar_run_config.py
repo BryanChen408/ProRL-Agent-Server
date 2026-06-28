@@ -8,7 +8,7 @@ import yaml
 
 
 ROOT = Path(__file__).resolve().parents[2]
-SCRIPT = ROOT / "examples" / "ascend" / "polar_dockerruntime_e2e" / "tools" / "render_run_config.py"
+SCRIPT = ROOT / "deploy" / "ascend_operator" / "tools" / "render_run_config.py"
 
 
 def _load_module():

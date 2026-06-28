@@ -9,8 +9,8 @@ import pytest
 
 
 ROOT = Path(__file__).resolve().parents[2]
-SCRIPT = ROOT / "examples" / "ascend" / "polar_dockerruntime_e2e" / "gen_op_assets.py"
-REFRESH_SCRIPT = ROOT / "examples" / "ascend" / "polar_dockerruntime_e2e" / "tools" / "refresh_operator_task_prompts.py"
+SCRIPT = ROOT / "deploy" / "ascend_operator" / "gen_op_assets.py"
+REFRESH_SCRIPT = ROOT / "deploy" / "ascend_operator" / "tools" / "refresh_operator_task_prompts.py"
 
 
 def _load_module():

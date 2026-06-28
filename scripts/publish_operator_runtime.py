@@ -14,8 +14,9 @@ from pathlib import Path
 from typing import Any
 
 
-DEFAULT_SOURCE = Path("/home/docker/polar_debug/Workspace/skills-rl-deploy")
-DEFAULT_OUTPUT = Path("/home/docker/polar_e2e/operator_runtime")
+REPO_ROOT = Path(__file__).resolve().parents[1]
+DEFAULT_SOURCE = REPO_ROOT / "operator_runtime"
+DEFAULT_OUTPUT = REPO_ROOT / "output" / "ascend_operator" / "operator_runtime"
 
 PUBLISHED_ENTRIES = ("CLAUDE.md", ".agents", "skills", "tools", "runtime")
 IGNORE_NAMES = {"__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache"}

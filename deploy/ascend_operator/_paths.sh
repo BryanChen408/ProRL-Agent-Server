@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+POLAR_DEPLOY_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+POLAR_REPO_ROOT="$(cd "${POLAR_DEPLOY_DIR}/../.." && pwd -P)"
+
+export POLAR_DEPLOY_DIR
+export POLAR_REPO_ROOT
+export POLAR_OUTPUT_DIR="${POLAR_OUTPUT_DIR:-${POLAR_REPO_ROOT}/output/ascend_operator}"
+export POLAR_OPERATOR_RUNTIME_DIR="${POLAR_OPERATOR_RUNTIME_DIR:-${POLAR_REPO_ROOT}/operator_runtime}"
+export POLAR_OP_ASSETS_DIR="${POLAR_OP_ASSETS_DIR:-${POLAR_OUTPUT_DIR}/op_assets}"
+export POLAR_RUN_CONFIG_DIR="${POLAR_RUN_CONFIG_DIR:-${POLAR_OUTPUT_DIR}/run_configs}"
+export POLAR_LOG_DIR="${POLAR_LOG_DIR:-${POLAR_OUTPUT_DIR}/logs}"
+export POLAR_ROLLOUT_RESULTS_DIR="${POLAR_ROLLOUT_RESULTS_DIR:-${POLAR_OUTPUT_DIR}/rollout_results}"
+export POLAR_SESSION_BASE_DIR="${POLAR_SESSION_BASE_DIR:-${POLAR_OUTPUT_DIR}/polar_sessions}"

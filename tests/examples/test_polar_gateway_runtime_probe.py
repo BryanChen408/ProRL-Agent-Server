@@ -10,9 +10,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 SCRIPT = (
     ROOT
-    / "examples"
-    / "ascend"
-    / "polar_dockerruntime_e2e"
+    / "deploy"
+    / "ascend_operator"
     / "tools"
     / "probe_gateway_runtime.py"
 )

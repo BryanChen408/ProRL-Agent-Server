@@ -8,7 +8,7 @@ import yaml
 
 
 ROOT = Path(__file__).resolve().parents[2]
-SCRIPT = ROOT / "examples" / "ascend" / "polar_dockerruntime_e2e" / "tools" / "render_run_topology.py"
+SCRIPT = ROOT / "deploy" / "ascend_operator" / "tools" / "render_run_topology.py"
 
 
 def _load_module():
@@ -31,7 +31,27 @@ def test_render_run_topology_overrides_service_ports_and_preserves_workers(tmp_p
                     "host": "127.0.0.1",
                     "port": 8080,
                     "public_url": "http://127.0.0.1:8080",
-                    "save_dir": "/home/docker/polar_e2e/rollout_results",
+                    "save_dir": "output/ascend_operator/rollout_results",
+                    "operator_profiles": {
+                        "operator_npu": {
+                            "operator_runtime_dir": "operator_runtime",
+                            "runtime": {
+                                "kwargs": {
+                                    "volumes": [
+                                        "operator_runtime:/opt/canonical:ro",
+                                        "operator_runtime/tools:/opt/workspace/agent_workdir/tools:ro",
+                                    ]
+                                },
+                                "prepare": [
+                                    {
+                                        "type": "upload_file",
+                                        "source": "output/ascend_operator/op_assets/op_tasks/{op_name}.py",
+                                        "target": "/opt/workspace/agent_workdir/src/{op_name}.py",
+                                    }
+                                ],
+                            },
+                        }
+                    },
                 },
                 "gateway": {
                     "heartbeat_interval_seconds": 30,
@@ -60,13 +80,26 @@ def test_render_run_topology_overrides_service_ports_and_preserves_workers(tmp_p
         rollout_port=28080,
         gateway_port=28100,
         router_port=24077,
+        host="127.0.0.1",
+        operator_runtime_dir=tmp_path / "operator_runtime",
+        op_assets_dir=tmp_path / "output" / "ascend_operator" / "op_assets",
+        rollout_results_dir=tmp_path / "output" / "ascend_operator" / "rollout_results",
     )
     rendered = yaml.safe_load(out.read_text(encoding="utf-8"))
     node = rendered["gateway"]["nodes"][0]
 
     assert rendered["rollout"]["port"] == 28080
     assert rendered["rollout"]["public_url"] == "http://127.0.0.1:28080"
-    assert rendered["rollout"]["save_dir"] == "/home/docker/polar_e2e/rollout_results"
+    assert rendered["rollout"]["save_dir"] == str(tmp_path / "output" / "ascend_operator" / "rollout_results")
+    profile = rendered["rollout"]["operator_profiles"]["operator_npu"]
+    assert profile["operator_runtime_dir"] == str(tmp_path / "operator_runtime")
+    assert profile["runtime"]["kwargs"]["volumes"] == [
+        f"{tmp_path / 'operator_runtime'}:/opt/canonical:ro",
+        f"{tmp_path / 'operator_runtime' / 'tools'}:/opt/workspace/agent_workdir/tools:ro",
+    ]
+    assert profile["runtime"]["prepare"][0]["source"] == (
+        f"{tmp_path / 'output' / 'ascend_operator' / 'op_assets'}/op_tasks/{{op_name}}.py"
+    )
     assert node["port"] == 28100
     assert node["public_url"] == "http://127.0.0.1:28100"
     assert node["inference"]["base_url"] == "http://127.0.0.1:24077"

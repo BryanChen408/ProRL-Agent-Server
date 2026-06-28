@@ -102,6 +102,7 @@ models/
 experiments/
 rollout_results/
 outputs/
+output/
 local/
 logs/
 train-logs/
