@@ -256,7 +256,7 @@ def main(argv: list[str] | None = None) -> int:
         cfg.update(
             polar_skills_dir=str(args.skills_dir),
             polar_readonly_tools_dir=str(args.readonly_tools_dir),
-            polar_tasks_dir=str(args.tasks_dir),
+            operator_tasks_dir=str(args.tasks_dir),
             polar_op_image=args.image,
             polar_device_pool=args.device_pool,
             polar_eval_device_pool=args.eval_device_pool or args.device_pool,

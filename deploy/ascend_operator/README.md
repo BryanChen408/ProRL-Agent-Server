@@ -44,7 +44,7 @@ The default preflight uses the bundled tiny fixture. For real operator assets:
 ```bash
 python3 deploy/ascend_operator/gen_op_assets.py   --parquet /path/to/kernelbench.parquet
 
-POLAR_TASKS_DIR=output/ascend_operator/op_assets/op_tasks POLAR_TASK_JSONL=output/ascend_operator/op_assets/operator_tasks.jsonl bash deploy/ascend_operator/preflight.sh
+OPERATOR_TASKS_DIR=output/ascend_operator/op_assets/op_tasks OPERATOR_TASK_JSONL=output/ascend_operator/op_assets/operator_tasks.jsonl bash deploy/ascend_operator/preflight.sh
 ```
 
 ## Start Polar
@@ -77,7 +77,8 @@ Typical Slime-side values:
 
 ```bash
 POLAR_CONFIG=<polar-repo>/deploy/ascend_operator/polar_config.yaml
-POLAR_TASK_JSONL=<polar-repo>/output/ascend_operator/op_assets/operator_tasks.jsonl
+OPERATOR_TASK_JSONL=<dataset>/operator_tasks.jsonl
+OPERATOR_TASKS_DIR=<dataset>/op_tasks
 POLAR_ROLLOUT_URL=http://<polar-host>:8080
 ```
 

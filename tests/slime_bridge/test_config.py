@@ -86,6 +86,31 @@ def test_resolve_polar_slime_config_accepts_url_only_operator_samples_mode() -> 
     assert config.min_complete_accept_fraction == 0.7
 
 
+def test_resolve_polar_slime_config_prefers_operator_tasks_dir() -> None:
+    config = resolve_polar_slime_config(
+        _args(
+            polar_task_template={},
+            polar_submit_mode="operator_samples",
+            operator_tasks_dir="/dataset/new",
+            polar_tasks_dir="/dataset/legacy",
+        )
+    )
+
+    assert config.operator_tasks_dir == "/dataset/new"
+
+
+def test_resolve_polar_slime_config_accepts_legacy_polar_tasks_dir() -> None:
+    config = resolve_polar_slime_config(
+        _args(
+            polar_task_template={},
+            polar_submit_mode="operator_samples",
+            polar_tasks_dir="/dataset/legacy",
+        )
+    )
+
+    assert config.operator_tasks_dir == "/dataset/legacy"
+
+
 def test_resolve_polar_slime_config_does_not_limit_sessions_by_device_pool() -> None:
     assert resolve_polar_slime_config(_args(polar_device_pool="8,9")).max_sessions_per_task is None
     assert resolve_polar_slime_config(_args(polar_device_pool="8-11")).max_sessions_per_task is None
