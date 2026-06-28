@@ -5,8 +5,8 @@ The input parquet is expected to contain an ``extra_info`` column with at least:
 ``op_name`` and ``task_code``. This emits:
 
 * ``operator_tasks.jsonl`` for slime ``--prompt-data``.
-* ``op_tasks/<op_name>.py`` reference files consumed by the Polar runtime and
-  the fresh judge runtime.
+* ``op_tasks/<op_name>.py`` reference files consumed by the Slime bridge and
+  submitted to Polar as request-carried task artifacts.
 
 The generated ``op_name`` is a filename stem, so this script rejects path-like
 or shell-sensitive names instead of allowing accidental writes outside the

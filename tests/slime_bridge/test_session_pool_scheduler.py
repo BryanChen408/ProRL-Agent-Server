@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 from dataclasses import replace
 from enum import Enum
 from types import SimpleNamespace
@@ -321,6 +322,41 @@ def test_session_pool_unit_payload_can_use_operator_samples_submit_mode() -> Non
     assert payload["metadata"]["session_pool"] is True
     assert "agent" not in payload
     assert "runtime" not in payload
+
+
+def test_operator_samples_payload_attaches_task_source_when_tasks_dir_configured(tmp_path) -> None:
+    tasks_dir = tmp_path / "op_tasks"
+    tasks_dir.mkdir()
+    op_name = "cuda_llm_010559_torch_t__torch_count_nonzero"
+    source = "class Model: pass\n"
+    (tasks_dir / f"{op_name}.py").write_text(source, encoding="utf-8")
+    config = replace(
+        _config(),
+        submit_mode="operator_samples",
+        operator_profile="operator_npu",
+        operator_tasks_dir=str(tasks_dir),
+        task_template={},
+    )
+    args = _args(
+        polar_task_template={},
+        polar_submit_mode="operator_samples",
+        polar_profile="operator_npu",
+    )
+    groups = _groups(1, 1)
+    groups[0][0].metadata["op_name"] = op_name
+
+    payload = rollout_module._build_submission_payload(
+        args=args,
+        config=config,
+        group=groups[0],
+        rollout_id=7,
+        task_position=0,
+    )
+
+    assert payload["sample"]["task_source"] == source
+    assert payload["sample"]["task_source_sha256"] == hashlib.sha256(
+        source.encode("utf-8")
+    ).hexdigest()
 
 
 def test_group_contiguous_helper_submits_one_group_before_opening_next() -> None:

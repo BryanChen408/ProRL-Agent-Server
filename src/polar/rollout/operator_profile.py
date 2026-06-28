@@ -28,6 +28,7 @@ def expand_operator_sample_request(
     rendered = _render_value(profile, context)
     if not isinstance(rendered, dict):
         raise ValueError(f"operator profile {profile_name!r} must render to a mapping")
+    rendered = _attach_task_source(request, rollout, rendered)
 
     payload: dict[str, Any] = {
         "task_id": request.task_id,
@@ -52,6 +53,93 @@ def expand_operator_sample_request(
         payload["metadata"].setdefault("operator_runtime_manifest_sha256", manifest_hash)
 
     return TaskRequest.model_validate(payload)
+
+
+def _attach_task_source(
+    request: OperatorSampleRequest,
+    rollout: RolloutServiceConfig,
+    rendered_profile: dict[str, Any],
+) -> dict[str, Any]:
+    task_source = request.sample.task_source
+    if task_source is None:
+        return rendered_profile
+
+    source_hash = hashlib.sha256(task_source.encode("utf-8")).hexdigest()
+    expected_hash = request.sample.task_source_sha256
+    if expected_hash and expected_hash != source_hash:
+        raise ValueError(
+            "sample.task_source_sha256 does not match sample.task_source"
+        )
+
+    cache_dir = _operator_task_cache_dir(rendered_profile, rollout)
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    cache_path = cache_dir / f"{source_hash}.py"
+    if not cache_path.exists() or cache_path.read_text(encoding="utf-8") != task_source:
+        cache_path.write_text(task_source, encoding="utf-8")
+
+    rendered = deepcopy(rendered_profile)
+    replaced = _rewrite_operator_task_upload_sources(
+        rendered,
+        str(cache_path),
+        op_name=request.sample.op_name,
+    )
+    if replaced == 0:
+        raise ValueError(
+            "sample.task_source was provided, but the operator profile has no "
+            "upload_file source for the operator task"
+        )
+    return rendered
+
+
+def _operator_task_cache_dir(
+    rendered_profile: dict[str, Any],
+    rollout: RolloutServiceConfig,
+) -> Path:
+    configured = rendered_profile.get("operator_task_cache_dir")
+    if isinstance(configured, str) and configured.strip():
+        return Path(configured).expanduser()
+
+    save_dir = rollout.save_dir
+    if save_dir:
+        return Path(save_dir).expanduser().parent / "asset_cache" / "op_tasks"
+    return Path("output") / "ascend_operator" / "asset_cache" / "op_tasks"
+
+
+def _rewrite_operator_task_upload_sources(
+    value: Any,
+    source_path: str,
+    *,
+    op_name: str,
+) -> int:
+    replaced = 0
+    if isinstance(value, dict):
+        if _is_operator_task_upload_action(value, op_name=op_name):
+            value["source"] = source_path
+            replaced += 1
+        for item in value.values():
+            replaced += _rewrite_operator_task_upload_sources(
+                item,
+                source_path,
+                op_name=op_name,
+            )
+    elif isinstance(value, list):
+        for item in value:
+            replaced += _rewrite_operator_task_upload_sources(
+                item,
+                source_path,
+                op_name=op_name,
+            )
+    return replaced
+
+
+def _is_operator_task_upload_action(value: dict[str, Any], *, op_name: str) -> bool:
+    if value.get("type") != "upload_file":
+        return False
+    source = value.get("source")
+    target = value.get("target")
+    if not isinstance(source, str) or not isinstance(target, str):
+        return False
+    return source.endswith(f"/{op_name}.py") and target.endswith(f"/src/{op_name}.py")
 
 
 def _resolve_profile_name(
@@ -164,4 +252,3 @@ def _iter_profile_volumes(rendered_profile: dict[str, Any]) -> list[str]:
         if isinstance(raw_volumes, list):
             volumes.extend(str(volume) for volume in raw_volumes)
     return volumes
-

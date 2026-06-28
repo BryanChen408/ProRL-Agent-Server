@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 import asyncio
+import re
 import time
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import StrEnum
 from typing import TYPE_CHECKING
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from polar.agent.models import AgentSpec
 from polar.runtime.models import RuntimeSpec
@@ -78,6 +79,37 @@ class OperatorSample(BaseModel):
     group_index: int | None = None
     index: int | None = None
     metadata: dict[str, object] = Field(default_factory=dict)
+    task_source: str | None = None
+    task_source_sha256: str | None = None
+
+    @field_validator("op_name")
+    @classmethod
+    def _validate_op_name(cls, value: str) -> str:
+        text = value.strip()
+        if not text:
+            raise ValueError("op_name must be non-empty")
+        if "/" in text or "\\" in text or text in {".", ".."}:
+            raise ValueError("op_name must be a file stem, not a path")
+        return text
+
+    @field_validator("task_source")
+    @classmethod
+    def _validate_task_source(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        if not value:
+            raise ValueError("task_source must be non-empty when provided")
+        return value
+
+    @field_validator("task_source_sha256")
+    @classmethod
+    def _validate_task_source_sha256(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        text = value.strip().lower()
+        if not re.fullmatch(r"[0-9a-f]{64}", text):
+            raise ValueError("task_source_sha256 must be a hex sha256 digest")
+        return text
 
 
 class OperatorSampleRequest(BaseModel):

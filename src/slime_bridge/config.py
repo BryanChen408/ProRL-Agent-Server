@@ -38,6 +38,7 @@ class PolarSlimeConfig:
     scheduler_mode: str
     max_active_sessions: int
     session_pool_pause_policy: str
+    operator_tasks_dir: str | None = None
     session_pool_release_on_postrun: bool = False
 
 
@@ -139,6 +140,7 @@ def resolve_polar_slime_config(args: Any) -> PolarSlimeConfig:
         rollout_server_url=str(rollout_server_url).rstrip("/"),
         submit_mode=submit_mode,
         operator_profile=_optional_text(getattr(args, "polar_profile", None)),
+        operator_tasks_dir=_optional_text(getattr(args, "polar_tasks_dir", None)),
         task_template=task_template,
         task_id_template=str(
             getattr(args, "polar_task_id_template", "polar-slime-{rollout_id}-{sample.group_index}")

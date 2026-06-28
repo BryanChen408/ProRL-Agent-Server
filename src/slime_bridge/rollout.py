@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import atexit
 import copy
+import hashlib
 import json
 import logging
 import math
@@ -398,7 +399,32 @@ def _build_submission_payload(
         thin["profile"] = config.operator_profile
     if payload.get("timeout_seconds") is not None:
         thin["timeout_seconds"] = payload["timeout_seconds"]
+    _attach_operator_task_source(thin, config)
     return thin
+
+
+def _attach_operator_task_source(payload: dict[str, Any], config: PolarSlimeConfig) -> None:
+    tasks_dir = config.operator_tasks_dir
+    if not tasks_dir:
+        return
+    sample = payload.get("sample")
+    if not isinstance(sample, dict):
+        raise ValueError("operator_samples payload must include a sample mapping")
+    op_name = sample.get("op_name")
+    if not isinstance(op_name, str) or not op_name:
+        raise PolarRolloutSchedulerError(
+            "operator_samples submit mode requires sample.op_name to attach task source"
+        )
+    if "/" in op_name or "\\" in op_name or op_name in {".", ".."}:
+        raise PolarRolloutSchedulerError(
+            "operator_samples sample.op_name must be a file stem, not a path"
+        )
+    task_path = Path(tasks_dir) / f"{op_name}.py"
+    if task_path.name != f"{op_name}.py" or not task_path.is_file():
+        raise PolarRolloutSchedulerError(f"missing operator task source: {task_path}")
+    source = task_path.read_text(encoding="utf-8")
+    sample["task_source"] = source
+    sample["task_source_sha256"] = hashlib.sha256(source.encode("utf-8")).hexdigest()
 
 
 def _chunk_task_payloads(
