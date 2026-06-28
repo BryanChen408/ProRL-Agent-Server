@@ -83,6 +83,12 @@ class _CompletionPersistenceConfig(_StrictModel):
     queue_size: int = Field(default=1024, gt=0)
 
 
+class OperatorProfileConfig(BaseModel):
+    """Polar-owned profile used to expand thin operator sample requests."""
+
+    model_config = ConfigDict(extra="allow", frozen=True)
+
+
 class GatewayConfig(_StrictModel):
     heartbeat_interval_seconds: int = Field(default=30, gt=0)
     rollout_server_url: str | None = None
@@ -115,6 +121,8 @@ class RolloutServiceConfig(_StrictModel):
     save_dir: str | None = None
     dispatch_poll_interval_seconds: float = Field(default=1.0, gt=0)
     callback_grace_seconds: float = Field(default=120.0, ge=0)
+    default_operator_profile: str | None = None
+    operator_profiles: dict[str, OperatorProfileConfig] = Field(default_factory=dict)
 
     @model_validator(mode="before")
     @classmethod
@@ -147,6 +155,24 @@ class RolloutServiceConfig(_StrictModel):
     @classmethod
     def _validate_public_url(cls, value: str) -> str:
         return _normalize_http_url(value, "rollout.public_url")
+
+    @field_validator("default_operator_profile")
+    @classmethod
+    def _strip_default_operator_profile(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        text = str(value).strip()
+        if not text:
+            raise ValueError("rollout.default_operator_profile must be non-empty when provided")
+        return text
+
+    @model_validator(mode="after")
+    def _validate_operator_profiles(self) -> "RolloutServiceConfig":
+        if self.default_operator_profile and self.default_operator_profile not in self.operator_profiles:
+            raise ValueError(
+                "rollout.default_operator_profile must reference a key in rollout.operator_profiles"
+            )
+        return self
 
 
 class TopologyConfig(_StrictModel):

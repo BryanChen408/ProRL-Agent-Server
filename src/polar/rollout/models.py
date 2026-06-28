@@ -71,6 +71,27 @@ class TaskRequest(BaseModel):
     metadata: dict[str, object] = Field(default_factory=dict)
 
 
+class OperatorSample(BaseModel):
+    """Logical operator sample submitted by a trainer."""
+
+    op_name: str
+    group_index: int | None = None
+    index: int | None = None
+    metadata: dict[str, object] = Field(default_factory=dict)
+
+
+class OperatorSampleRequest(BaseModel):
+    """Thin operator rollout request expanded by Polar-owned profiles."""
+
+    task_id: str
+    instruction: str
+    num_samples: int = Field(default=1, ge=1)
+    profile: str | None = None
+    timeout_seconds: float | None = Field(default=None, gt=0)
+    sample: OperatorSample
+    metadata: dict[str, object] = Field(default_factory=dict)
+
+
 class SessionDispatchRequest(BaseModel):
     """Session lifecycle request sent from the rollout server to a gateway node.
 

@@ -3,6 +3,7 @@
 from polar.config.topology import (
     GatewayConfig,
     GatewayNodeConfig,
+    OperatorProfileConfig,
     RolloutServiceConfig,
     TopologyConfig,
 )
@@ -10,6 +11,7 @@ from polar.config.topology import (
 __all__ = [
     "GatewayConfig",
     "GatewayNodeConfig",
+    "OperatorProfileConfig",
     "RolloutServiceConfig",
     "TopologyConfig",
 ]

@@ -64,6 +64,10 @@ class PolarLowCompleteAcceptFractionError(PolarRolloutSchedulerError):
     """Raised when a completed task has too few trainable completed sessions."""
 
 
+class _NoopCallbackServer:
+    should_exit = False
+
+
 @dataclass(slots=True)
 class _DeferredGroup:
     group: list[Any]
@@ -248,11 +252,36 @@ def _resolve_gateway_url(args: Any) -> str | None:
     return None
 
 
+def _resolve_rollout_url(args: Any) -> str | None:
+    rollout_url = getattr(args, "polar_url", None) or getattr(args, "polar_rollout_url", None)
+    if rollout_url:
+        return str(rollout_url).rstrip("/")
+
+    topology_path = getattr(args, "polar_topology_path", None)
+    if topology_path:
+        topology = TopologyConfig.load(topology_path)
+        return topology.rollout.public_url.rstrip("/")
+    return None
+
+
 def _pause_gateway_generation(args: Any) -> None:
+    rollout_url = _resolve_rollout_url(args)
+    if rollout_url:
+        timeout_seconds = float(getattr(args, "polar_weight_update_pause_timeout", 300.0))
+        request_timeout = max(timeout_seconds + 15.0, 20.0)
+        with httpx.Client(timeout=request_timeout) as client:
+            response = client.post(
+                f"{rollout_url}/rollout/admin/inference/pause",
+                params={"timeout_seconds": timeout_seconds},
+            )
+            response.raise_for_status()
+            logger.info("Paused Polar gateway generation via rollout server: %s", response.json())
+        return
+
     gateway_url = _resolve_gateway_url(args)
     if not gateway_url:
         raise PolarRolloutSchedulerError(
-            "polar_gateway_url or polar_topology_path is required when "
+            "polar_url, polar_rollout_url, polar_gateway_url, or polar_topology_path is required when "
             "polar_allow_weight_update_overlap is enabled"
         )
 
@@ -268,6 +297,15 @@ def _pause_gateway_generation(args: Any) -> None:
 
 
 def _resume_gateway_generation(args: Any) -> None:
+    rollout_url = _resolve_rollout_url(args)
+    if rollout_url:
+        request_timeout = float(getattr(args, "polar_gateway_control_timeout", 30.0))
+        with httpx.Client(timeout=max(request_timeout, 5.0)) as client:
+            response = client.post(f"{rollout_url}/rollout/admin/inference/resume")
+            response.raise_for_status()
+            logger.info("Resumed Polar gateway generation via rollout server: %s", response.json())
+        return
+
     gateway_url = _resolve_gateway_url(args)
     if not gateway_url:
         return
@@ -310,6 +348,57 @@ def _build_task_payload(
         task_position=task_position,
         num_rollouts=len(group),
     )
+
+
+def _build_submission_payload(
+    *,
+    args: Any,
+    config: PolarSlimeConfig,
+    group: list[Any],
+    rollout_id: int,
+    task_position: int,
+) -> dict[str, Any]:
+    payload = _build_task_payload(
+        args=args,
+        config=config,
+        group=group,
+        rollout_id=rollout_id,
+        task_position=task_position,
+    )
+    if config.submit_mode == "task_request":
+        return payload
+
+    first_sample = group[0]
+    sample_metadata = copy.deepcopy(getattr(first_sample, "metadata", None) or {})
+    op_name = sample_metadata.get("op_name") or getattr(first_sample, "op_name", None)
+    if not op_name:
+        raise PolarRolloutSchedulerError(
+            "operator_samples submit mode requires sample.metadata.op_name"
+        )
+
+    metadata = payload.get("metadata")
+    if metadata is None:
+        metadata = {}
+    if not isinstance(metadata, dict):
+        raise ValueError("polar operator-sample metadata must be a mapping when provided")
+
+    thin: dict[str, Any] = {
+        "task_id": str(payload["task_id"]),
+        "instruction": str(payload["instruction"]),
+        "num_samples": int(payload.get("num_samples") or len(group)),
+        "sample": {
+            "op_name": str(op_name),
+            "group_index": getattr(first_sample, "group_index", None),
+            "index": getattr(first_sample, "index", None),
+            "metadata": sample_metadata,
+        },
+        "metadata": metadata,
+    }
+    if config.operator_profile:
+        thin["profile"] = config.operator_profile
+    if payload.get("timeout_seconds") is not None:
+        thin["timeout_seconds"] = payload["timeout_seconds"]
+    return thin
 
 
 def _chunk_task_payloads(
@@ -413,7 +502,7 @@ def _new_session_group_accumulator(
     submitted_rollout_id: int,
     policy_version: int,
 ) -> _SessionGroupAccumulator:
-    payload = _build_task_payload(
+    payload = _build_submission_payload(
         args=args,
         config=config,
         group=group,
@@ -458,7 +547,7 @@ def _build_session_unit_payload(
     config: PolarSlimeConfig,
     unit: _PendingSessionUnit,
 ) -> dict[str, Any]:
-    payload = _build_task_payload(
+    payload = _build_submission_payload(
         args=args,
         config=config,
         group=[unit.sample],
@@ -609,10 +698,11 @@ async def _submit_and_wait_for_task(
     payload: dict[str, Any],
     *,
     poll_interval: float = _POLL_INTERVAL,
+    submit_path: str = "/rollout/task/submit",
 ) -> TaskResult:
     """Submit one task via the async endpoint and poll until terminal."""
     resp = await client.post(
-        f"{base_url}/rollout/task/submit",
+        f"{base_url}{submit_path}",
         json=payload,
         headers={"Content-Type": "application/json"},
     )
@@ -1256,6 +1346,15 @@ class AsyncPolarRolloutWorker:
 
     async def _start_callback_listener(self) -> tuple[uvicorn.Server, asyncio.Task[None]]:
         """Bind a FastAPI listener for TaskResult callbacks."""
+        if self.config.submit_mode == "operator_samples":
+            server = _NoopCallbackServer()
+
+            async def idle() -> None:
+                while not server.should_exit:
+                    await asyncio.sleep(0.05)
+
+            return server, asyncio.create_task(idle(), name="polar-noop-callback-listener")
+
         app = FastAPI()
 
         @app.post("/callback/task_result")
@@ -1338,7 +1437,7 @@ class AsyncPolarRolloutWorker:
             config=self.config,
             unit=unit,
         )
-        return await self._submit_with_callback(client, payload)
+        return await self._submit_payload(client, payload)
 
     async def _poll_session_pool_run_release(
         self,
@@ -1597,7 +1696,7 @@ class AsyncPolarRolloutWorker:
         client: httpx.AsyncClient,
         pending: _PendingGroup,
     ) -> _CompletedGroup:
-        payload = _build_task_payload(
+        payload = _build_submission_payload(
             args=self.args, config=self.config, group=pending.group,
             rollout_id=pending.group_id, task_position=0,
         )
@@ -1608,7 +1707,7 @@ class AsyncPolarRolloutWorker:
             policy_version=pending.policy_version,
             rollout_step=pending.submitted_rollout_id,
         )
-        task_result = await self._submit_payload_with_callback(client, payload)
+        task_result = await self._submit_payload_result(client, payload)
 
         rejection_reason = self._task_rejection_reason(task_result, pending.group)
         if rejection_reason is not None:
@@ -1746,6 +1845,18 @@ class AsyncPolarRolloutWorker:
             self._task_events.pop(task_id, None)
             self._task_results.pop(task_id, None)
 
+    async def _submit_payload(
+        self, client: httpx.AsyncClient, payload: dict[str, Any]
+    ) -> TaskResult:
+        if self.config.submit_mode == "operator_samples":
+            return await _submit_and_wait_for_task(
+                client,
+                self.config.rollout_server_url,
+                payload,
+                submit_path="/rollout/operator_samples/submit",
+            )
+        return await self._submit_with_callback(client, payload)
+
     async def _submit_payload_with_callback(
         self, client: httpx.AsyncClient, payload: dict[str, Any]
     ) -> TaskResult:
@@ -1760,6 +1871,28 @@ class AsyncPolarRolloutWorker:
 
         async def submit_one(chunk: dict[str, Any]) -> TaskResult:
             return await self._submit_with_callback(client, chunk)
+
+        return await _submit_payload_in_chunks(
+            payload,
+            max_sessions_per_task=self.config.max_sessions_per_task,
+            submit_one=submit_one,
+        )
+
+    async def _submit_payload_result(
+        self, client: httpx.AsyncClient, payload: dict[str, Any]
+    ) -> TaskResult:
+        if self.config.submit_mode == "task_request":
+            return await self._submit_payload_with_callback(client, payload)
+        chunks = _chunk_task_payloads(
+            payload,
+            max_sessions_per_task=self.config.max_sessions_per_task,
+        )
+        if len(chunks) > 1:
+            self._inc_metric("polar/chunked_tasks")
+            self._inc_metric("polar/task_chunks", len(chunks))
+
+        async def submit_one(chunk: dict[str, Any]) -> TaskResult:
+            return await self._submit_payload(client, chunk)
 
         return await _submit_payload_in_chunks(
             payload,
@@ -1881,7 +2014,7 @@ async def _submit_eval_groups(
 
     async def _run_one(position: int, group: list[Any]) -> TaskResult:
         async with semaphore:
-            payload = _build_task_payload(
+            payload = _build_submission_payload(
                 args=args, config=config, group=group,
                 rollout_id=rollout_id, task_position=position,
             )
@@ -1899,7 +2032,17 @@ async def _submit_eval_groups(
             )
 
             async def submit_one(chunk: dict[str, Any]) -> TaskResult:
-                return await _submit_and_wait_for_task(client, config.rollout_server_url, chunk)
+                submit_path = (
+                    "/rollout/operator_samples/submit"
+                    if config.submit_mode == "operator_samples"
+                    else "/rollout/task/submit"
+                )
+                return await _submit_and_wait_for_task(
+                    client,
+                    config.rollout_server_url,
+                    chunk,
+                    submit_path=submit_path,
+                )
 
             return await _submit_payload_in_chunks(
                 payload,

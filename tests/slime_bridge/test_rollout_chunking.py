@@ -31,6 +31,8 @@ class FakeSample:
 def _config(max_sessions_per_task: int | None = 2) -> PolarSlimeConfig:
     return PolarSlimeConfig(
         rollout_server_url="http://rollout:8080",
+        submit_mode="task_request",
+        operator_profile=None,
         task_template={"agent": {"harness": "claude_code", "model_name": "qwen"}},
         task_id_template="task-{rollout_id}",
         instruction_template=None,

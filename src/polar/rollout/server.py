@@ -7,6 +7,7 @@ import os
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 
+import httpx
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
 
@@ -18,10 +19,12 @@ from polar.rollout.models import (
     GatewayNodeInfo,
     NodeHeartbeatRequest,
     NodeRegistrationRequest,
+    OperatorSampleRequest,
     SessionResult,
     TaskRequest,
     TaskStatus,
 )
+from polar.rollout.operator_profile import expand_operator_sample_request
 from polar.rollout.pipeline import Pipeline
 
 logging.basicConfig(
@@ -123,6 +126,20 @@ async def submit_task_async(request: TaskRequest):
     return {"task_id": task_id, "status": "running"}
 
 
+@app.post("/rollout/operator_samples/submit")
+async def submit_operator_samples_async(request: OperatorSampleRequest):
+    """Submit a thin operator sample request using a Polar-owned profile."""
+    state = get_state()
+    try:
+        task_request = expand_operator_sample_request(request, state.rollout)
+        task_id = await state.manager.submit_task(task_request)
+    except ValueError as exc:
+        message = str(exc)
+        status_code = 409 if "already running" in message else 400
+        raise HTTPException(status_code=status_code, detail=message) from exc
+    return {"task_id": task_id, "status": "running"}
+
+
 @app.get("/rollout/task/{task_id}", response_model=TaskStatus)
 async def get_task(task_id: str):
     task = get_state().manager.get_task(task_id)
@@ -134,6 +151,19 @@ async def get_task(task_id: str):
 @app.get("/rollout/status")
 async def rollout_status():
     return get_state().manager.status()
+
+
+@app.post("/rollout/admin/inference/pause")
+async def pause_gateway_generation(timeout_seconds: float = 300.0):
+    return await _forward_gateway_admin(
+        "/admin/inference/pause",
+        params={"timeout_seconds": timeout_seconds},
+    )
+
+
+@app.post("/rollout/admin/inference/resume")
+async def resume_gateway_generation():
+    return await _forward_gateway_admin("/admin/inference/resume")
 
 
 @app.post("/nodes/register", response_model=GatewayNodeInfo)
@@ -224,6 +254,32 @@ async def stream_events(request: Request):
         media_type="text/event-stream",
         headers=SSE_HEADERS,
     )
+
+
+async def _forward_gateway_admin(
+    path: str,
+    *,
+    params: dict[str, object] | None = None,
+) -> dict[str, object]:
+    state = get_state()
+    nodes = list(state.topology.gateway.nodes)
+    if not nodes:
+        raise HTTPException(status_code=503, detail="No gateway nodes configured")
+
+    timeout = httpx.Timeout(10.0, read=max(float(params.get("timeout_seconds", 0)) + 5.0, 10.0) if params else 10.0)
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        responses = []
+        for node in nodes:
+            try:
+                response = await client.post(f"{node.public_url}{path}", params=params)
+                response.raise_for_status()
+                responses.append({"node_id": node.id, "status": "ok", "response": response.json()})
+            except Exception as exc:
+                responses.append({"node_id": node.id, "status": "error", "error": str(exc)})
+
+    if all(item["status"] == "error" for item in responses):
+        raise HTTPException(status_code=502, detail={"nodes": responses})
+    return {"nodes": responses}
 
 
 def serve(topology_path: str = "topology.yaml", *, log_level: str = "info") -> None:

@@ -17,6 +17,8 @@ _PLACEHOLDER_RE = re.compile(r"{([^{}]+)}")
 @dataclass(frozen=True, slots=True)
 class PolarSlimeConfig:
     rollout_server_url: str
+    submit_mode: str
+    operator_profile: str | None
     task_template: dict[str, Any]
     task_id_template: str
     instruction_template: str | None
@@ -40,25 +42,30 @@ class PolarSlimeConfig:
 
 
 def resolve_polar_slime_config(args: Any) -> PolarSlimeConfig:
-    rollout_server_url = getattr(args, "polar_rollout_url", None)
+    rollout_server_url = _first_configured(args, "polar_url", "polar_rollout_url")
     topology_path = getattr(args, "polar_topology_path", None)
     if rollout_server_url is None and topology_path:
         rollout_server_url = TopologyConfig.load(topology_path).rollout.public_url
     if rollout_server_url is None:
         raise ValueError(
-            "Polar rollout URL is not configured. Set polar_rollout_url or polar_topology_path "
+            "Polar rollout URL is not configured. Set polar_url, polar_rollout_url, or polar_topology_path "
             "in Slime's custom config YAML."
         )
 
     task_template = deepcopy(getattr(args, "polar_task_template", None) or {})
     if not isinstance(task_template, dict):
         raise ValueError("polar_task_template must be a mapping")
-    if "agent" not in task_template:
+    submit_mode = str(getattr(args, "polar_submit_mode", "") or "").strip().lower()
+    if not submit_mode:
+        submit_mode = "task_request" if task_template else "operator_samples"
+    if submit_mode not in {"task_request", "operator_samples"}:
+        raise ValueError("polar_submit_mode must be 'task_request' or 'operator_samples'")
+    if submit_mode == "task_request" and "agent" not in task_template:
         raise ValueError("polar_task_template must include an agent spec")
 
-    max_async_level = int(getattr(args, "polar_max_async_level", 2))
+    max_async_level = int(_first_configured(args, "rollout_max_async_level", "polar_max_async_level", default=2))
     if max_async_level <= 0:
-        raise ValueError("polar_max_async_level must be greater than 0")
+        raise ValueError("rollout_max_async_level must be greater than 0")
 
     rollout_batch_size = int(getattr(args, "rollout_batch_size", 1) or 1)
     if rollout_batch_size <= 0:
@@ -75,27 +82,36 @@ def resolve_polar_slime_config(args: Any) -> PolarSlimeConfig:
     max_concurrency = rollout_batch_size * max_async_level
     max_session_concurrency = max_concurrency * group_size
     max_sessions_per_task = _resolve_max_sessions_per_task(args)
-    scheduler_mode = str(getattr(args, "polar_scheduler_mode", "group")).strip().lower()
+    scheduler_mode = str(_first_configured(args, "rollout_scheduler_mode", "polar_scheduler_mode", default="group")).strip().lower()
     if scheduler_mode not in {"group", "session_pool"}:
-        raise ValueError("polar_scheduler_mode must be 'group' or 'session_pool'")
+        raise ValueError("rollout_scheduler_mode must be 'group' or 'session_pool'")
     max_active_sessions = _resolve_max_active_sessions(args, default=max_session_concurrency)
     session_pool_pause_policy = str(
-        getattr(args, "polar_session_pool_pause_policy", "drain_open_groups")
+        _first_configured(
+            args,
+            "rollout_session_pool_pause_policy",
+            "polar_session_pool_pause_policy",
+            default="drain_open_groups",
+        )
     ).strip().lower()
     if session_pool_pause_policy != "drain_open_groups":
-        raise ValueError("polar_session_pool_pause_policy must be 'drain_open_groups'")
+        raise ValueError("rollout_session_pool_pause_policy must be 'drain_open_groups'")
     session_pool_release_on_postrun = _resolve_bool(
         args,
-        "polar_session_pool_release_on_postrun",
+        "rollout_release_on_postrun",
+        fallback_names=(
+            "rollout_session_pool_release_on_postrun",
+            "polar_session_pool_release_on_postrun",
+        ),
         default=False,
     )
     max_off_policy_steps = max_async_level + update_weights_interval
 
-    request_timeout = getattr(args, "polar_request_timeout", None)
+    request_timeout = _first_configured(args, "rollout_request_timeout", "polar_request_timeout")
     if request_timeout is not None:
         request_timeout = float(request_timeout)
         if request_timeout <= 0:
-            raise ValueError("polar_request_timeout must be greater than 0")
+            raise ValueError("rollout_request_timeout must be greater than 0")
 
     callback_host = str(getattr(args, "polar_callback_host", "127.0.0.1")).strip()
     if not callback_host:
@@ -108,13 +124,21 @@ def resolve_polar_slime_config(args: Any) -> PolarSlimeConfig:
         raise ValueError("polar_scoring_mode must be 'group' or 'individual'")
 
     min_complete_accept_fraction = float(
-        getattr(args, "polar_min_complete_accept_fraction", 0.0) or 0.0
+        _first_configured(
+            args,
+            "rollout_min_complete_accept_fraction",
+            "polar_min_complete_accept_fraction",
+            default=0.0,
+        )
+        or 0.0
     )
     if not 0.0 <= min_complete_accept_fraction <= 1.0:
         raise ValueError("polar_min_complete_accept_fraction must be between 0 and 1")
 
     return PolarSlimeConfig(
         rollout_server_url=str(rollout_server_url).rstrip("/"),
+        submit_mode=submit_mode,
+        operator_profile=_optional_text(getattr(args, "polar_profile", None)),
         task_template=task_template,
         task_id_template=str(
             getattr(args, "polar_task_id_template", "polar-slime-{rollout_id}-{sample.group_index}")
@@ -155,17 +179,23 @@ def _resolve_max_sessions_per_task(args: Any) -> int | None:
 
 
 def _resolve_max_active_sessions(args: Any, *, default: int) -> int:
-    configured = getattr(args, "polar_max_active_sessions", None)
+    configured = _first_configured(args, "rollout_max_active_sessions", "polar_max_active_sessions")
     if configured in (None, ""):
         return int(default)
     value = int(configured)
     if value <= 0:
-        raise ValueError("polar_max_active_sessions must be greater than 0")
+        raise ValueError("rollout_max_active_sessions must be greater than 0")
     return value
 
 
-def _resolve_bool(args: Any, name: str, *, default: bool) -> bool:
-    configured = getattr(args, name, default)
+def _resolve_bool(
+    args: Any,
+    name: str,
+    *,
+    fallback_names: tuple[str, ...] = (),
+    default: bool,
+) -> bool:
+    configured = _first_configured(args, name, *fallback_names, default=default)
     if configured in (None, ""):
         return default
     if isinstance(configured, bool):
@@ -178,6 +208,21 @@ def _resolve_bool(args: Any, name: str, *, default: bool) -> bool:
     if value in {"0", "false", "no", "n", "off"}:
         return False
     raise ValueError(f"{name} must be a boolean")
+
+
+def _first_configured(args: Any, *names: str, default: Any = None) -> Any:
+    for name in names:
+        value = getattr(args, name, None)
+        if value not in (None, ""):
+            return value
+    return default
+
+
+def _optional_text(value: Any) -> str | None:
+    if value in (None, ""):
+        return None
+    text = str(value).strip()
+    return text or None
 
 
 def _parse_device_pool(spec: Any) -> list[str]:
@@ -272,6 +317,11 @@ def render_topology_template(topology_path: str | Path, args: Any) -> dict[str, 
             "save_dir": topology.rollout.save_dir,
             "dispatch_poll_interval_seconds": topology.rollout.dispatch_poll_interval_seconds,
             "callback_grace_seconds": topology.rollout.callback_grace_seconds,
+            "default_operator_profile": topology.rollout.default_operator_profile,
+            "operator_profiles": {
+                name: profile.model_dump(mode="python")
+                for name, profile in topology.rollout.operator_profiles.items()
+            },
         },
         "gateway": {
             "heartbeat_interval_seconds": topology.gateway.heartbeat_interval_seconds,

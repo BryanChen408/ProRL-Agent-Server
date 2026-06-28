@@ -58,6 +58,34 @@ def test_resolve_polar_slime_config_computes_concurrency_and_normalizes_url() ->
     assert config.min_complete_accept_fraction == 0.0
 
 
+def test_resolve_polar_slime_config_accepts_url_only_operator_samples_mode() -> None:
+    config = resolve_polar_slime_config(
+        _args(
+            polar_url="http://rollout:8081/",
+            polar_rollout_url=None,
+            polar_task_template={},
+            polar_submit_mode="operator_samples",
+            polar_profile="operator_npu",
+            rollout_max_async_level=3,
+            rollout_scheduler_mode="session_pool",
+            rollout_max_active_sessions=32,
+            rollout_release_on_postrun=True,
+            rollout_request_timeout=120,
+            rollout_min_complete_accept_fraction=0.7,
+        )
+    )
+
+    assert config.rollout_server_url == "http://rollout:8081"
+    assert config.submit_mode == "operator_samples"
+    assert config.operator_profile == "operator_npu"
+    assert config.max_concurrency == 9
+    assert config.scheduler_mode == "session_pool"
+    assert config.max_active_sessions == 32
+    assert config.session_pool_release_on_postrun is True
+    assert config.request_timeout == 120.0
+    assert config.min_complete_accept_fraction == 0.7
+
+
 def test_resolve_polar_slime_config_does_not_limit_sessions_by_device_pool() -> None:
     assert resolve_polar_slime_config(_args(polar_device_pool="8,9")).max_sessions_per_task is None
     assert resolve_polar_slime_config(_args(polar_device_pool="8-11")).max_sessions_per_task is None
@@ -110,7 +138,7 @@ def test_resolve_polar_slime_config_accepts_session_pool_release_flag(value) -> 
 
 
 def test_resolve_polar_slime_config_rejects_invalid_session_pool_release_flag() -> None:
-    with pytest.raises(ValueError, match="polar_session_pool_release_on_postrun"):
+    with pytest.raises(ValueError, match="rollout_release_on_postrun"):
         resolve_polar_slime_config(
             _args(
                 polar_scheduler_mode="session_pool",
@@ -120,24 +148,26 @@ def test_resolve_polar_slime_config_rejects_invalid_session_pool_release_flag() 
 
 
 def test_resolve_polar_slime_config_rejects_invalid_scheduler_mode() -> None:
-    with pytest.raises(ValueError, match="polar_scheduler_mode"):
+    with pytest.raises(ValueError, match="scheduler_mode"):
         resolve_polar_slime_config(_args(polar_scheduler_mode="round_robin"))
 
 
 @pytest.mark.parametrize("value", [0, -1])
 def test_resolve_polar_slime_config_rejects_invalid_max_active_sessions(value) -> None:
-    with pytest.raises(ValueError, match="polar_max_active_sessions"):
+    with pytest.raises(ValueError, match="max_active_sessions"):
         resolve_polar_slime_config(_args(polar_max_active_sessions=value))
 
 
 def test_resolve_polar_slime_config_rejects_unimplemented_session_pool_pause_policy() -> None:
-    with pytest.raises(ValueError, match="polar_session_pool_pause_policy"):
+    with pytest.raises(ValueError, match="session_pool_pause_policy"):
         resolve_polar_slime_config(_args(polar_session_pool_pause_policy="drop_partial_group"))
 
 
 def test_resolve_polar_slime_config_requires_agent_template() -> None:
     with pytest.raises(ValueError, match="agent spec"):
-        resolve_polar_slime_config(_args(polar_task_template={}))
+        resolve_polar_slime_config(
+            _args(polar_task_template={}, polar_submit_mode="task_request")
+        )
 
 
 def test_resolve_polar_slime_config_accepts_complete_fraction_threshold() -> None:
@@ -222,6 +252,30 @@ gateway:
     node = rendered["gateway"]["nodes"][0]
     assert node["inference"] == {"engine": "sglang", "base_url": "http://127.0.0.1:30000"}
     assert "sglang" not in node
+
+
+def test_render_topology_template_preserves_operator_profiles(tmp_path) -> None:
+    topology_path = tmp_path / "topology.yaml"
+    topology_path.write_text(
+        """
+rollout:
+  public_url: http://127.0.0.1:8080
+  default_operator_profile: operator_npu
+  operator_profiles:
+    operator_npu:
+      agent: {harness: claude_code}
+gateway:
+  nodes:
+    - id: n1
+      public_url: http://127.0.0.1:8100
+      inference: {engine: sglang, base_url: http://127.0.0.1:8000}
+""".strip()
+    )
+
+    rendered = render_topology_template(str(topology_path), _args())
+
+    assert rendered["rollout"]["default_operator_profile"] == "operator_npu"
+    assert rendered["rollout"]["operator_profiles"]["operator_npu"]["agent"]["harness"] == "claude_code"
 
 
 def test_render_topology_template_can_override_model_served(tmp_path) -> None:

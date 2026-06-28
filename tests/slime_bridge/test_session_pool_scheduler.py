@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import replace
 from enum import Enum
 from types import SimpleNamespace
 
@@ -64,6 +65,8 @@ def _args(**overrides) -> SimpleNamespace:
 def _config(*, threshold: float = 0.0) -> PolarSlimeConfig:
     return PolarSlimeConfig(
         rollout_server_url="http://rollout:8080",
+        submit_mode="task_request",
+        operator_profile=None,
         task_template={
             "agent": {"harness": "codex", "model_name": "qwen"},
             "metadata": {"instance": "{sample.metadata.instance_id}"},
@@ -286,6 +289,38 @@ def test_session_pool_unit_payload_is_one_polar_session_with_scheduler_metadata(
     assert payload["metadata"]["parent_task_id"] == "task-10-100"
     assert payload["metadata"]["sample_pos"] == 5
     assert payload["metadata"]["group_size"] == 8
+
+
+def test_session_pool_unit_payload_can_use_operator_samples_submit_mode() -> None:
+    config = replace(
+        _config(),
+        submit_mode="operator_samples",
+        operator_profile="operator_npu",
+        task_template={},
+    )
+    args = _args(polar_task_template={}, polar_submit_mode="operator_samples", polar_profile="operator_npu")
+    groups = _groups(1, 8)
+    for sample in groups[0]:
+        sample.metadata["op_name"] = "cuda_llm_010559_torch_t__torch_count_nonzero"
+    unit = _flatten_session_pool_units(
+        args=args,
+        config=config,
+        groups=groups,
+        first_group_id=10,
+        submitted_rollout_id=7,
+        policy_version=3,
+    )[5]
+
+    payload = _build_session_unit_payload(args=args, config=config, unit=unit)
+
+    assert payload["task_id"] == "task-10-100--g000010-sp005"
+    assert payload["num_samples"] == 1
+    assert payload["profile"] == "operator_npu"
+    assert payload["sample"]["op_name"] == "cuda_llm_010559_torch_t__torch_count_nonzero"
+    assert payload["sample"]["group_index"] == 100
+    assert payload["metadata"]["session_pool"] is True
+    assert "agent" not in payload
+    assert "runtime" not in payload
 
 
 def test_group_contiguous_helper_submits_one_group_before_opening_next() -> None:
