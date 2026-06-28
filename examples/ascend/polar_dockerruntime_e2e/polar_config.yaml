@@ -1,0 +1,17 @@
+# Slime-side Polar bridge config.
+#
+# Slime only owns rollout scheduling and the Polar rollout URL. Polar runtime,
+# skills/tools mounts, NPU pools, agent settings, builder, and judge config live
+# in the Polar topology operator profile.
+
+polar_url: "http://127.0.0.1:8080"
+polar_reward_key: "score"
+polar_task_id_template: "polar-op-{rollout_id}-{sample.group_index}"
+polar_instruction_template: null
+
+rollout_max_async_level: 1
+rollout_request_timeout: 4000
+rollout_scheduler_mode: "session_pool"
+rollout_max_active_sessions: 16
+rollout_release_on_postrun: true
+rollout_min_complete_accept_fraction: 0.6
