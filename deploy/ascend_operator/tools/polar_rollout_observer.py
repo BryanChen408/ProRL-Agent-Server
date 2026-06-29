@@ -334,12 +334,16 @@ class ObserverStore:
         has_files: bool,
         result: dict[str, Any] | None,
         timeout_info: dict[str, Any] | None,
+        summary: dict[str, Any] | None = None,
     ) -> str:
         active_text = str(active_status or "").upper()
         has_timeout = bool((timeout_info or {}).get("count"))
+        has_abnormal = bool((summary or {}).get("abnormal_termination"))
         if active_text:
             if active_text == "RUNNING" and has_timeout:
                 return "RUNNING_TIMEOUT"
+            if has_abnormal and active_text in {"COMPLETED", "DONE", "FINISHED", "STOPPED"}:
+                return "ABNORMAL_ON_DISK" if has_files else "ABNORMAL"
             return active_text
 
         result_status = str((result or {}).get("status") or "").upper()
@@ -348,6 +352,8 @@ class ObserverStore:
             return "TIMEOUT_ON_DISK"
         if result_status in {"ERROR", "FAILED"} or result_error:
             return "ERROR_ON_DISK"
+        if has_abnormal:
+            return "ABNORMAL_ON_DISK" if has_files or result_status == "COMPLETED" else "ABNORMAL"
         if result_status == "COMPLETED":
             return "COMPLETED_ON_DISK"
         if has_files:
@@ -453,11 +459,13 @@ class ObserverStore:
             timeout_info = timeout_by_id.get(session.session_id, {})
             latest_mtime = stat.st_mtime if stat else _latest_activity_mtime(active)
             live_metrics = metrics_by_id.get(session.session_id, {})
+            summary = self.aggregate_completion_summary(files[-2:]) if files else analyze_session_messages({})
             status = self.classify_session_status(
                 active.get("status"),
                 has_files=bool(files),
                 result=result,
                 timeout_info=timeout_info,
+                summary=summary,
             )
             task_id = str(active.get("task_id") or session.task_id)
             run_id = str(active.get("run_id") or derive_run_id(task_id))
@@ -466,7 +474,6 @@ class ObserverStore:
                 or live_metrics.get("completion_metrics")
                 or {}
             )
-            summary = self.aggregate_completion_summary(files[-2:]) if files else analyze_session_messages({})
             sessions.append(
                 {
                     "session_id": session.session_id,
@@ -506,6 +513,9 @@ class ObserverStore:
                         "doc_drift_turns": summary["doc_drift_turns"],
                         "forbidden_writes": len(summary["forbidden_writes"]),
                         "readonly_mutation_attempts": len(summary["readonly_mutation_attempts"]),
+                        "abnormal_termination": summary["abnormal_termination"],
+                        "abnormal_reasons": summary["abnormal_reasons"],
+                        "abnormal_events": summary["abnormal_events"],
                     },
                 }
             )
@@ -527,6 +537,7 @@ class ObserverStore:
                 has_files=False,
                 result=None,
                 timeout_info=timeout_info,
+                summary=summary,
             )
             sessions.append(
                 {
@@ -560,6 +571,9 @@ class ObserverStore:
                         "validation": summary["validation"],
                         "forbidden_writes": len(summary["forbidden_writes"]),
                         "readonly_mutation_attempts": len(summary["readonly_mutation_attempts"]),
+                        "abnormal_termination": summary["abnormal_termination"],
+                        "abnormal_reasons": summary["abnormal_reasons"],
+                        "abnormal_events": summary["abnormal_events"],
                     },
                 }
             )
@@ -657,6 +671,7 @@ class ObserverStore:
                 has_files=bool(files),
                 result=result,
                 timeout_info=timeout_info,
+                summary=summary,
             ),
             "result_status": (result or {}).get("status"),
             "result_error": (result or {}).get("error"),
@@ -821,6 +836,17 @@ def _response_message(data: dict[str, Any]) -> dict[str, Any] | None:
     return msg if isinstance(msg, dict) else None
 
 
+def _response_finish_reason(data: dict[str, Any]) -> str | None:
+    resp = data.get("response")
+    if not isinstance(resp, dict):
+        return None
+    choices = resp.get("choices")
+    if not isinstance(choices, list) or not choices:
+        return None
+    reason = (choices[0] or {}).get("finish_reason")
+    return str(reason) if reason is not None else None
+
+
 def _response_tool_calls(msg: dict[str, Any]) -> list[dict[str, Any]]:
     out: list[dict[str, Any]] = []
     for item in msg.get("tool_calls") or []:
@@ -914,6 +940,34 @@ PROTECTED_PATH_PREFIXES = ("tools/", ".agents/skills/")
 PROTECTED_EXACT_PATHS = ("CLAUDE.md", "./CLAUDE.md")
 SUBMISSION_PATH_RE = re.compile(r"(?:^|/)output/submission/[^/\s]+_impl\.py$")
 DOC_DRIFT_TERMS = ("总结", "点评", "评价", "改写", "重写", "完整", "全面", "实用", "详细", "涵盖", "包括", "提供", "介绍")
+RAW_TOOL_CALL_TEXT_RE = re.compile(
+    r'(<\s*/?\s*(?:tool_use|tool_call|toolcall|tool_use_error)\b|'
+    r'"type"\s*:\s*"(?:tool_use|tool_result)"|'
+    r'"tool_calls"\s*:\s*\[)',
+    re.IGNORECASE,
+)
+
+
+def _looks_like_raw_tool_call_text(text: str) -> bool:
+    if not text:
+        return False
+    if not RAW_TOOL_CALL_TEXT_RE.search(text):
+        return False
+    if re.search(r'"type"\s*:\s*"tool_use"', text, re.IGNORECASE) and re.search(
+        r'"(?:name|input|id)"\s*:',
+        text,
+    ):
+        return True
+    if re.search(r'"tool_calls"\s*:\s*\[', text, re.IGNORECASE):
+        return True
+    if re.search(r"<\s*/?\s*(?:tool_use|tool_call|toolcall|tool_use_error)\b", text, re.IGNORECASE):
+        return True
+    if re.search(r'"type"\s*:\s*"tool_result"', text, re.IGNORECASE) and re.search(
+        r'"(?:tool_use_id|content)"\s*:',
+        text,
+    ):
+        return True
+    return False
 
 
 def _is_pipeline_command(command: str) -> bool:
@@ -1071,6 +1125,7 @@ def analyze_session_messages(data: dict[str, Any]) -> dict[str, Any]:
     req = data.get("original_request") if isinstance(data.get("original_request"), dict) else {}
     messages = req.get("messages") if isinstance(req.get("messages"), list) else []
     current = _response_message(data)
+    finish_reason = _response_finish_reason(data)
     turns = _extract_turns(messages, current)
     first_user = next((msg for msg in messages if msg.get("role") == "user"), {})
     prompt_blocks = _content_text_blocks(first_user.get("content")) if first_user else []
@@ -1095,10 +1150,21 @@ def analyze_session_messages(data: dict[str, Any]) -> dict[str, Any]:
     first_submission_write_turn: int | None = None
     first_pipeline_turn: int | None = None
     doc_drift_turns: list[int] = []
+    abnormal_events: list[dict[str, Any]] = []
     validation = {"success": 0, "ast_fail": 0, "verify_fail": 0, "benchmark_fail": 0, "core_dim": 0, "cbuf": 0}
     pipeline_stage_counts = _empty_pipeline_stage_counts()
     for turn in turns:
         result_by_id = {r.get("tool_use_id"): r for r in turn.get("tool_results", []) if r.get("tool_use_id")}
+        assistant_text = str(turn.get("assistant_text") or "")
+        if _looks_like_raw_tool_call_text(assistant_text):
+            abnormal_events.append(
+                {
+                    "reason": "raw_tool_call_text",
+                    "turn": turn["index"],
+                    "source": turn.get("source"),
+                    "snippet": _snippet(assistant_text, 1200),
+                }
+            )
         if _is_doc_drift_text(str(turn.get("assistant_text") or "")):
             doc_drift_turns.append(turn["index"])
         for tool in turn.get("tool_uses", []):
@@ -1181,6 +1247,26 @@ def analyze_session_messages(data: dict[str, Any]) -> dict[str, Any]:
     workflow_violation = submission_writes > 0 and (
         pipeline_runs == 0 or writes_before_first_pipeline > 1
     )
+    response_truncated = bool(((data.get("response") or {}) if isinstance(data.get("response"), dict) else {}).get("__truncated"))
+    finish_reason_text = str(finish_reason or "").lower()
+    if (
+        current is not None
+        and not response_truncated
+        and not current_text.strip()
+        and not current_tool_calls
+        and finish_reason_text in {"stop", "eos", "eos_token", "end_turn"}
+    ):
+        abnormal_events.append(
+            {
+                "reason": "empty_stop_response",
+                "turn": turns[-1]["index"] if turns else None,
+                "source": "current_response",
+                "finish_reason": finish_reason,
+                "snippet": "",
+            }
+        )
+    abnormal_events = _unique_dicts(abnormal_events, limit=50)
+    abnormal_reasons = sorted({str(event.get("reason") or "") for event in abnormal_events if event.get("reason")})
     return {
         "messages_count": len(messages),
         "turns_count": len(turns),
@@ -1195,6 +1281,7 @@ def analyze_session_messages(data: dict[str, Any]) -> dict[str, Any]:
             "current_response_text": current_text,
             "current_response_snippet": _snippet(current_text, 1200),
             "current_tool_calls": current_tool_summaries,
+            "finish_reason": finish_reason,
         },
         "turns": turns[-80:],
         "tool_counts": tool_counts,
@@ -1217,8 +1304,11 @@ def analyze_session_messages(data: dict[str, Any]) -> dict[str, Any]:
         "doc_drift_turns": doc_drift_turns[-30:],
         "doc_drift_count": len(doc_drift_turns),
         "validation": validation,
+        "abnormal_termination": bool(abnormal_events),
+        "abnormal_reasons": abnormal_reasons,
+        "abnormal_events": abnormal_events,
         "current_response_available": current is not None,
-        "response_truncated": bool(((data.get("response") or {}) if isinstance(data.get("response"), dict) else {}).get("__truncated")),
+        "response_truncated": response_truncated,
     }
 
 
@@ -1228,6 +1318,7 @@ def _summary_score(summary: dict[str, Any]) -> tuple[int, int, int, int, int, in
     profiling = stages.get("profiling") if isinstance(stages.get("profiling"), dict) else {}
     tool_counts = summary.get("tool_counts") if isinstance(summary.get("tool_counts"), dict) else {}
     return (
+        int(bool(summary.get("abnormal_termination"))),
         int(summary.get("pipeline_runs") or 0),
         int(summary.get("submission_writes") or 0),
         int(precision.get("attempts") or 0),
@@ -1314,6 +1405,20 @@ def aggregate_session_summaries(summaries: list[dict[str, Any]]) -> dict[str, An
     merged["writes_before_first_pipeline"] = max(int(s.get("writes_before_first_pipeline") or 0) for s in valid)
     merged["doc_drift_count"] = max(int(s.get("doc_drift_count") or 0) for s in valid)
     merged["workflow_violation"] = any(bool(s.get("workflow_violation")) for s in valid)
+    merged["abnormal_termination"] = any(bool(s.get("abnormal_termination")) for s in valid)
+    abnormal_events: list[dict[str, Any]] = []
+    for summary in valid:
+        value = summary.get("abnormal_events")
+        if isinstance(value, list):
+            abnormal_events.extend(item for item in value if isinstance(item, dict))
+    merged["abnormal_events"] = _unique_dicts(abnormal_events, limit=50)
+    merged["abnormal_reasons"] = sorted(
+        {
+            str(event.get("reason") or "")
+            for event in merged["abnormal_events"]
+            if event.get("reason")
+        }
+    )
     first_write_values = [
         int(s["first_submission_write_turn"])
         for s in valid
@@ -1561,6 +1666,7 @@ HTML_PAGE = r"""<!doctype html>
       <div class="filter-tabs">
         <button class="status-filter active" data-status="ALL">All</button>
         <button class="status-filter" data-status="RUNNING">Running</button>
+        <button class="status-filter" data-status="ABNORMAL">Abnormal</button>
         <button class="status-filter" data-status="TIMEOUT">Timeout</button>
         <button class="status-filter" data-status="ON_DISK">On disk</button>
         <span id="sessionSummary" class="small"></span>
@@ -1598,8 +1704,9 @@ HTML_PAGE = r"""<!doctype html>
     };
     const isTimeoutStatus = (s) => String(s || '').includes('TIMEOUT');
     const isOnDiskStatus = (s) => String(s || '').includes('ON_DISK');
-    const clsStatus = (s) => s === 'RUNNING' ? 'green' : (isTimeoutStatus(s) || s === 'ERROR' || s === 'ERROR_ON_DISK' ? 'red' : (isOnDiskStatus(s) ? '' : 'blue'));
-    const statusRank = (s) => s === 'RUNNING' ? 0 : (isTimeoutStatus(s) || s === 'ERROR' || s === 'ERROR_ON_DISK' ? 1 : (isOnDiskStatus(s) ? 3 : 2));
+    const isAbnormalStatus = (s) => String(s || '').includes('ABNORMAL');
+    const clsStatus = (s) => s === 'RUNNING' ? 'green' : (isAbnormalStatus(s) || isTimeoutStatus(s) || s === 'ERROR' || s === 'ERROR_ON_DISK' ? 'red' : (isOnDiskStatus(s) ? '' : 'blue'));
+    const statusRank = (s) => s === 'RUNNING' ? 0 : (isAbnormalStatus(s) || isTimeoutStatus(s) || s === 'ERROR' || s === 'ERROR_ON_DISK' ? 1 : (isOnDiskStatus(s) ? 3 : 2));
     function logicalTaskKey(session) {
       const task = String(session?.task_id || '');
       const run = String(session?.run_id || '');
@@ -1787,9 +1894,10 @@ HTML_PAGE = r"""<!doctype html>
       const running = all.filter(s => s.status === 'RUNNING').length;
       const selectedRun = selectedRunId();
       const sessions = all.filter(s => {
+        if (statusFilter === 'ABNORMAL' && !isAbnormalStatus(s.status)) return false;
         if (statusFilter === 'TIMEOUT' && !isTimeoutStatus(s.status)) return false;
         if (statusFilter === 'ON_DISK' && !isOnDiskStatus(s.status)) return false;
-        if (!['ALL', 'TIMEOUT', 'ON_DISK'].includes(statusFilter) && s.status !== statusFilter) return false;
+        if (!['ALL', 'ABNORMAL', 'TIMEOUT', 'ON_DISK'].includes(statusFilter) && s.status !== statusFilter) return false;
         if (selectedRun && s.run_id !== selectedRun) return false;
         if (!passesTimeFilter(s)) return false;
         return JSON.stringify(s).toLowerCase().includes(q);
@@ -1809,6 +1917,8 @@ HTML_PAGE = r"""<!doctype html>
         const cm = s.completion_metrics || {};
         const timeoutCount = Number(s.timeout_count || 0);
         const timeoutBadge = timeoutCount ? `<span class="badge red">timeouts ${esc(timeoutCount)}${s.timeout_last_time ? ' · ' + esc(s.timeout_last_time) : ''}</span>` : '';
+        const abnormalReasons = s.quality?.abnormal_reasons || [];
+        const abnormalBadge = s.quality?.abnormal_termination ? `<span class="badge red">abnormal ${esc(abnormalReasons.join(', ') || 'yes')}</span>` : '';
         return `<div class="session ${s.session_id===selected?'active':''}" data-sid="${esc(s.session_id)}">
           <div class="row"><span class="task">${esc(s.task_id)}</span><span class="badge ${clsStatus(s.status)}">${esc(s.status)}</span></div>
           <div class="sid">${esc(s.session_id)}</div>
@@ -1825,6 +1935,7 @@ HTML_PAGE = r"""<!doctype html>
             <span class="badge ${val.verify_fail ? 'amber':''}">verify ${esc(val.verify_fail || 0)}</span>
             <span class="badge ${forbidden ? 'red':''}">forbidden writes ${esc(forbidden)}</span>
             <span class="badge ${readonlyMut ? 'red':''}">readonly mutations ${esc(readonlyMut)}</span>
+            ${abnormalBadge}
             ${timeoutBadge}
           </div>
         </div>`;
@@ -1840,6 +1951,7 @@ HTML_PAGE = r"""<!doctype html>
       const planTc = sum.plan_tool_counts || {};
       const forbiddenWrites = sum.forbidden_writes || [];
       const readonlyMutations = sum.readonly_mutation_attempts || [];
+      const abnormalEvents = sum.abnormal_events || [];
 	      const stages = sum.pipeline_stage_counts || {};
 	      const precision = stages.precision || {};
 	      const profiling = stages.profiling || {};
@@ -1865,6 +1977,13 @@ HTML_PAGE = r"""<!doctype html>
         <span class="badge red">turn ${esc(item.turn)}</span> <span class="badge">${esc(item.kind || '')}</span>
         <div class="mono">${esc(item.path || '')}</div>
         <pre>${esc(item.command || '')}</pre>
+      </div>`).join('');
+      const abnormalRows = abnormalEvents.map(item => `<div class="result danger">
+        <span class="badge red">${esc(item.reason || 'abnormal')}</span>
+        ${item.turn ? `<span class="badge">turn ${esc(item.turn)}</span>` : ''}
+        ${item.finish_reason ? `<span class="badge">finish ${esc(item.finish_reason)}</span>` : ''}
+        ${item.source ? `<span class="badge">${esc(item.source)}</span>` : ''}
+        ${item.snippet ? `<pre>${esc(item.snippet)}</pre>` : ''}
       </div>`).join('');
       const promptBlocks = (req.prompt_blocks || []).map(b => `<details data-key="prompt-block-${esc(b.index)}">
         <summary>${esc(b.label || ('Context ' + b.index))} · ${esc(b.type)} · ${esc(b.chars)} chars</summary>
@@ -1914,6 +2033,7 @@ HTML_PAGE = r"""<!doctype html>
 	          ${metric('pipeline runs', sum.pipeline_runs || 0, 'actual tools/triton_eval_pipeline.sh executions')}
 	          ${metric('submission writes', sum.submission_writes || 0, `before first pipeline ${sum.writes_before_first_pipeline || 0}`)}
 	          ${metric('workflow', workflowViolation ? 'violation' : 'ok', `first write turn ${firstWrite} · first pipeline turn ${firstPipeline}`)}
+	          ${metric('abnormal', sum.abnormal_termination ? 'yes' : 'no', (sum.abnormal_reasons || []).join(', ') || '-')}
 	          ${metric('doc drift', sum.doc_drift_count || 0, `turns ${(sum.doc_drift_turns || []).join(', ') || '-'}`)}
 	          ${metric('precision verify', `${precision.pass || 0} / ${precision.attempts || 0}`, `${precision.fail || 0} failed · ${precision.unknown || 0} unknown`)}
           ${metric('profiling', `${profiling.pass || 0} / ${profiling.attempts || 0}`, `${profiling.fail || 0} failed · ${profiling.unknown || 0} unknown`)}
@@ -1938,6 +2058,7 @@ HTML_PAGE = r"""<!doctype html>
             <div class="panel"><h2>Action Tools</h2><div class="panel-body"><p class="hint">真正会读写文件、调用 skill 或执行命令的工具。TaskCreate/TaskUpdate 这类计划工具不混在这里。</p>${toolChips || '<span class="small">No action tools yet</span>'}</div></div>
             <div class="panel"><h2>Plan Tools</h2><div class="panel-body"><p class="hint">Claude Code 自己维护待办列表用的工具，不代表 sub-agent 或 Polar task 调用。</p>${planToolChips || '<span class="small">No plan tools yet</span>'}</div></div>
             <div class="panel"><h2>Readonly Audit</h2><div class="panel-body"><p class="hint">标记模型尝试写入 tools/、.agents/skills/ 或 CLAUDE.md 的行为；只读 mount 是硬边界，这里只做审计展示。</p><h3>Forbidden Writes</h3>${forbiddenWriteRows || '<span class="small">No forbidden write tool call found</span>'}<h3>Readonly Mutation Attempts</h3>${readonlyMutationRows || '<span class="small">No readonly mutation bash command found</span>'}</div></div>
+            <div class="panel"><h2>Abnormal Termination</h2><div class="panel-body"><p class="hint">Observer-only 标记：这些 session 仍可能已进入训练，但不应在审查界面里显示成正常 completed。</p>${abnormalRows || '<span class="small">No abnormal termination marker found</span>'}</div></div>
             <div class="panel"><h2>Skill Usage</h2><div class="panel-body"><p class="hint">列出实际调用的 Skill 工具和读取过的 skill reference。正常轨迹通常至少会看到 designer/coding/verifier，优化阶段才会看到 optimizer。</p><h3>Skill Calls</h3>${skillCalls || '<span class="small">No Skill tool call found</span>'}<h3>Reference Reads</h3><div class="files">${skillReads || '<span class="small">No skill reference read found</span>'}</div></div></div>
             <div class="panel"><h2>Pipeline Runs</h2><div class="panel-body"><p class="hint">只统计实际执行 tools/triton_eval_pipeline.sh 的 Bash 调用。这里展示每次精度验证和性能 profiling 是否到达、是否通过。</p>${pipelineDetails || '<span class="small">No pipeline run found yet</span>'}</div></div>
             <div class="panel"><h2>Timeline</h2><div class="panel-body"><p class="hint">按倒序展示每一轮模型输出、工具调用和工具返回。这里用来看 CC 是否按设计、编码、验证、迭代的流程推进。</p></div>${turns || '<div class="timeline-empty">No turns parsed yet.</div>'}</div>

@@ -385,6 +385,100 @@ def test_analyze_session_messages_tracks_submission_workflow_and_doc_drift() -> 
     assert summary["doc_drift_turns"] == [1]
 
 
+def test_analyze_session_messages_marks_raw_tool_call_text_abnormal() -> None:
+    module = _load_module()
+    payload = {
+        "original_request": {
+            "messages": [
+                {"role": "user", "content": "task"},
+                {
+                    "role": "assistant",
+                    "content": (
+                        'I will call the tool now.\n'
+                        '{"type": "tool_use", "id": "call_1", "name": "Write", '
+                        '"input": {"file_path": "output/submission/op_impl.py"}}'
+                    ),
+                },
+            ]
+        },
+        "response": {"choices": [{"message": {"content": "done", "tool_calls": []}, "finish_reason": "stop"}]},
+    }
+
+    summary = module.analyze_session_messages(payload)
+
+    assert summary["abnormal_termination"] is True
+    assert summary["abnormal_reasons"] == ["raw_tool_call_text"]
+    assert summary["abnormal_events"][0]["turn"] == 1
+    assert "tool_use" in summary["abnormal_events"][0]["snippet"]
+    assert (
+        module.ObserverStore.classify_session_status(
+            None,
+            has_files=True,
+            result={"status": "COMPLETED"},
+            timeout_info=None,
+            summary=summary,
+        )
+        == "ABNORMAL_ON_DISK"
+    )
+
+
+def test_analyze_session_messages_marks_empty_stop_response_abnormal() -> None:
+    module = _load_module()
+    payload = {
+        "original_request": {"messages": [{"role": "user", "content": "task"}]},
+        "response": {"choices": [{"message": {"content": "", "tool_calls": []}, "finish_reason": "stop"}]},
+    }
+
+    summary = module.analyze_session_messages(payload)
+
+    assert summary["abnormal_termination"] is True
+    assert summary["abnormal_reasons"] == ["empty_stop_response"]
+    assert summary["abnormal_events"][0]["finish_reason"] == "stop"
+    assert (
+        module.ObserverStore.classify_session_status(
+            "COMPLETED",
+            has_files=False,
+            result=None,
+            timeout_info=None,
+            summary=summary,
+        )
+        == "ABNORMAL"
+    )
+
+
+def test_observer_marks_completed_on_disk_session_abnormal_for_review(tmp_path: Path) -> None:
+    module = _load_module()
+    task = tmp_path / "rollout_results" / "task_smoke_20260629-polar-op-0-0"
+    completions = task / "sessions" / "sk-abnormal" / "completions"
+    completions.mkdir(parents=True)
+    (completions / "0001.json").write_text(
+        json.dumps(
+            {
+                "original_request": {"messages": [{"role": "user", "content": "task"}]},
+                "response": {"choices": [{"message": {"content": "", "tool_calls": []}, "finish_reason": "stop"}]},
+            }
+        ),
+        encoding="utf-8",
+    )
+    (task / "ses_sk-abnormal.json").write_text(
+        json.dumps({"session_id": "sk-abnormal", "task_id": "smoke_20260629-polar-op-0-0", "status": "COMPLETED"}),
+        encoding="utf-8",
+    )
+
+    store = module.ObserverStore(tmp_path, "http://127.0.0.1:1")
+    store.gateway_health = lambda: {"status": "ok"}
+    store.gateway_sessions = lambda: []
+    store.device_map = lambda: {}
+
+    summary = store.session_summary()
+    session = summary["sessions"][0]
+
+    assert session["status"] == "ABNORMAL_ON_DISK"
+    assert session["result_status"] == "COMPLETED"
+    assert session["quality"]["abnormal_termination"] is True
+    assert session["quality"]["abnormal_reasons"] == ["empty_stop_response"]
+
+
 def test_observer_groups_legacy_and_run_scoped_sessions(tmp_path: Path) -> None:
     module = _load_module()
     results = tmp_path / "rollout_results"
