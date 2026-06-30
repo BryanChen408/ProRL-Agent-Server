@@ -63,5 +63,5 @@ for name in gateway rollout; do
   rm -f "${pid_file}"
 done
 
-stop_by_pattern "gateway" "from polar.cli import main.*serve_gateway.*${TOPOLOGY}"
-stop_by_pattern "rollout" "from polar.cli import main.*serve_rollout.*${TOPOLOGY}"
+stop_by_pattern "gateway" "from polar.cli import main.*serve_gateway"
+stop_by_pattern "rollout" "from polar.cli import main.*serve_rollout"

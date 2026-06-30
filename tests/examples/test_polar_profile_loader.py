@@ -62,20 +62,27 @@ def test_profile_loader_derives_topology_and_sidecar_env(tmp_path: Path) -> None
         encoding="utf-8",
     )
 
+    env_vars = os.environ.copy()
+    env_vars["POLAR_RUN_ID"] = "unit-run"
     proc = subprocess.run(
         [os.environ.get("PYTHON", "python3"), str(SCRIPT), "--profile", str(profile), "--repo-root", str(repo)],
         check=True,
         text=True,
         capture_output=True,
+        env=env_vars,
     )
     env = _load_env(proc.stdout)
     topology = yaml.safe_load(Path(env["POLAR_TOPOLOGY"]).read_text(encoding="utf-8"))
     op_profile = topology["rollout"]["operator_profiles"]["operator_npu"]
 
     assert env["POLAR_GATEWAY_URL"] == "http://10.0.0.1:8100"
+    assert env["POLAR_RUN_ID"] == "unit-run"
+    assert env["POLAR_OUTPUT_ROOT"] == str((repo / "out").resolve())
+    assert env["POLAR_OUTPUT_DIR"] == str((repo / "out" / "runs" / "unit-run").resolve())
     assert env["POLAR_GEN_PIPELINE_MAX"] == "5"
     assert env["POLAR_OPT_PIPELINE_MAX"] == "3"
     assert env["POLAR_PIPELINE_WATCH_INTERVAL"] == "7"
+    assert topology["rollout"]["save_dir"] == str((repo / "out" / "runs" / "unit-run" / "rollout_results").resolve())
     assert topology["gateway"]["nodes"][0]["inference"]["base_url"] == "http://10.0.0.2:4077"
     assert topology["gateway"]["nodes"][0]["max_run_workers"] == 4
     assert op_profile["runtime"]["env"]["POLAR_GEN_PIPELINE_MAX"] == "5"

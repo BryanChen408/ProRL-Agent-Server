@@ -21,12 +21,13 @@ Runtime files are written under the repo-local output root and are ignored by gi
 
 ```text
 output/ascend_operator/
-  logs/
   op_assets/
-  run_artifacts/
-  rollout_results/
-  polar_sessions/
-  hostctl/
+  runs/<polar-run-id>/
+    logs/
+    run_artifacts/
+    rollout_results/
+    polar_sessions/
+    hostctl/
 ```
 
 Set `POLAR_OUTPUT_DIR=/path/to/output` only when you intentionally want outputs outside the repo.
@@ -56,6 +57,16 @@ Single-host default:
 bash deploy/ascend_operator/restart_polar_host.sh
 ```
 
+Use an explicit run id when you want stable, user-named artifacts:
+
+```bash
+POLAR_RUN_ID=debug-$(date +%Y%m%d-%H%M%S) bash deploy/ascend_operator/restart_polar_host.sh
+```
+
+If `POLAR_RUN_ID` is not set, the launcher creates a timestamp run id automatically.
+Each run writes isolated artifacts under `output/ascend_operator/runs/<run-id>/`,
+so observer and watcher only see the current run.
+
 Use another profile when needed:
 
 ```bash
@@ -65,7 +76,7 @@ POLAR_PROFILE=/path/to/profile.yaml bash deploy/ascend_operator/restart_polar_ho
 The launcher materializes the profile to:
 
 ```text
-output/ascend_operator/run_artifacts/effective_topology.yaml
+output/ascend_operator/runs/<run-id>/run_artifacts/effective_topology.yaml
 ```
 
 That file is a run artifact for the existing `serve_rollout -c` and

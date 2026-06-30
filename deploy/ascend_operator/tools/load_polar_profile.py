@@ -2,11 +2,24 @@
 from __future__ import annotations
 
 import argparse
+import os
+import re
+import secrets
 import shlex
+from datetime import datetime
 from pathlib import Path
 from urllib.parse import urlparse
 
 import yaml
+
+
+def _safe_run_id(value: str) -> str:
+    run_id = re.sub(r"[^A-Za-z0-9_.-]+", "-", value.strip()).strip(".-")
+    return run_id or f"{datetime.now().strftime('%Y%m%d-%H%M%S')}-{secrets.token_hex(3)}"
+
+
+def _run_id() -> str:
+    return _safe_run_id(os.environ.get("POLAR_RUN_ID") or os.environ.get("RUN_ID") or "")
 
 
 def main() -> int:
@@ -35,15 +48,18 @@ def main() -> int:
     agent = operator.get("agent") or {}
     evaluator = operator.get("evaluator") or {}
 
-    output_dir = path(paths.get("output_dir", "output/ascend_operator"))
+    output_root = path(paths.get("output_dir", "output/ascend_operator"))
+    run_id = _run_id()
+    run_root_dir = path(paths.get("run_root_dir", output_root / "runs"))
+    output_dir = path(paths.get("run_dir", run_root_dir / run_id))
     operator_runtime_dir = path(paths.get("operator_runtime_dir", "operator_runtime"))
     log_dir = path(paths.get("log_dir", output_dir / "logs"))
-    op_assets_dir = path(paths.get("op_assets_dir", output_dir / "op_assets"))
+    op_assets_dir = path(paths.get("op_assets_dir", output_root / "op_assets"))
     rollout_results_dir = path(paths.get("rollout_results_dir", output_dir / "rollout_results"))
     session_base_dir = path(paths.get("session_base_dir", output_dir / "polar_sessions"))
     run_artifact_dir = path(paths.get("run_artifact_dir", output_dir / "run_artifacts"))
     topology_path = path(paths.get("effective_topology", run_artifact_dir / "effective_topology.yaml"))
-    for directory in (output_dir, log_dir, op_assets_dir, rollout_results_dir, session_base_dir, run_artifact_dir):
+    for directory in (output_root, run_root_dir, output_dir, log_dir, op_assets_dir, rollout_results_dir, session_base_dir, run_artifact_dir):
         directory.mkdir(parents=True, exist_ok=True)
 
     rollout_url = str(service.get("rollout_url", "http://127.0.0.1:8080")).rstrip("/")
@@ -177,6 +193,8 @@ def main() -> int:
 
     env = {
         "POLAR_PROFILE": profile_path,
+        "POLAR_RUN_ID": run_id,
+        "POLAR_OUTPUT_ROOT": output_root,
         "POLAR_OUTPUT_DIR": output_dir,
         "POLAR_LOG_DIR": log_dir,
         "POLAR_OP_ASSETS_DIR": op_assets_dir,
