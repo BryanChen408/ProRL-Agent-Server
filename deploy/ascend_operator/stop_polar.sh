@@ -3,8 +3,18 @@ set -euo pipefail
 
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)/_paths.sh"
 
+if [[ -z "${POLAR_TOPOLOGY:-}" && -f "${POLAR_DEPLOY_DIR}/profile.yaml" ]]; then
+  if [[ -z "${POLAR_PYTHON:-}" && -x /root/polar-venv/bin/python ]]; then
+    export POLAR_PYTHON=/root/polar-venv/bin/python
+  fi
+  PYTHON_FOR_PROFILE="${POLAR_PYTHON:-python3}"
+  source <("${PYTHON_FOR_PROFILE}" "${POLAR_DEPLOY_DIR}/tools/load_polar_profile.py" \
+    --profile "${POLAR_PROFILE:-${POLAR_DEPLOY_DIR}/profile.yaml}" \
+    --repo-root "${POLAR_REPO_ROOT}")
+fi
+
 ROOT="${POLAR_OUTPUT_DIR}"
-TOPOLOGY="${POLAR_TOPOLOGY:-${POLAR_RUN_CONFIG_DIR}/topology.rendered.yaml}"
+TOPOLOGY="${POLAR_TOPOLOGY:-${POLAR_OUTPUT_DIR}/run_artifacts/effective_topology.yaml}"
 
 if [[ -t 1 && -z "${NO_COLOR:-}" ]]; then
   RESET=$'\033[0m'; GREEN=$'\033[32m'; YELLOW=$'\033[33m'; BLUE=$'\033[34m'

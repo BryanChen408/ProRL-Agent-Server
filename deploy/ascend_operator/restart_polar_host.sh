@@ -3,10 +3,19 @@ set -euo pipefail
 
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)/_paths.sh"
 
+if [[ -z "${POLAR_PYTHON:-}" && -x /root/polar-venv/bin/python ]]; then
+  export POLAR_PYTHON=/root/polar-venv/bin/python
+fi
+POLAR_PROFILE="${POLAR_PROFILE:-${POLAR_DEPLOY_DIR}/profile.yaml}"
+PYTHON_FOR_PROFILE="${POLAR_PYTHON:-python3}"
+source <("${PYTHON_FOR_PROFILE}" "${POLAR_DEPLOY_DIR}/tools/load_polar_profile.py" \
+  --profile "${POLAR_PROFILE}" \
+  --repo-root "${POLAR_REPO_ROOT}")
+
 ROOT="${POLAR_OUTPUT_DIR}"
-TOPOLOGY="${POLAR_TOPOLOGY:-${POLAR_RUN_CONFIG_DIR}/topology.rendered.yaml}"
-ROLLOUT_URL="${POLAR_ROLLOUT_URL:-http://127.0.0.1:8080}"
-GATEWAY_URL="${POLAR_GATEWAY_URL:-http://127.0.0.1:8100}"
+TOPOLOGY="${POLAR_TOPOLOGY}"
+ROLLOUT_URL="${POLAR_ROLLOUT_URL}"
+GATEWAY_URL="${POLAR_GATEWAY_URL}"
 EXTRA_STALE_PORTS="${POLAR_EXTRA_STALE_GATEWAY_PORTS:-8110}"
 SKIP_INTERNAL_PORT_CLEANUP="${POLAR_SKIP_INTERNAL_PORT_CLEANUP:-0}"
 
@@ -22,14 +31,11 @@ ok() { printf '%s[ok]%s %s\n' "${GREEN}" "${RESET}" "$*"; }
 info() { printf '%s[info]%s %s\n' "${DIM}" "${RESET}" "$*"; }
 fail() { printf '%s[fail]%s %s\n' "${RED}" "${RESET}" "$*" >&2; }
 
-mkdir -p "${ROOT}" "${POLAR_LOG_DIR}" "${POLAR_RUN_CONFIG_DIR}"
+mkdir -p "${ROOT}" "${POLAR_LOG_DIR}"
 cd "${POLAR_DEPLOY_DIR}"
 
-if [[ -x /root/polar-venv/bin/python ]]; then
-  export POLAR_PYTHON=/root/polar-venv/bin/python
-fi
-
 section "Polar Host Restart"
+info "profile=${POLAR_PROFILE}"
 info "root=${ROOT}"
 info "topology=${TOPOLOGY}"
 info "rollout=${ROLLOUT_URL}"

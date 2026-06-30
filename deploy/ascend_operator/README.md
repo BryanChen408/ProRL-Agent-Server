@@ -8,10 +8,9 @@ It is part of the Polar repo and is safe to move with the repo.
 - `../../operator_runtime/`: committed Claude Code runtime assets mounted read-only into agent containers.
 - `PHASE3_RUNTIME_SOURCE.md`: current runtime source-of-truth and legacy boundary notes.
 - `PHASE4_LEGACY_PATHS.md`: non-destructive migration away from old host deploy paths.
-- `polar_config.yaml`: Slime bridge config template. Slime should only need Polar rollout URL and rollout scheduling knobs.
-- `topology.yaml`: single-host Polar topology template.
-- `topology.dual64polar.yaml`: dual-host template where one host runs Polar and another host runs Slime/SGLang.
-- `tools/render_run_topology.py`: renders repo-relative topology paths into Docker host absolute paths at launch time.
+- `profile.yaml`: Polar host run profile. This is the user-edited config source for rollout/gateway/runtime/observer/watcher.
+- `polar_config.yaml`: legacy Slime bridge config template.
+- `topology.yaml`, `topology.dual64polar.yaml`: legacy topology templates kept during migration.
 - `start_polar_nohup.sh`, `restart_polar_host.sh`, `stop_polar.sh`: host service controls.
 - `tools/polar_rollout_observer.py`: observer UI.
 - `tools/polar_pipeline_budget_watcher.py`: pipeline budget cancellation watcher.
@@ -24,7 +23,7 @@ Runtime files are written under the repo-local output root and are ignored by gi
 output/ascend_operator/
   logs/
   op_assets/
-  run_configs/
+  run_artifacts/
   rollout_results/
   polar_sessions/
   hostctl/
@@ -54,22 +53,23 @@ OPERATOR_TASKS_DIR=output/ascend_operator/op_assets/op_tasks OPERATOR_TASK_JSONL
 Single-host default:
 
 ```bash
-POLAR_GEN_PIPELINE_MAX=3 POLAR_OPT_PIPELINE_MAX=1 bash deploy/ascend_operator/restart_polar_host.sh
+bash deploy/ascend_operator/restart_polar_host.sh
 ```
 
-Dual-host example where this host runs Polar and another host runs SGLang:
+Use another profile when needed:
 
 ```bash
-POLAR_TOPOLOGY_TEMPLATE=deploy/ascend_operator/topology.dual64polar.yaml POLAR_ROLLOUT_URL=http://80.48.5.64:8080 POLAR_GATEWAY_URL=http://80.48.5.64:8100 SGLANG_ROUTER_URL=http://80.48.5.88:4077 POLAR_GEN_PIPELINE_MAX=3 POLAR_OPT_PIPELINE_MAX=1 bash deploy/ascend_operator/restart_polar_host.sh
+POLAR_PROFILE=/path/to/profile.yaml bash deploy/ascend_operator/restart_polar_host.sh
 ```
 
-The start script renders the active topology to:
+The launcher materializes the profile to:
 
 ```text
-output/ascend_operator/run_configs/topology.rendered.yaml
+output/ascend_operator/run_artifacts/effective_topology.yaml
 ```
 
-That rendered file contains absolute host paths for Docker volume mounts. The committed topology templates do not.
+That file is a run artifact for the existing `serve_rollout -c` and
+`serve_gateway -c` entrypoints. Do not edit it by hand; edit `profile.yaml`.
 
 ## Slime Contract
 
@@ -78,9 +78,7 @@ Slime should point at the Polar rollout URL and its prompt jsonl. It should not 
 Typical Slime-side values:
 
 ```bash
-POLAR_CONFIG=<polar-repo>/deploy/ascend_operator/polar_config.yaml
 OPERATOR_TASK_JSONL=<dataset>/operator_tasks.jsonl
-OPERATOR_TASKS_DIR=<dataset>/op_tasks
 POLAR_ROLLOUT_URL=http://<polar-host>:8080
 ```
 

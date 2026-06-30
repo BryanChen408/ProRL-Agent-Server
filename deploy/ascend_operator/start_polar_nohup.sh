@@ -3,19 +3,24 @@ set -euo pipefail
 
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)/_paths.sh"
 
+if [[ -z "${POLAR_PYTHON:-}" && -x /root/polar-venv/bin/python ]]; then
+  export POLAR_PYTHON=/root/polar-venv/bin/python
+fi
+POLAR_PROFILE="${POLAR_PROFILE:-${POLAR_DEPLOY_DIR}/profile.yaml}"
+PYTHON_FOR_PROFILE="${POLAR_PYTHON:-python3}"
+source <("${PYTHON_FOR_PROFILE}" "${POLAR_DEPLOY_DIR}/tools/load_polar_profile.py" \
+  --profile "${POLAR_PROFILE}" \
+  --repo-root "${POLAR_REPO_ROOT}")
+
 ROOT="${POLAR_OUTPUT_DIR}"
 POLAR_ROOT="${POLAR_REPO_ROOT}"
-BASE_TOPOLOGY="${POLAR_TOPOLOGY_TEMPLATE:-${POLAR_DEPLOY_DIR}/topology.yaml}"
-TOPOLOGY="${POLAR_TOPOLOGY:-${POLAR_RUN_CONFIG_DIR}/topology.rendered.yaml}"
+TOPOLOGY="${POLAR_TOPOLOGY}"
 LOG_DIR="${POLAR_LOG_DIR}"
-GATEWAY_URL="${POLAR_GATEWAY_URL:-http://127.0.0.1:8100}"
-ROLLOUT_URL="${POLAR_ROLLOUT_URL:-http://127.0.0.1:8080}"
-SGLANG_ROUTER_URL="${SGLANG_ROUTER_URL:-}"
-export POLAR_ANTHROPIC_DEFAULT_MAX_TOKENS="${POLAR_ANTHROPIC_DEFAULT_MAX_TOKENS:-32768}"
-export POLAR_INFERENCE_REQUEST_TIMEOUT_SECONDS="${POLAR_INFERENCE_REQUEST_TIMEOUT_SECONDS:-14400}"
+GATEWAY_URL="${POLAR_GATEWAY_URL}"
+ROLLOUT_URL="${POLAR_ROLLOUT_URL}"
 
 mkdir -p "${LOG_DIR}" "${ROOT}/rollout_results"
-mkdir -p "${POLAR_SESSION_BASE_DIR}" "${POLAR_OP_ASSETS_DIR}" "${POLAR_RUN_CONFIG_DIR}" "${POLAR_ROLLOUT_RESULTS_DIR}"
+mkdir -p "${POLAR_SESSION_BASE_DIR}" "${POLAR_OP_ASSETS_DIR}" "${POLAR_ROLLOUT_RESULTS_DIR}"
 export POLAR_KEEP_SESSION_DIR="${POLAR_KEEP_SESSION_DIR:-1}"
 
 cd "${POLAR_ROOT}"
@@ -99,27 +104,10 @@ PY
 
 PYTHON_BIN="$(find_python)"
 info_log "python=${PYTHON_BIN} ($("${PYTHON_BIN}" --version 2>&1))"
+info_log "profile=${POLAR_PROFILE}"
+info_log "topology=${TOPOLOGY}"
 info_log "inference_request_timeout_seconds=${POLAR_INFERENCE_REQUEST_TIMEOUT_SECONDS}"
 require_docker
-
-if [[ -z "${SGLANG_ROUTER_URL}" ]]; then
-  SGLANG_ROUTER_URL="http://${SGLANG_ROUTER_IP:-127.0.0.1}:${SGLANG_ROUTER_PORT:-4077}"
-fi
-render_host_args=()
-if [[ -n "${POLAR_BIND_HOST:-}" ]]; then
-  render_host_args=(--host "${POLAR_BIND_HOST}")
-fi
-"${PYTHON_BIN}" "${POLAR_DEPLOY_DIR}/tools/render_run_topology.py" \
-  --topology "${BASE_TOPOLOGY}" \
-  --output "${TOPOLOGY}" \
-  --rollout-url "${ROLLOUT_URL}" \
-  --gateway-url "${GATEWAY_URL}" \
-  --router-url "${SGLANG_ROUTER_URL}" \
-  "${render_host_args[@]}" \
-  --operator-runtime-dir "${POLAR_OPERATOR_RUNTIME_DIR}" \
-  --op-assets-dir "${POLAR_OP_ASSETS_DIR}" \
-  --rollout-results-dir "${POLAR_ROLLOUT_RESULTS_DIR}" >/dev/null
-info_log "topology=${TOPOLOGY}"
 
 kill_residual "gateway" "from polar.cli import main.*serve_gateway.*${TOPOLOGY}"
 kill_residual "rollout" "from polar.cli import main.*serve_rollout.*${TOPOLOGY}"
@@ -146,8 +134,8 @@ start_one() {
 start_one rollout serve_rollout -c "${TOPOLOGY}"
 start_one gateway serve_gateway -c "${TOPOLOGY}" --node-id ascend-node-01
 
-POLAR_GATEWAY_URL="${GATEWAY_URL}" bash "${POLAR_DEPLOY_DIR}/start_pipeline_budget_watcher.sh"
-POLAR_GATEWAY_URL="${GATEWAY_URL}" bash "${POLAR_DEPLOY_DIR}/start_observer.sh"
+bash "${POLAR_DEPLOY_DIR}/start_pipeline_budget_watcher.sh"
+bash "${POLAR_DEPLOY_DIR}/start_observer.sh"
 
 info_log "health: curl -s ${ROLLOUT_URL%/}/health"
 info_log "health: curl -s ${GATEWAY_URL%/}/health"

@@ -3,6 +3,15 @@ set -euo pipefail
 
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)/_paths.sh"
 
+if [[ -z "${POLAR_TOPOLOGY:-}" && -f "${POLAR_DEPLOY_DIR}/profile.yaml" ]]; then
+  if [[ -z "${POLAR_PYTHON:-}" && -x /root/polar-venv/bin/python ]]; then
+    export POLAR_PYTHON=/root/polar-venv/bin/python
+  fi
+  source <("${POLAR_PYTHON:-python3}" "${POLAR_DEPLOY_DIR}/tools/load_polar_profile.py" \
+    --profile "${POLAR_PROFILE:-${POLAR_DEPLOY_DIR}/profile.yaml}" \
+    --repo-root "${POLAR_REPO_ROOT}")
+fi
+
 ROOT="${POLAR_OUTPUT_DIR}"
 POLAR_ROOT="${POLAR_REPO_ROOT}"
 LOG_DIR="${POLAR_LOG_DIR}"

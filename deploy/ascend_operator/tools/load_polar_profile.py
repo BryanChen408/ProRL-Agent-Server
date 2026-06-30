@@ -1,0 +1,203 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import argparse
+import shlex
+from pathlib import Path
+from urllib.parse import urlparse
+
+import yaml
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--profile", required=True)
+    parser.add_argument("--repo-root", required=True)
+    args = parser.parse_args()
+
+    repo = Path(args.repo_root).resolve()
+    profile_path = Path(args.profile)
+    if not profile_path.is_absolute():
+        profile_path = (repo / profile_path).resolve()
+    profile = yaml.safe_load(profile_path.read_text(encoding="utf-8")) or {}
+
+    def path(value: str | Path) -> Path:
+        value = Path(value)
+        return value if value.is_absolute() else (repo / value).resolve()
+
+    service = profile.get("service") or {}
+    paths = profile.get("paths") or {}
+    budget = profile.get("pipeline_budget") or {}
+    observer = profile.get("observer") or {}
+    gateway = profile.get("gateway") or {}
+    operator = profile.get("operator") or {}
+    runtime = operator.get("runtime") or {}
+    agent = operator.get("agent") or {}
+    evaluator = operator.get("evaluator") or {}
+
+    output_dir = path(paths.get("output_dir", "output/ascend_operator"))
+    operator_runtime_dir = path(paths.get("operator_runtime_dir", "operator_runtime"))
+    log_dir = path(paths.get("log_dir", output_dir / "logs"))
+    op_assets_dir = path(paths.get("op_assets_dir", output_dir / "op_assets"))
+    rollout_results_dir = path(paths.get("rollout_results_dir", output_dir / "rollout_results"))
+    session_base_dir = path(paths.get("session_base_dir", output_dir / "polar_sessions"))
+    run_artifact_dir = path(paths.get("run_artifact_dir", output_dir / "run_artifacts"))
+    topology_path = path(paths.get("effective_topology", run_artifact_dir / "effective_topology.yaml"))
+    for directory in (output_dir, log_dir, op_assets_dir, rollout_results_dir, session_base_dir, run_artifact_dir):
+        directory.mkdir(parents=True, exist_ok=True)
+
+    rollout_url = str(service.get("rollout_url", "http://127.0.0.1:8080")).rstrip("/")
+    gateway_url = str(service.get("gateway_url", "http://127.0.0.1:8100")).rstrip("/")
+    router_url = str(service.get("sglang_router_url", "http://127.0.0.1:4077")).rstrip("/")
+    bind_host = str(service.get("bind_host", "0.0.0.0"))
+    rollout_port = urlparse(rollout_url).port or 8080
+    gateway_port = urlparse(gateway_url).port or 8100
+    profile_name = str(operator.get("profile", "operator_npu"))
+    npu_pool = str(runtime.get("npu_pool", "0"))
+    npu_lock_dir = str(runtime.get("npu_lock_dir", "/dev/shm/npu-locks"))
+    gen_max = str(budget.get("generation_max", 6))
+    opt_max = str(budget.get("optimization_max", 3))
+    max_tokens = str(agent.get("max_output_tokens", 32768))
+    timeout_ms = str(agent.get("inference_timeout_ms", 14400000))
+
+    runtime_env = {
+        "DISABLE_AUTOUPDATER": "1",
+        "API_TIMEOUT_MS": timeout_ms,
+        "CLAUDE_CODE_MAX_RETRIES": "1",
+        "CLAUDE_CODE_MAX_OUTPUT_TOKENS": max_tokens,
+        "POLAR_ANTHROPIC_DEFAULT_MAX_TOKENS": max_tokens,
+        "POLAR_NPU_LEASE_POOL": npu_pool,
+        "POLAR_NPU_LOCK_DIR": npu_lock_dir,
+        "POLAR_GEN_PIPELINE_MAX": gen_max,
+        "POLAR_OPT_PIPELINE_MAX": opt_max,
+    }
+    eval_env = {
+        "DISABLE_AUTOUPDATER": "1",
+        "POLAR_NPU_LEASE_POOL": npu_pool,
+        "POLAR_NPU_LOCK_DIR": npu_lock_dir,
+        "POLAR_GEN_PIPELINE_MAX": gen_max,
+        "POLAR_OPT_PIPELINE_MAX": opt_max,
+    }
+    volumes = [
+        f"{operator_runtime_dir}:/opt/canonical:ro",
+        f"{operator_runtime_dir / 'tools'}:/opt/workspace/agent_workdir/tools:ro",
+    ]
+    upload_source = str(op_assets_dir / "op_tasks" / "{op_name}.py")
+    prepare = [
+        {"type": "upload_file", "source": upload_source, "target": "/opt/workspace/agent_workdir/src/{op_name}.py"},
+        {
+            "type": "exec",
+            "command": "python3 /opt/canonical/runtime/prepare_operator_workdir.py --op-name {op_name} --workdir /opt/workspace/agent_workdir --require-claude --no-stub --readonly-tools",
+        },
+    ]
+    eval_prepare = [
+        {"type": "upload_file", "source": upload_source, "target": "/opt/workspace/agent_workdir/src/{op_name}.py"},
+        {
+            "type": "exec",
+            "command": "python3 /opt/canonical/runtime/prepare_operator_workdir.py --op-name {op_name} --workdir /opt/workspace/agent_workdir --no-stub --readonly-tools",
+        },
+    ]
+    runtime_spec = {
+        "backend": "docker",
+        "image": str(runtime.get("image", "sandbox:v1")),
+        "network": str(runtime.get("network", "host")),
+        "workdir": str(runtime.get("workdir", "/opt/workspace/agent_workdir")),
+        "env": runtime_env,
+        "kwargs": {"ascend": {"pool": npu_pool, "lock_dir": npu_lock_dir, "lease_at_start": False}, "volumes": volumes},
+        "prepare": prepare,
+        "eval_prepare": eval_prepare,
+    }
+    evaluator_runtime = {
+        "backend": runtime_spec["backend"],
+        "image": runtime_spec["image"],
+        "network": runtime_spec["network"],
+        "workdir": runtime_spec["workdir"],
+        "env": eval_env,
+        "kwargs": runtime_spec["kwargs"],
+        "eval_prepare": eval_prepare,
+    }
+    topology = {
+        "rollout": {
+            "host": bind_host,
+            "port": rollout_port,
+            "public_url": rollout_url,
+            "save_dir": str(rollout_results_dir),
+            "default_operator_profile": profile_name,
+            "operator_profiles": {
+                profile_name: {
+                    "timeout_seconds": float(operator.get("timeout_seconds", 3600.0)),
+                    "operator_runtime_dir": str(operator_runtime_dir),
+                    "runtime": runtime_spec,
+                    "agent": {
+                        "harness": "claude_code",
+                        "model_name": str(agent.get("model_name", "claude-opus-4-5")),
+                        "skills_path": "/opt/canonical/skills",
+                        "settings": {
+                            "max_turns": int(agent.get("max_turns", 45)),
+                            "disallowed_tools": str(agent.get("disallowed_tools", "")),
+                            "append_system_prompt": str(agent.get("append_system_prompt", "")),
+                        },
+                    },
+                    "evaluator": {
+                        "strategy": "operator_judge",
+                        "refresh_runtime": True,
+                        "runtime": evaluator_runtime,
+                        "config": {
+                            "lazy_refresh_runtime": True,
+                            "op_name": "{op_name}",
+                            "judge_command": str(evaluator.get("judge_command")),
+                            "submission_path": str(evaluator.get("submission_path")),
+                            "metrics_path": str(evaluator.get("metrics_path")),
+                            "workdir": str(runtime_spec["workdir"]),
+                        },
+                    },
+                    "builder": {"strategy": "prefix_merging", "config": {}},
+                }
+            },
+        },
+        "gateway": {
+            "heartbeat_interval_seconds": 30,
+            "rollout_server_url": rollout_url,
+            "nodes": [
+                {
+                    "id": str(gateway.get("node_id", "ascend-node-01")),
+                    "host": bind_host,
+                    "port": gateway_port,
+                    "public_url": gateway_url,
+                    "max_init_workers": int(gateway.get("max_init_workers", 8)),
+                    "max_run_workers": int(gateway.get("max_run_workers", 32)),
+                    "max_postrun_workers": int(gateway.get("max_postrun_workers", 32)),
+                    "model_served": "",
+                    "inference": {"engine": "sglang", "base_url": router_url},
+                }
+            ],
+        },
+    }
+    topology_path.write_text(yaml.safe_dump(topology, sort_keys=False), encoding="utf-8")
+
+    env = {
+        "POLAR_PROFILE": profile_path,
+        "POLAR_OUTPUT_DIR": output_dir,
+        "POLAR_LOG_DIR": log_dir,
+        "POLAR_OP_ASSETS_DIR": op_assets_dir,
+        "POLAR_ROLLOUT_RESULTS_DIR": rollout_results_dir,
+        "POLAR_SESSION_BASE_DIR": session_base_dir,
+        "POLAR_TOPOLOGY": topology_path,
+        "POLAR_ROLLOUT_URL": rollout_url,
+        "POLAR_GATEWAY_URL": gateway_url,
+        "SGLANG_ROUTER_URL": router_url,
+        "POLAR_OBSERVER_HOST": str(observer.get("host", "0.0.0.0")),
+        "POLAR_OBSERVER_PORT": str(observer.get("port", 18088)),
+        "POLAR_GEN_PIPELINE_MAX": gen_max,
+        "POLAR_OPT_PIPELINE_MAX": opt_max,
+        "POLAR_PIPELINE_WATCH_INTERVAL": str(budget.get("interval_seconds", 2)),
+        "POLAR_ANTHROPIC_DEFAULT_MAX_TOKENS": max_tokens,
+        "POLAR_INFERENCE_REQUEST_TIMEOUT_SECONDS": str(int(timeout_ms) // 1000),
+    }
+    for key, value in env.items():
+        print(f"export {key}={shlex.quote(str(value))}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
