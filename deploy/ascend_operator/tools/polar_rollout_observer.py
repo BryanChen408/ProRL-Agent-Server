@@ -83,6 +83,33 @@ def _text_block(value: Any) -> str:
     return str(value)
 
 
+def _assistant_content_text(value: Any) -> str:
+    """Visible assistant text only; structured tool/thinking blocks are not leaks."""
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value
+    if isinstance(value, list):
+        parts: list[str] = []
+        for item in value:
+            if isinstance(item, dict):
+                typ = item.get("type")
+                if typ == "text":
+                    parts.append(str(item.get("text", "")))
+                elif typ in {"tool_use", "tool_result", "thinking"}:
+                    continue
+                elif "text" in item:
+                    parts.append(str(item.get("text") or ""))
+            elif item is not None:
+                parts.append(str(item))
+        return "\n".join(part for part in parts if part)
+    if isinstance(value, dict):
+        if value.get("type") == "text":
+            return str(value.get("text") or "")
+        return ""
+    return str(value)
+
+
 def _snippet(text: str, limit: int = 360) -> str:
     text = re.sub(r"\s+", " ", text or "").strip()
     if len(text) <= limit:
@@ -868,12 +895,13 @@ def _extract_turns(messages: list[dict[str, Any]], current_response: dict[str, A
         role = msg.get("role")
         content = msg.get("content")
         if role == "assistant":
+            assistant_text = _assistant_content_text(content)
             turns.append(
                 {
                     "index": len(turns) + 1,
                     "source": "history",
-                    "assistant_text": _text_block(content),
-                    "assistant_snippet": _snippet(_text_block(content)),
+                    "assistant_text": assistant_text,
+                    "assistant_snippet": _snippet(assistant_text),
                     "tool_uses": _tool_uses(content),
                     "tool_results": [],
                 }
@@ -884,12 +912,13 @@ def _extract_turns(messages: list[dict[str, Any]], current_response: dict[str, A
             if results and pending_results is not None:
                 pending_results.extend(results)
     if current_response:
+        assistant_text = _assistant_content_text(current_response.get("content"))
         turns.append(
             {
                 "index": len(turns) + 1,
                 "source": "current_response",
-                "assistant_text": _text_block(current_response.get("content")),
-                "assistant_snippet": _snippet(_text_block(current_response.get("content"))),
+                "assistant_text": assistant_text,
+                "assistant_snippet": _snippet(assistant_text),
                 "tool_uses": _response_tool_calls(current_response),
                 "tool_results": [],
             }

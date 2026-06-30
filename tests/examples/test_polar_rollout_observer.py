@@ -422,6 +422,53 @@ def test_analyze_session_messages_marks_raw_tool_call_text_abnormal() -> None:
     )
 
 
+def test_analyze_session_messages_allows_structured_tool_use_blocks() -> None:
+    module = _load_module()
+    payload = {
+        "original_request": {
+            "messages": [
+                {"role": "user", "content": "task"},
+                {
+                    "role": "assistant",
+                    "content": [
+                        {"type": "thinking", "thinking": "I will inspect the task."},
+                        {
+                            "type": "tool_use",
+                            "id": "call_1",
+                            "name": "Read",
+                            "input": {"file_path": "/opt/workspace/agent_workdir/src/op.py"},
+                        },
+                    ],
+                },
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": "call_1",
+                            "content": "1\timport torch\n",
+                        }
+                    ],
+                },
+            ]
+        },
+        "response": {
+            "choices": [
+                {
+                    "message": {"content": "I read the task.", "tool_calls": []},
+                    "finish_reason": "stop",
+                }
+            ]
+        },
+    }
+
+    summary = module.analyze_session_messages(payload)
+
+    assert summary["tool_counts"] == {"Read": 1}
+    assert summary["abnormal_termination"] is False
+    assert summary["abnormal_reasons"] == []
+
+
 def test_analyze_session_messages_marks_empty_stop_response_abnormal() -> None:
     module = _load_module()
     payload = {
