@@ -338,9 +338,16 @@ def _pipeline_status_path(
                 f"task_*/sessions/{session_id}/artifacts/{PIPELINE_STATUS_NAME}"
             )
         )
+        candidates.extend(
+            results_dir.glob(
+                f"run_*/task_*/sessions/{session_id}/artifacts/{PIPELINE_STATUS_NAME}"
+            )
+        )
 
     if session_base_dir is not None and session_base_dir.is_dir():
-        for path in session_base_dir.glob(f"session-*/artifacts/{PIPELINE_STATUS_NAME}"):
+        for path in list(session_base_dir.glob(f"session-*/artifacts/{PIPELINE_STATUS_NAME}")) + list(
+            session_base_dir.glob(f"run_*/session-*/artifacts/{PIPELINE_STATUS_NAME}")
+        ):
             data = _safe_load_json(path)
             if data is not None and str(data.get("session_id") or "") == session_id:
                 candidates.append(path)
@@ -370,6 +377,9 @@ def _latest_disk_completion(root: Path, session_id: str) -> dict[str, Any] | Non
     if not results_dir.is_dir():
         return None
     candidates = sorted(results_dir.glob(f"task_*/sessions/{session_id}/completions/*.json"))
+    candidates.extend(
+        sorted(results_dir.glob(f"run_*/task_*/sessions/{session_id}/completions/*.json"))
+    )
     if not candidates:
         return None
     return _safe_load_json(candidates[-1])

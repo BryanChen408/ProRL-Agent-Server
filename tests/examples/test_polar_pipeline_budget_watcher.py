@@ -124,6 +124,51 @@ def test_status_loads_from_host_session_base_by_json_session_id(tmp_path: Path) 
     assert "attempt=4>3" in reason
 
 
+def test_status_loads_from_run_scoped_results_and_session_base(tmp_path: Path) -> None:
+    module = _load_module()
+    session_id = "sk-polar-run-scoped"
+    result_status = (
+        tmp_path
+        / "rollout_results"
+        / "run_train-a"
+        / "task_train-a-polar-op-0-0"
+        / "sessions"
+        / session_id
+        / "artifacts"
+        / "pipeline_budget_status.json"
+    )
+    result_status.parent.mkdir(parents=True)
+    result_status.write_text(
+        (
+            "{\n"
+            f'  "session_id": "{session_id}",\n'
+            '  "phase": "generation",\n'
+            '  "attempt": 4,\n'
+            '  "limit": 3,\n'
+            '  "limit_exhausted": true\n'
+            "}\n"
+        ),
+        encoding="utf-8",
+    )
+    host_status = (
+        tmp_path
+        / "polar_sessions"
+        / "run_train-a"
+        / "session-sk-polar-shortid"
+        / "artifacts"
+        / "pipeline_budget_status.json"
+    )
+    host_status.parent.mkdir(parents=True)
+    host_status.write_text(result_status.read_text(encoding="utf-8"), encoding="utf-8")
+
+    status = module._load_pipeline_status(tmp_path, session_id, tmp_path / "polar_sessions")
+
+    assert status["_status_path"] in {str(result_status), str(host_status)}
+    cancel, reason = module.should_cancel_from_status(status)
+    assert cancel
+    assert "attempt=4>3" in reason
+
+
 def test_missing_status_does_not_cancel(tmp_path: Path) -> None:
     module = _load_module()
 

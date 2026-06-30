@@ -22,10 +22,11 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 
+from polar.run_namespace import LEGACY_RUN_ID, run_id_from_task
+
 
 DEFAULT_ROOT = Path(__file__).resolve().parents[3] / "output" / "ascend_operator"
 DEFAULT_GATEWAY = "http://127.0.0.1:8100"
-LEGACY_RUN_ID = "legacy"
 RECENT_STATE_HOURS = 168
 
 
@@ -175,16 +176,7 @@ def _extract_shallow_json_bool(text: str, key: str) -> bool | None:
 
 def derive_run_id(task_id: str | None) -> str:
     """Return the run namespace encoded in a Polar task id."""
-    text = str(task_id or "").strip()
-    if not text:
-        return LEGACY_RUN_ID
-    if text.startswith("polar-op-") or text.startswith("polar-slime-"):
-        return LEGACY_RUN_ID
-    for marker in ("-polar-op-", "-polar-slime-"):
-        if marker in text:
-            prefix = text.split(marker, 1)[0].strip()
-            return prefix or LEGACY_RUN_ID
-    return LEGACY_RUN_ID
+    return run_id_from_task(task_id)
 
 
 def build_session_groups(sessions: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], str | None]:
@@ -231,6 +223,7 @@ class SessionPath:
     session_id: str
     task_id: str
     path: Path
+    run_id: str = LEGACY_RUN_ID
 
 
 class ObserverStore:
@@ -300,22 +293,27 @@ class ObserverStore:
         out: list[SessionPath] = []
         if not self.results_dir.is_dir():
             return out
-        for task_dir in sorted(self.results_dir.glob("task_*")):
-            sessions_dir = task_dir / "sessions"
-            if not sessions_dir.is_dir():
-                continue
-            task_id = task_dir.name.removeprefix("task_")
-            for session_dir in sorted(sessions_dir.iterdir()):
-                if not session_dir.is_dir():
+        task_roots: list[tuple[Path, str]] = [(self.results_dir, LEGACY_RUN_ID)]
+        for run_dir in sorted(self.results_dir.glob("run_*")):
+            if run_dir.is_dir():
+                task_roots.append((run_dir, run_dir.name.removeprefix("run_") or LEGACY_RUN_ID))
+        for task_root, run_id in task_roots:
+            for task_dir in sorted(task_root.glob("task_*")):
+                sessions_dir = task_dir / "sessions"
+                if not sessions_dir.is_dir():
                     continue
-                session_id = session_dir.name
-                if recent_since is not None and session_id not in (include_session_ids or set()):
-                    try:
-                        if session_dir.stat().st_mtime < recent_since:
-                            continue
-                    except OSError:
+                task_id = task_dir.name.removeprefix("task_")
+                for session_dir in sorted(sessions_dir.iterdir()):
+                    if not session_dir.is_dir():
                         continue
-                out.append(SessionPath(session_id, task_id, session_dir))
+                    session_id = session_dir.name
+                    if recent_since is not None and session_id not in (include_session_ids or set()):
+                        try:
+                            if session_dir.stat().st_mtime < recent_since:
+                                continue
+                        except OSError:
+                            continue
+                    out.append(SessionPath(session_id, task_id, session_dir, run_id))
         return out
 
     def completion_files(self, session: SessionPath) -> list[Path]:
@@ -495,7 +493,11 @@ class ObserverStore:
                 summary=summary,
             )
             task_id = str(active.get("task_id") or session.task_id)
-            run_id = str(active.get("run_id") or derive_run_id(task_id))
+            run_id = str(
+                active.get("run_id")
+                or (session.run_id if session.run_id != LEGACY_RUN_ID else "")
+                or derive_run_id(task_id)
+            )
             completion_metrics = (
                 active.get("completion_metrics")
                 or live_metrics.get("completion_metrics")
@@ -680,13 +682,19 @@ class ObserverStore:
                     "tool_names": tool_names,
                 }
             )
+        task_id = (
+            found.task_id
+            if found
+            else str((active or {}).get("task_id") or live_metrics.get("task_id") or "")
+        )
         return {
             "session_id": session_id,
             "results_dir": str(self.results_dir),
-            "task_id": (
-                found.task_id
-                if found
-                else str((active or {}).get("task_id") or live_metrics.get("task_id") or "")
+            "task_id": task_id,
+            "run_id": str(
+                (active or {}).get("run_id")
+                or (found.run_id if found and found.run_id != LEGACY_RUN_ID else "")
+                or derive_run_id(task_id)
             ),
             "path": str(found.path) if found else "",
             "latest_file": latest_file.name if latest_file else None,

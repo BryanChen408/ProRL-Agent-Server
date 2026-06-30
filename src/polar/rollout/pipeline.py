@@ -13,6 +13,7 @@ from pathlib import Path
 import httpx
 
 from polar.platform.events import EventBus
+from polar.run_namespace import run_dir_name, run_id_from_metadata
 from polar.rollout.balancer import NodeScheduler
 from polar.rollout.models import (
     SessionContext,
@@ -112,8 +113,13 @@ class Pipeline:
             "pending_sessions": len(self._pending),
         }
 
-    def result_path_for(self, task_id: str, session_id: str) -> str | None:
-        path = self._result_path(task_id, session_id)
+    def result_path_for(
+        self,
+        task_id: str,
+        session_id: str,
+        metadata: dict[str, object] | None = None,
+    ) -> str | None:
+        path = self._result_path(task_id, session_id, metadata)
         return None if path is None else str(path)
 
     async def _dispatch_and_collect(
@@ -442,7 +448,7 @@ class Pipeline:
             )
 
     def _persist_result(self, result: SessionResult) -> None:
-        path = self._result_path(result.task_id, result.session_id)
+        path = self._result_path(result.task_id, result.session_id, result.metadata)
         if path is None:
             return
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -450,10 +456,17 @@ class Pipeline:
             json.dumps(self._storage_payload(result), separators=(",", ":"), default=str)
         )
 
-    def _result_path(self, task_id: str, session_id: str) -> Path | None:
+    def _result_path(
+        self,
+        task_id: str,
+        session_id: str,
+        metadata: dict[str, object] | None = None,
+    ) -> Path | None:
         if self.save_dir is None:
             return None
-        return self.save_dir / f"task_{task_id}" / f"ses_{session_id}.json"
+        run_dir = run_dir_name(run_id_from_metadata(task_id, metadata))
+        base = self.save_dir / run_dir if run_dir else self.save_dir
+        return base / f"task_{task_id}" / f"ses_{session_id}.json"
 
     @staticmethod
     def _storage_payload(result: SessionResult) -> dict[str, object]:

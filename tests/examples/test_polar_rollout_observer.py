@@ -531,14 +531,26 @@ def test_observer_groups_legacy_and_run_scoped_sessions(tmp_path: Path) -> None:
     results = tmp_path / "rollout_results"
     legacy = results / "task_polar-op-0-0" / "sessions" / "sk-legacy" / "completions"
     current = results / "task_regular_20260623-120000-polar-op-0-0" / "sessions" / "sk-current" / "completions"
+    nested = (
+        results
+        / "run_train-a"
+        / "task_train-a-polar-op-1-0"
+        / "sessions"
+        / "sk-nested"
+        / "completions"
+    )
     legacy.mkdir(parents=True)
     current.mkdir(parents=True)
+    nested.mkdir(parents=True)
     legacy_file = legacy / "0001.json"
     current_file = current / "0001.json"
+    nested_file = nested / "0001.json"
     legacy_file.write_text("{}", encoding="utf-8")
     current_file.write_text("{}", encoding="utf-8")
+    nested_file.write_text("{}", encoding="utf-8")
     os.utime(legacy_file, (1000, 1000))
     os.utime(current_file, (2000, 2000))
+    os.utime(nested_file, (3000, 3000))
 
     store = module.ObserverStore(tmp_path, "http://127.0.0.1:1")
     store.gateway_health = lambda: {"status": "ok"}
@@ -551,10 +563,13 @@ def test_observer_groups_legacy_and_run_scoped_sessions(tmp_path: Path) -> None:
 
     assert by_session["sk-legacy"]["run_id"] == "legacy"
     assert by_session["sk-current"]["run_id"] == "regular_20260623-120000"
-    assert summary["latest_run_id"] == "regular_20260623-120000"
+    assert by_session["sk-nested"]["run_id"] == "train-a"
+    assert summary["latest_run_id"] == "train-a"
     assert by_group["legacy"]["sessions"] == 1
     assert by_group["regular_20260623-120000"]["sessions"] == 1
+    assert by_group["train-a"]["sessions"] == 1
     assert by_group["regular_20260623-120000"]["latest_mtime"] == 2000
+    assert by_group["train-a"]["latest_mtime"] == 3000
 
 
 def test_observer_can_use_explicit_results_dir(tmp_path: Path) -> None:

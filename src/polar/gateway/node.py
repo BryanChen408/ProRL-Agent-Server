@@ -26,6 +26,7 @@ from polar.gateway.storage import SessionStore
 from polar.agent.base import BaseHarness
 from polar.agent.factory import create_harness
 from polar.agent.models import AgentRunResult
+from polar.run_namespace import run_dir_name, run_id_from_metadata
 from polar.rollout.models import (
     NodeHeartbeatRequest,
     NodeRegistrationRequest,
@@ -183,8 +184,16 @@ class GatewayNodeManager:
 
             timer = StageTimer()
             timer.mark("dispatch", "started")
+            session_parent = Path(self._session_base_dir) if self._session_base_dir else None
+            run_dir = run_dir_name(run_id_from_metadata(request.task_id, request.metadata))
+            if session_parent is not None and run_dir:
+                session_parent = session_parent / run_dir
+                session_parent.mkdir(parents=True, exist_ok=True)
             session_dir = Path(
-                mkdtemp(prefix=f"session-{session_id[:8]}-", dir=self._session_base_dir)
+                mkdtemp(
+                    prefix=f"session-{session_id[:8]}-",
+                    dir=str(session_parent) if session_parent is not None else None,
+                )
             )
             artifacts_dir = session_dir / "artifacts"
             artifacts_dir.mkdir()

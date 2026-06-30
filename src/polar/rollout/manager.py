@@ -201,7 +201,11 @@ class RolloutManager:
         ]
 
         async def _on_result(result: SessionResult) -> None:
-            result_path = self.pipeline.result_path_for(result.task_id, result.session_id)
+            result_path = self.pipeline.result_path_for(
+                result.task_id,
+                result.session_id,
+                result.metadata,
+            )
             with self._lock:
                 record = self._tasks[request.task_id]
                 record.completed_sessions += 1

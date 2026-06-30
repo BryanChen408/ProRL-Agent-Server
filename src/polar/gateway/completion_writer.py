@@ -20,6 +20,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from polar.run_namespace import run_dir_name, run_id_from_metadata
+
 logger = logging.getLogger(__name__)
 
 _TRUNCATED_MARKER = "__truncated"
@@ -216,16 +218,20 @@ class CompletionWriter:
     def _path_for(self, item: _WriteItem) -> Path | None:
         if self.save_dir is None:
             return None
+        run_dir = run_dir_name(
+            run_id_from_metadata(item.task_id, item.payload.get("metadata"))
+        )
+        base = self.save_dir / run_dir if run_dir else self.save_dir
         if item.kind == "metric":
             return (
-                self.save_dir
+                base
                 / f"task_{item.task_id}"
                 / "sessions"
                 / item.session_id
                 / "completion_metrics.jsonl"
             )
         return (
-            self.save_dir
+            base
             / f"task_{item.task_id}"
             / "sessions"
             / item.session_id
