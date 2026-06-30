@@ -65,11 +65,12 @@ def _truncate_value(value: Any, max_bytes: int) -> Any:
     if isinstance(value, dict):
         out: dict[str, Any] = {}
         running = 0
-        for key, item in value.items():
+        keys = list(value.keys())
+        for index, (key, item) in enumerate(value.items()):
             piece_size = _approx_byte_size(item)
             if running + piece_size > max_bytes:
                 out[_TRUNCATED_MARKER] = True
-                out["_truncated_keys_omitted"] = list(value.keys())[len(out):]
+                out["_truncated_keys_omitted"] = keys[index:]
                 break
             out[key] = item
             running += piece_size

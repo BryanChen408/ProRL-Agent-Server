@@ -22,6 +22,10 @@ gateway:
   max_init_workers: 8
   max_run_workers: 32
   max_postrun_workers: 32
+  completion_persistence:
+    enabled: true
+    max_field_bytes: 67108864
+    queue_size: 4096
 
 operator:
   profile: operator_npu

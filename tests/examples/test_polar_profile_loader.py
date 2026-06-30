@@ -45,7 +45,17 @@ def test_profile_loader_derives_topology_and_sidecar_env(tmp_path: Path) -> None
                     "interval_seconds": 7,
                 },
                 "observer": {"host": "0.0.0.0", "port": 18088},
-                "gateway": {"node_id": "node-a", "max_init_workers": 2, "max_run_workers": 4, "max_postrun_workers": 6},
+                "gateway": {
+                    "node_id": "node-a",
+                    "max_init_workers": 2,
+                    "max_run_workers": 4,
+                    "max_postrun_workers": 6,
+                    "completion_persistence": {
+                        "enabled": True,
+                        "max_field_bytes": 67108864,
+                        "queue_size": 4096,
+                    },
+                },
                 "operator": {
                     "profile": "operator_npu",
                     "runtime": {"npu_pool": "4,5", "npu_lock_dir": "/tmp/npu-locks"},
@@ -85,6 +95,11 @@ def test_profile_loader_derives_topology_and_sidecar_env(tmp_path: Path) -> None
     assert topology["rollout"]["save_dir"] == str((repo / "out" / "runs" / "unit-run" / "rollout_results").resolve())
     assert topology["gateway"]["nodes"][0]["inference"]["base_url"] == "http://10.0.0.2:4077"
     assert topology["gateway"]["nodes"][0]["max_run_workers"] == 4
+    assert topology["gateway"]["completion_persistence"] == {
+        "enabled": True,
+        "max_field_bytes": 67108864,
+        "queue_size": 4096,
+    }
     assert op_profile["runtime"]["env"]["POLAR_GEN_PIPELINE_MAX"] == "5"
     assert op_profile["evaluator"]["runtime"]["env"]["POLAR_OPT_PIPELINE_MAX"] == "3"
     assert op_profile["runtime"]["kwargs"]["ascend"]["pool"] == "4,5"

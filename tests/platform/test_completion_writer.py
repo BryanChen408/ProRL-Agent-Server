@@ -23,6 +23,23 @@ def test_truncate_value_under_budget() -> None:
     assert _truncate_value(short, max_bytes=1024) == short
 
 
+def test_truncate_value_reports_omitted_keys_from_first_dropped_key() -> None:
+    value = {
+        "id": "x",
+        "object": "chat.completion",
+        "created": 1,
+        "model": "m",
+        "choices": ["x" * 200],
+        "usage": {"output_tokens": 1},
+        "metadata": {"run_id": "r"},
+    }
+
+    truncated = _truncate_value(value, max_bytes=100)
+
+    assert truncated["__truncated"] is True
+    assert truncated["_truncated_keys_omitted"] == ["choices", "usage", "metadata"]
+
+
 def test_writer_persists_records(tmp_path: Path) -> None:
     async def _run() -> None:
         writer = CompletionWriter(save_dir=tmp_path, queue_size=8)

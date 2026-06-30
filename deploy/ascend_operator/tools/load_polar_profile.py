@@ -43,6 +43,7 @@ def main() -> int:
     budget = profile.get("pipeline_budget") or {}
     observer = profile.get("observer") or {}
     gateway = profile.get("gateway") or {}
+    completion_persistence = gateway.get("completion_persistence") or {}
     operator = profile.get("operator") or {}
     runtime = operator.get("runtime") or {}
     agent = operator.get("agent") or {}
@@ -174,6 +175,11 @@ def main() -> int:
         "gateway": {
             "heartbeat_interval_seconds": 30,
             "rollout_server_url": rollout_url,
+            "completion_persistence": {
+                "enabled": bool(completion_persistence.get("enabled", True)),
+                "max_field_bytes": int(completion_persistence.get("max_field_bytes", 64 * 1024 * 1024)),
+                "queue_size": int(completion_persistence.get("queue_size", 4096)),
+            },
             "nodes": [
                 {
                     "id": str(gateway.get("node_id", "ascend-node-01")),

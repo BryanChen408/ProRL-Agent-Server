@@ -148,8 +148,12 @@ def _assert_payload_contract(
     if agent.get("skills_path") != "/opt/canonical/skills":
         raise SystemExit(f"agent.skills_path must be /opt/canonical/skills, got {agent.get('skills_path')!r}")
     settings = agent.get("settings") or {}
-    if settings.get("max_turns") != 45:
-        raise SystemExit(f"agent.settings.max_turns must be 45, got {settings.get('max_turns')!r}")
+    try:
+        max_turns = int(settings.get("max_turns"))
+    except (TypeError, ValueError):
+        raise SystemExit(f"agent.settings.max_turns must be a positive integer, got {settings.get('max_turns')!r}")
+    if max_turns <= 0:
+        raise SystemExit(f"agent.settings.max_turns must be a positive integer, got {settings.get('max_turns')!r}")
     append_prompt = str(settings.get("append_system_prompt", ""))
     if "Follow ./CLAUDE.md" not in append_prompt or "operator name and src/output paths" not in append_prompt:
         raise SystemExit(f"agent append_system_prompt must stay minimal and delegate workflow to CLAUDE.md, got {append_prompt!r}")
