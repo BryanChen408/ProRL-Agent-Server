@@ -32,6 +32,26 @@ function charCount(value: unknown): number {
   }
 }
 
+function messageText(message: any): string {
+  const content = message?.content;
+  if (typeof content === "string") {
+    return content;
+  }
+  if (Array.isArray(content)) {
+    return content
+      .map((item) => (typeof item?.text === "string" ? item.text : ""))
+      .filter(Boolean)
+      .join("");
+  }
+  return "";
+}
+
+function toolNames(message: any): string[] {
+  return (message?.tool_calls ?? [])
+    .map((call: any) => call?.function?.name ?? call?.name)
+    .filter((name: any) => typeof name === "string" && name.length > 0);
+}
+
 function MessageBlock({
   message,
   origin,
@@ -44,6 +64,11 @@ function MessageBlock({
   const role = typeof message?.role === "string" ? message.role : "unknown";
   const style = ROLE_STYLES[role] ?? FALLBACK_STYLE;
   const chars = useMemo(() => charCount(message), [message]);
+  const text = messageText(message);
+  const reasoning = typeof message?.reasoning_content === "string" ? message.reasoning_content : "";
+  const tools = toolNames(message);
+  const isEmptyAssistant =
+    role === "assistant" && !text && !reasoning && tools.length === 0;
   return (
     <div className={`rounded-lg border ${style.border} ${style.bg} p-2`}>
       <div className={`mb-1 flex items-center justify-between text-[10px] font-medium uppercase tracking-wide ${style.label}`}>
@@ -52,6 +77,27 @@ function MessageBlock({
           #{index + 1} · ({origin} message) · {chars.toLocaleString()} chars
         </span>
       </div>
+      {(text || reasoning || tools.length > 0 || isEmptyAssistant) && (
+        <div className="mb-2 space-y-1 rounded border border-white/70 bg-white/60 p-2 text-xs text-slate-700">
+          {isEmptyAssistant && (
+            <div className="font-medium text-rose-700">empty assistant message</div>
+          )}
+          {text && <pre className="whitespace-pre-wrap break-words">{text}</pre>}
+          {reasoning && (
+            <details>
+              <summary className="cursor-pointer font-medium text-slate-600">
+                reasoning ({reasoning.length.toLocaleString()} chars)
+              </summary>
+              <pre className="mt-1 whitespace-pre-wrap break-words">{reasoning}</pre>
+            </details>
+          )}
+          {tools.length > 0 && (
+            <div className="font-medium text-slate-600">
+              tool_calls: {tools.join(", ")}
+            </div>
+          )}
+        </div>
+      )}
       <JsonView value={message} collapsed={false} maxHeight="280px" />
     </div>
   );
