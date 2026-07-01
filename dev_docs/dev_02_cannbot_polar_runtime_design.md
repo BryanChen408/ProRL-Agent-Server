@@ -245,3 +245,195 @@ Do not do these in the first implementation:
 - Do not require shape JSONL for Polar tasks.
 - Do not make agent reports or summaries the reward source.
 - Do not replace CANNBot's workflow with the old Polar `triton_eval_pipeline.sh` flow.
+
+## Remaining Step Redundancy Review
+
+This review covers the remaining implementation steps after the workflow asset
+import and verifier budget/lease hooks. The goal is to keep the Polar path as a
+thin adaptation around the CANNBot workflow, not a second operator pipeline.
+
+### Step 3: Stage Native Verifier Inputs
+
+Planned action:
+
+- Feed Polar tasks into CANNBot's native verifier contract:
+  `{verify_dir}/{op_name}_torch.py` and
+  `{verify_dir}/{op_name}_triton_ascend_impl.py`.
+
+Decision:
+
+- **Must do, but keep it mechanical.**
+
+Required shape:
+
+- Copy or hardlink `input/{op_name}.py` to `{verify_dir}/{op_name}_torch.py`.
+- Copy the candidate implementation selected by the workflow to
+  `{verify_dir}/{op_name}_triton_ascend_impl.py`.
+- Copy `{op_name}.json` only when the task actually has a sidecar.
+
+Avoid:
+
+- Do not introduce `output/submission/{op}_impl.py` as another required
+  submission shape.
+- Do not rename `verify.py` or `benchmark.py`.
+- Do not create a new verifier wrapper if existing CANNBot scripts can be
+  called directly with staged files.
+- Do not require shape JSONL for Polar tasks; prefer self-contained
+  `get_input_groups()` in the task `.py`.
+
+Rationale:
+
+- CANNBot's verifier scripts already own the trusted validation contract. Polar
+  only needs to adapt file names, not invent another contract.
+
+### Step 4: Fresh Judge
+
+Planned action:
+
+- Reuse CANNBot `verify.py` and `benchmark.py` to compute reward from trusted
+  result files.
+
+Decision:
+
+- **Must do, but do not fork the validation logic.**
+
+Required shape:
+
+- Select the final implementation artifact from the CANNBot workflow output.
+- Stage files using the same Step 3 native verifier contract.
+- Run `verify.py` and `benchmark.py` directly.
+- Read `verify_result.json` and `perf_result.json` only.
+
+Budget and lease:
+
+- Fresh judge should not pass `POLAR_GEN_PIPELINE_MAX`,
+  `POLAR_OPT_PIPELINE_MAX`, or `POLAR_PIPELINE_PHASE`; it must not consume agent
+  attempt budget.
+- Fresh judge may still use NPU lease env if it shares the same host/card pool,
+  because lease is a resource safety mechanism rather than an attempt budget.
+
+Avoid:
+
+- Do not trust `report.md`, `summary.json`, or agent-written analysis as reward
+  source.
+- Do not add a separate "fresh judge verifier" implementation.
+- Do not disable or bypass CANNBot's actual verify/benchmark checks.
+
+Rationale:
+
+- Polar's reward should be derived from scripts we trust, while preserving the
+  same validation path the agent already sees.
+
+### Step 5: Profile, Env, and Startup Integration
+
+Planned action:
+
+- Connect the CANNBot runtime selection, budget, and lease settings to the
+  Polar profile and runtime environment.
+
+Decision:
+
+- **Simplify before implementing.** The profile should own user-tuned values;
+  runtime paths should be derived by Polar.
+
+Required profile fields:
+
+- `operator_runtime.workflow`
+- `operator_runtime.budget.generation_max`
+- `operator_runtime.budget.optimization_max`
+- `operator_runtime.npu_lease.enabled`
+- `operator_runtime.npu_lease.pool`
+- `operator_runtime.npu_lease.lock_dir`
+
+Derived values:
+
+- Runtime asset path, derived from `workflow` and repository layout.
+- Docker mount source paths, materialized by the launcher from repo-relative
+  paths.
+- Budget state path, provided by the session `ARTIFACTS_DIR`.
+
+Runtime env to inject:
+
+- `POLAR_GEN_PIPELINE_MAX`
+- `POLAR_OPT_PIPELINE_MAX`
+- `POLAR_PIPELINE_PHASE` only for agent verify calls that need generation vs
+  optimization attribution.
+- `POLAR_NPU_LEASE_POOL`
+- `POLAR_NPU_LOCK_DIR`
+- existing session env such as `ARTIFACTS_DIR`, `SESSION_ID`, and `TASK_ID`.
+
+Avoid:
+
+- Do not reintroduce `operator_runtime.root` in the user profile.
+- Do not reintroduce `POLAR_OPERATOR_RUNTIME`.
+- Do not reintroduce `POLAR_BUDGET_DIR` or `POLAR_ARTIFACTS_DIR`; budget state
+  uses `ARTIFACTS_DIR`.
+- Do not expose operator runtime paths to Slime. Slime should only know the
+  Polar rollout URL plus Slime-owned dataset and RL scheduling inputs.
+- Do not keep shell defaults as a second source of truth after the profile owns
+  the values.
+
+Rationale:
+
+- The profile should configure behavior; Polar should derive implementation
+  details. This prevents the same setting from drifting across YAML, shell env,
+  rendered topology, and runtime env.
+
+### Step 6: Observer, Watcher, and Artifacts
+
+Planned action:
+
+- Keep observer/watcher useful for Polar sessions under the CANNBot workflow.
+
+Decision:
+
+- **Keep only runtime-agnostic observability.**
+
+Required shape:
+
+- Watcher reads `pipeline_budget_status.json` from session artifacts, regardless
+  of legacy or CANNBot workflow.
+- Observer displays CANNBot artifacts and tool calls without assuming
+  `output/submission`.
+- Run artifacts stay under the run-scoped output directory.
+
+Avoid:
+
+- Do not make observer or watcher parse agent-written reports for reward state.
+- Do not add CANNBot-specific duplicate budget state.
+- Do not mix historical run artifacts into the active run view.
+
+Rationale:
+
+- Watcher and observer should describe actual session state, not become another
+  source of pipeline policy.
+
+### Step 7: Cleanup Gates
+
+Planned action:
+
+- Remove legacy render/config paths only after the new flow is stable.
+
+Decision:
+
+- **Defer deletion. Add gates first.**
+
+Deletion gates:
+
+- One live session reaches verify and benchmark through CANNBot scripts.
+- Fresh judge computes reward from CANNBot verify/benchmark outputs.
+- Budget limits are visible in watcher status and inside runtime env.
+- NPU lease status is written and cards are released after verify/benchmark.
+- Slime launch uses only Polar rollout URL plus Slime-owned dataset/schedule
+  config.
+
+Avoid:
+
+- Do not delete legacy runtime or old launcher paths in the same commit as
+  CANNBot integration.
+- Do not remove audit artifacts until live-run debugging no longer needs them.
+
+Rationale:
+
+- The current system is still being used for training runs. Cleanup should only
+  follow after behavior is proven, not before.
