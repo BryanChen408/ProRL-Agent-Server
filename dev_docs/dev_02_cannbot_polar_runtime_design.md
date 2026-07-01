@@ -379,6 +379,20 @@ Rationale:
   details. This prevents the same setting from drifting across YAML, shell env,
   rendered topology, and runtime env.
 
+Implemented notes:
+
+- Default Ascend operator profiles now select `operator_runtime.workflow:
+  cannbot`; runtime assets are derived as `operator_runtime/cannbot`.
+- Agent sessions receive CANNBot tasks at `input/{op_name}.py`; user task
+  prompts only name the operator, the input file, and `./CLAUDE.md`.
+- Agent runtime env receives budget and NPU lease env. Fresh judge keeps NPU
+  lease env but strips budget env, so it does not consume agent attempts.
+- `POLAR_PIPELINE_PHASE` is not fixed in the profile. CANNBot verifier scripts
+  infer generation vs optimization from `triton_impl_name`, with the env still
+  available as an explicit override if needed.
+- Legacy topology/render/preflight paths are intentionally left in place until
+  the Step 7 live-run gates pass.
+
 ### Step 6: Observer, Watcher, and Artifacts
 
 Planned action:

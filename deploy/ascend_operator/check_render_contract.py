@@ -155,7 +155,10 @@ def _assert_payload_contract(
     if max_turns <= 0:
         raise SystemExit(f"agent.settings.max_turns must be a positive integer, got {settings.get('max_turns')!r}")
     append_prompt = str(settings.get("append_system_prompt", ""))
-    if "Follow ./CLAUDE.md" not in append_prompt or "operator name and src/output paths" not in append_prompt:
+    if "Follow ./CLAUDE.md" not in append_prompt or not (
+        "operator name and src/output paths" in append_prompt
+        or "operator name and input/output paths" in append_prompt
+    ):
         raise SystemExit(f"agent append_system_prompt must stay minimal and delegate workflow to CLAUDE.md, got {append_prompt!r}")
     blocked_prompt_terms = ("Phase 2", "Phase 3", "canonical pipeline", "Do NOT edit")
     leaked_prompt_terms = [term for term in blocked_prompt_terms if term in append_prompt]

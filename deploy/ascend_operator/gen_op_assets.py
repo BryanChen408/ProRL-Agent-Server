@@ -39,14 +39,9 @@ META_KEYS = (
 
 def _instruction(op: str) -> str:
     return (
-        f"Implement a Triton operator for Ascend NPU. The reference task is at src/{op}.py. "
-        f"Write your implementation as class ModelNew to output/submission/{op}_impl.py.\n\n"
-        "强制执行规则：\n"
-        f"- 第一次 Write/Edit/MultiEdit output/submission/{op}_impl.py 之后，下一次工具调用必须运行：\n"
-        f"  bash tools/triton_eval_pipeline.sh --op_name {op} "
-        f"--impl output/submission/{op}_impl.py --task src/{op}.py --out_dir judge_out\n"
-        f"- 在运行上述固定入口之前，禁止第二次 Write/Edit/MultiEdit output/submission/{op}_impl.py。\n"
-        "- 禁止总结、点评、改写 reference 文档；reference 只用于实现和修复代码。"
+        f"Implement the Ascend Triton operator `{op}`.\n"
+        f"The prepared reference task is at `input/{op}.py`.\n"
+        "Follow `./CLAUDE.md` for the workflow and keep artifacts under the current workdir."
     )
 
 

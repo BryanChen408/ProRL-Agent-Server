@@ -54,20 +54,17 @@ def test_as_dict_accepts_json_and_python_literal_dict():
     assert module._as_dict("{'op_name': 'x'}") == {"op_name": "x"}
 
 
-def test_instruction_names_reference_and_submission_paths():
+def test_instruction_delegates_workflow_to_claude_md():
     module = _load_module()
 
     text = module._instruction("kernelbench_l1_19_19_ReLU")
 
-    assert "src/kernelbench_l1_19_19_ReLU.py" in text
-    assert "output/submission/kernelbench_l1_19_19_ReLU_impl.py" in text
-    assert "bash tools/triton_eval_pipeline.sh --op_name kernelbench_l1_19_19_ReLU" in text
-    assert "--impl output/submission/kernelbench_l1_19_19_ReLU_impl.py" in text
-    assert "--task src/kernelbench_l1_19_19_ReLU.py" in text
-    assert "--out_dir judge_out" in text
-    assert "第一次 Write/Edit/MultiEdit" in text
-    assert "禁止第二次 Write/Edit/MultiEdit" in text
-    assert "禁止总结、点评、改写 reference 文档" in text
+    assert "kernelbench_l1_19_19_ReLU" in text
+    assert "input/kernelbench_l1_19_19_ReLU.py" in text
+    assert "./CLAUDE.md" in text
+    assert "output/submission" not in text
+    assert "tools/triton_eval_pipeline.sh" not in text
+    assert "src/kernelbench_l1_19_19_ReLU.py" not in text
     assert "--json" not in text
     assert "triton-op-designer once" not in text
     assert "Phase 2 has 5 pipeline attempts" not in text
@@ -194,6 +191,8 @@ def test_refresh_operator_task_prompts_rewrites_existing_jsonl(tmp_path: Path):
     assert result["changed"] == 1
     assert result["backup"]
     assert Path(result["backup"]).is_file()
-    assert "bash tools/triton_eval_pipeline.sh --op_name safe_op" in prompt
-    assert "--out_dir judge_out" in prompt
+    assert "input/safe_op.py" in prompt
+    assert "./CLAUDE.md" in prompt
+    assert "tools/triton_eval_pipeline.sh" not in prompt
+    assert "output/submission" not in prompt
     assert "--json" not in prompt

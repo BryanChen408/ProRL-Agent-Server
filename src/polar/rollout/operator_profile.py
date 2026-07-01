@@ -139,7 +139,10 @@ def _is_operator_task_upload_action(value: dict[str, Any], *, op_name: str) -> b
     target = value.get("target")
     if not isinstance(source, str) or not isinstance(target, str):
         return False
-    return source.endswith(f"/{op_name}.py") and target.endswith(f"/src/{op_name}.py")
+    return source.endswith(f"/{op_name}.py") and (
+        target.endswith(f"/src/{op_name}.py")
+        or target.endswith(f"/input/{op_name}.py")
+    )
 
 
 def _resolve_profile_name(

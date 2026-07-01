@@ -22,6 +22,96 @@ def _run_id() -> str:
     return _safe_run_id(os.environ.get("POLAR_RUN_ID") or os.environ.get("RUN_ID") or "")
 
 
+def _mapping(value: object) -> dict:
+    return value if isinstance(value, dict) else {}
+
+
+def _pool_spec(value: object, default: object) -> str:
+    raw = default if value is None else value
+    if isinstance(raw, (list, tuple)):
+        return ",".join(str(item).strip() for item in raw if str(item).strip())
+    return str(raw)
+
+
+def _operator_runtime_dir(*, repo: Path, workflow: str, paths: dict) -> Path:
+    if workflow == "cannbot":
+        return (repo / "operator_runtime" / "cannbot").resolve()
+    configured = paths.get("operator_runtime_dir", "operator_runtime")
+    value = Path(configured)
+    return value if value.is_absolute() else (repo / value).resolve()
+
+
+def _repo_path(repo: Path, value: object) -> str:
+    path = Path(value)
+    return str(path if path.is_absolute() else (repo / path).resolve())
+
+
+def _runtime_volumes(operator_runtime_dir: Path, workflow: str) -> list[str]:
+    volumes = [f"{operator_runtime_dir}:/opt/canonical:ro"]
+    tools_dir = operator_runtime_dir / "tools"
+    if workflow == "legacy" or tools_dir.is_dir():
+        volumes.append(f"{tools_dir}:/opt/workspace/agent_workdir/tools:ro")
+    return volumes
+
+
+def _operator_prepare(
+    *,
+    workflow: str,
+    upload_source: str,
+    workdir: str,
+    require_claude: bool,
+) -> list[dict]:
+    if workflow == "cannbot":
+        return [
+            {
+                "type": "upload_file",
+                "source": upload_source,
+                "target": f"{workdir}/input/{{op_name}}.py",
+            },
+            {
+                "type": "exec",
+                "cwd": workdir,
+                "command": "mkdir -p input output && cp /opt/canonical/AGENTS.md CLAUDE.md && ln -sfn /polar/session/.claude .claude",
+            },
+        ]
+
+    command = (
+        "python3 /opt/canonical/runtime/prepare_operator_workdir.py "
+        "--op-name {op_name} --workdir /opt/workspace/agent_workdir "
+        "--no-stub --readonly-tools"
+    )
+    if require_claude:
+        command += " --require-claude"
+    return [
+        {
+            "type": "upload_file",
+            "source": upload_source,
+            "target": f"{workdir}/src/{{op_name}}.py",
+        },
+        {"type": "exec", "command": command},
+    ]
+
+
+def _evaluator_config(*, workflow: str, evaluator: dict, workdir: str) -> dict:
+    if workflow == "cannbot":
+        return {
+            "lazy_refresh_runtime": True,
+            "op_name": "{op_name}",
+            "judge_mode": "cannbot",
+            "task_path": "input/{op_name}.py",
+            "cannbot_runtime_root": "/opt/canonical",
+            "workdir": workdir,
+        }
+    return {
+        "lazy_refresh_runtime": True,
+        "op_name": "{op_name}",
+        "judge_command": str(evaluator.get("judge_command")),
+        "submission_path": str(evaluator.get("submission_path")),
+        "metrics_path": str(evaluator.get("metrics_path")),
+        "workdir": workdir,
+    }
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--profile", required=True)
@@ -38,22 +128,28 @@ def main() -> int:
         value = Path(value)
         return value if value.is_absolute() else (repo / value).resolve()
 
-    service = profile.get("service") or {}
-    paths = profile.get("paths") or {}
-    budget = profile.get("pipeline_budget") or {}
-    observer = profile.get("observer") or {}
-    gateway = profile.get("gateway") or {}
+    service = _mapping(profile.get("service"))
+    paths = _mapping(profile.get("paths"))
+    operator_runtime = _mapping(profile.get("operator_runtime"))
+    legacy_budget = _mapping(profile.get("pipeline_budget"))
+    budget = _mapping(operator_runtime.get("budget"))
+    npu_lease = _mapping(operator_runtime.get("npu_lease"))
+    observer = _mapping(profile.get("observer"))
+    gateway = _mapping(profile.get("gateway"))
     completion_persistence = gateway.get("completion_persistence") or {}
-    operator = profile.get("operator") or {}
-    runtime = operator.get("runtime") or {}
-    agent = operator.get("agent") or {}
-    evaluator = operator.get("evaluator") or {}
+    operator = _mapping(profile.get("operator"))
+    runtime = _mapping(operator.get("runtime"))
+    agent = _mapping(operator.get("agent"))
+    evaluator = _mapping(operator.get("evaluator"))
+    workflow = str(operator_runtime.get("workflow") or "legacy").strip().lower()
+    if workflow not in {"legacy", "cannbot"}:
+        raise SystemExit(f"unsupported operator_runtime.workflow: {workflow!r}")
 
     output_root = path(paths.get("output_dir", "output/ascend_operator"))
     run_id = _run_id()
     run_root_dir = path(paths.get("run_root_dir", output_root / "runs"))
     output_dir = path(paths.get("run_dir", run_root_dir / run_id))
-    operator_runtime_dir = path(paths.get("operator_runtime_dir", "operator_runtime"))
+    operator_runtime_dir = _operator_runtime_dir(repo=repo, workflow=workflow, paths=paths)
     log_dir = path(paths.get("log_dir", output_dir / "logs"))
     op_assets_dir = path(paths.get("op_assets_dir", output_root / "op_assets"))
     rollout_results_dir = path(paths.get("rollout_results_dir", output_dir / "rollout_results"))
@@ -70,10 +166,12 @@ def main() -> int:
     rollout_port = urlparse(rollout_url).port or 8080
     gateway_port = urlparse(gateway_url).port or 8100
     profile_name = str(operator.get("profile", "operator_npu"))
-    npu_pool = str(runtime.get("npu_pool", "0"))
-    npu_lock_dir = str(runtime.get("npu_lock_dir", "/dev/shm/npu-locks"))
-    gen_max = str(budget.get("generation_max", 6))
-    opt_max = str(budget.get("optimization_max", 3))
+    lease_enabled = bool(npu_lease.get("enabled", True))
+    npu_pool = _pool_spec(npu_lease.get("pool"), runtime.get("npu_pool", "0"))
+    npu_lock_dir = _repo_path(repo, npu_lease.get("lock_dir", runtime.get("npu_lock_dir", "/dev/shm/npu-locks")))
+    gen_max = str(budget.get("generation_max", legacy_budget.get("generation_max", 6)))
+    opt_max = str(budget.get("optimization_max", legacy_budget.get("optimization_max", 3)))
+    watch_interval = str(budget.get("interval_seconds", legacy_budget.get("interval_seconds", 2)))
     max_tokens = str(agent.get("max_output_tokens", 32768))
     timeout_ms = str(agent.get("inference_timeout_ms", 14400000))
 
@@ -83,42 +181,46 @@ def main() -> int:
         "CLAUDE_CODE_MAX_RETRIES": "1",
         "CLAUDE_CODE_MAX_OUTPUT_TOKENS": max_tokens,
         "POLAR_ANTHROPIC_DEFAULT_MAX_TOKENS": max_tokens,
-        "POLAR_NPU_LEASE_POOL": npu_pool,
-        "POLAR_NPU_LOCK_DIR": npu_lock_dir,
         "POLAR_GEN_PIPELINE_MAX": gen_max,
         "POLAR_OPT_PIPELINE_MAX": opt_max,
     }
+    if lease_enabled:
+        runtime_env.update(
+            {
+                "POLAR_NPU_LEASE_POOL": npu_pool,
+                "POLAR_NPU_LOCK_DIR": npu_lock_dir,
+            }
+        )
     eval_env = {
         "DISABLE_AUTOUPDATER": "1",
-        "POLAR_NPU_LEASE_POOL": npu_pool,
-        "POLAR_NPU_LOCK_DIR": npu_lock_dir,
-        "POLAR_GEN_PIPELINE_MAX": gen_max,
-        "POLAR_OPT_PIPELINE_MAX": opt_max,
     }
-    volumes = [
-        f"{operator_runtime_dir}:/opt/canonical:ro",
-        f"{operator_runtime_dir / 'tools'}:/opt/workspace/agent_workdir/tools:ro",
-    ]
+    if lease_enabled:
+        eval_env.update(
+            {
+                "POLAR_NPU_LEASE_POOL": npu_pool,
+                "POLAR_NPU_LOCK_DIR": npu_lock_dir,
+            }
+        )
+    volumes = _runtime_volumes(operator_runtime_dir, workflow)
     upload_source = str(op_assets_dir / "op_tasks" / "{op_name}.py")
-    prepare = [
-        {"type": "upload_file", "source": upload_source, "target": "/opt/workspace/agent_workdir/src/{op_name}.py"},
-        {
-            "type": "exec",
-            "command": "python3 /opt/canonical/runtime/prepare_operator_workdir.py --op-name {op_name} --workdir /opt/workspace/agent_workdir --require-claude --no-stub --readonly-tools",
-        },
-    ]
-    eval_prepare = [
-        {"type": "upload_file", "source": upload_source, "target": "/opt/workspace/agent_workdir/src/{op_name}.py"},
-        {
-            "type": "exec",
-            "command": "python3 /opt/canonical/runtime/prepare_operator_workdir.py --op-name {op_name} --workdir /opt/workspace/agent_workdir --no-stub --readonly-tools",
-        },
-    ]
+    workdir = str(runtime.get("workdir", "/opt/workspace/agent_workdir"))
+    prepare = _operator_prepare(
+        workflow=workflow,
+        upload_source=upload_source,
+        workdir=workdir,
+        require_claude=True,
+    )
+    eval_prepare = _operator_prepare(
+        workflow=workflow,
+        upload_source=upload_source,
+        workdir=workdir,
+        require_claude=False,
+    )
     runtime_spec = {
         "backend": "docker",
         "image": str(runtime.get("image", "sandbox:v1")),
         "network": str(runtime.get("network", "host")),
-        "workdir": str(runtime.get("workdir", "/opt/workspace/agent_workdir")),
+        "workdir": workdir,
         "env": runtime_env,
         "kwargs": {"ascend": {"pool": npu_pool, "lock_dir": npu_lock_dir, "lease_at_start": False}, "volumes": volumes},
         "prepare": prepare,
@@ -159,14 +261,11 @@ def main() -> int:
                         "strategy": "operator_judge",
                         "refresh_runtime": True,
                         "runtime": evaluator_runtime,
-                        "config": {
-                            "lazy_refresh_runtime": True,
-                            "op_name": "{op_name}",
-                            "judge_command": str(evaluator.get("judge_command")),
-                            "submission_path": str(evaluator.get("submission_path")),
-                            "metrics_path": str(evaluator.get("metrics_path")),
-                            "workdir": str(runtime_spec["workdir"]),
-                        },
+                        "config": _evaluator_config(
+                            workflow=workflow,
+                            evaluator=evaluator,
+                            workdir=str(runtime_spec["workdir"]),
+                        ),
                     },
                     "builder": {"strategy": "prefix_merging", "config": {}},
                 }
@@ -214,7 +313,7 @@ def main() -> int:
         "POLAR_OBSERVER_PORT": str(observer.get("port", 18088)),
         "POLAR_GEN_PIPELINE_MAX": gen_max,
         "POLAR_OPT_PIPELINE_MAX": opt_max,
-        "POLAR_PIPELINE_WATCH_INTERVAL": str(budget.get("interval_seconds", 2)),
+        "POLAR_PIPELINE_WATCH_INTERVAL": watch_interval,
         "POLAR_ANTHROPIC_DEFAULT_MAX_TOKENS": max_tokens,
         "POLAR_INFERENCE_REQUEST_TIMEOUT_SECONDS": str(int(timeout_ms) // 1000),
     }

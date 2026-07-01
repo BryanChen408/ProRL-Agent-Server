@@ -185,6 +185,66 @@ gateway:
     assert task_request.evaluator.runtime.eval_prepare[0].source == str(cache_path)
 
 
+def test_operator_profile_rewrites_cannbot_input_task_uploads(tmp_path) -> None:
+    topology_path = tmp_path / "topology.yaml"
+    topology_path.write_text(
+        """
+rollout:
+  public_url: http://127.0.0.1:8080
+  default_operator_profile: operator_npu
+  operator_profiles:
+    operator_npu:
+      operator_task_cache_dir: "{cache_dir}"
+      runtime:
+        backend: docker
+        image: sandbox:v1
+        prepare:
+          - type: upload_file
+            source: "output/ascend_operator/op_assets/op_tasks/{op_name}.py"
+            target: "/work/input/{op_name}.py"
+      agent:
+        harness: claude_code
+      evaluator:
+        strategy: operator_judge
+        runtime:
+          backend: docker
+          image: sandbox:v1
+          eval_prepare:
+            - type: upload_file
+              source: "output/ascend_operator/op_assets/op_tasks/{op_name}.py"
+              target: "/work/input/{op_name}.py"
+gateway:
+  nodes:
+    - id: n1
+      public_url: http://127.0.0.1:8100
+""".strip().format(cache_dir=tmp_path / "task_cache", op_name="{op_name}")
+    )
+    rollout = TopologyConfig.load(topology_path).rollout
+    source = "class Model: pass\n"
+    digest = hashlib.sha256(source.encode("utf-8")).hexdigest()
+
+    task_request = expand_operator_sample_request(
+        OperatorSampleRequest(
+            task_id="task-1",
+            instruction="do it",
+            sample=OperatorSample(
+                op_name="op",
+                task_source=source,
+                task_source_sha256=digest,
+            ),
+        ),
+        rollout,
+    )
+
+    cache_path = tmp_path / "task_cache" / f"{digest}.py"
+    assert task_request.runtime is not None
+    assert task_request.runtime.prepare[0].source == str(cache_path)
+    assert task_request.evaluator is not None
+    assert task_request.evaluator.runtime is not None
+    assert task_request.evaluator.runtime.eval_prepare is not None
+    assert task_request.evaluator.runtime.eval_prepare[0].source == str(cache_path)
+
+
 def test_operator_profile_rejects_task_source_hash_mismatch(tmp_path) -> None:
     topology_path = tmp_path / "topology.yaml"
     topology_path.write_text(
