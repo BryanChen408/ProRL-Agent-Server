@@ -111,6 +111,26 @@ def _assistant_content_text(value: Any) -> str:
     return str(value)
 
 
+def _assistant_reasoning_text(msg: dict[str, Any] | None) -> str:
+    if not isinstance(msg, dict):
+        return ""
+    parts: list[str] = []
+    for key in ("reasoning_content", "reasoning"):
+        value = msg.get(key)
+        if isinstance(value, str) and value.strip():
+            parts.append(value)
+    content = msg.get("content")
+    if isinstance(content, list):
+        for item in content:
+            if not isinstance(item, dict):
+                continue
+            if item.get("type") in {"thinking", "reasoning"}:
+                text = item.get("thinking") or item.get("text") or item.get("content") or ""
+                if text:
+                    parts.append(str(text))
+    return "\n".join(part for part in parts if part)
+
+
 def _snippet(text: str, limit: int = 360) -> str:
     text = re.sub(r"\s+", " ", text or "").strip()
     if len(text) <= limit:
@@ -904,12 +924,14 @@ def _extract_turns(messages: list[dict[str, Any]], current_response: dict[str, A
         content = msg.get("content")
         if role == "assistant":
             assistant_text = _assistant_content_text(content)
+            assistant_reasoning = _assistant_reasoning_text(msg)
             turns.append(
                 {
                     "index": len(turns) + 1,
                     "source": "history",
                     "assistant_text": assistant_text,
-                    "assistant_snippet": _snippet(assistant_text),
+                    "assistant_reasoning": assistant_reasoning,
+                    "assistant_snippet": _snippet(assistant_text or assistant_reasoning),
                     "tool_uses": _tool_uses(content),
                     "tool_results": [],
                 }
@@ -921,12 +943,14 @@ def _extract_turns(messages: list[dict[str, Any]], current_response: dict[str, A
                 pending_results.extend(results)
     if current_response:
         assistant_text = _assistant_content_text(current_response.get("content"))
+        assistant_reasoning = _assistant_reasoning_text(current_response)
         turns.append(
             {
                 "index": len(turns) + 1,
                 "source": "current_response",
                 "assistant_text": assistant_text,
-                "assistant_snippet": _snippet(assistant_text),
+                "assistant_reasoning": assistant_reasoning,
+                "assistant_snippet": _snippet(assistant_text or assistant_reasoning),
                 "tool_uses": _response_tool_calls(current_response),
                 "tool_results": [],
             }
@@ -1104,6 +1128,19 @@ def _pipeline_status(labels: list[str], text: str) -> str:
     return "unknown"
 
 
+def _is_pipeline_feedback(text: str) -> bool:
+    if not text:
+        return False
+    low = text.lower()
+    return (
+        "[pipeline-budget]" in low
+        or "[triton-eval]" in low
+        or "完整错误已写入" in text
+        or "judge_out/metrics_error.log" in low
+        or "success=true" in low
+    )
+
+
 def _pipeline_stage_status(labels: list[str], text: str) -> dict[str, str]:
     low = text.lower()
     precision_started = (
@@ -1168,6 +1205,7 @@ def analyze_session_messages(data: dict[str, Any]) -> dict[str, Any]:
     prompt_blocks = _content_text_blocks(first_user.get("content")) if first_user else []
     task_prompt = _select_task_prompt(prompt_blocks)
     current_text = _text_block(current.get("content")) if current else ""
+    current_reasoning = _assistant_reasoning_text(current)
     current_tool_calls = _response_tool_calls(current) if current else []
     current_tool_summaries = []
     for tool in current_tool_calls:
@@ -1182,6 +1220,7 @@ def analyze_session_messages(data: dict[str, Any]) -> dict[str, Any]:
     pipeline_runs = 0
     pipeline_commands: list[dict[str, Any]] = []
     pipeline_runs_detail: list[dict[str, Any]] = []
+    pipeline_command_errors: list[dict[str, Any]] = []
     submission_writes = 0
     submission_write_turns: list[int] = []
     first_submission_write_turn: int | None = None
@@ -1248,12 +1287,24 @@ def analyze_session_messages(data: dict[str, Any]) -> dict[str, Any]:
                         }
                     )
             if name == "Bash" and _is_pipeline_command(target):
+                result = result_by_id.get(tool.get("id")) or {}
+                result_text = str(result.get("content") or "")
+                if not _is_pipeline_feedback(result_text):
+                    pipeline_command_errors.append(
+                        {
+                            "turn": turn["index"],
+                            "tool_id": tool.get("id"),
+                            "command": target,
+                            "is_error": bool(result.get("is_error")),
+                            "result_chars": len(result_text),
+                            "result_snippet": _snippet(result_text, 1200),
+                        }
+                    )
+                    continue
                 pipeline_runs += 1
                 if first_pipeline_turn is None:
                     first_pipeline_turn = turn["index"]
                 pipeline_commands.append({"turn": turn["index"], "command": target})
-                result = result_by_id.get(tool.get("id")) or {}
-                result_text = str(result.get("content") or "")
                 cls = _classify_tool_result(result_text)
                 stage = _pipeline_stage_status(cls["labels"], result_text)
                 _update_pipeline_stage_counts(pipeline_stage_counts, stage)
@@ -1290,6 +1341,7 @@ def analyze_session_messages(data: dict[str, Any]) -> dict[str, Any]:
         current is not None
         and not response_truncated
         and not current_text.strip()
+        and not current_reasoning.strip()
         and not current_tool_calls
         and finish_reason_text in {"stop", "eos", "eos_token", "end_turn"}
     ):
@@ -1316,6 +1368,7 @@ def analyze_session_messages(data: dict[str, Any]) -> dict[str, Any]:
             "task_prompt": task_prompt,
             "task_prompt_is_operator": _is_operator_task_text(task_prompt),
             "current_response_text": current_text,
+            "current_response_reasoning": current_reasoning,
             "current_response_snippet": _snippet(current_text, 1200),
             "current_tool_calls": current_tool_summaries,
             "finish_reason": finish_reason,
@@ -1331,6 +1384,7 @@ def analyze_session_messages(data: dict[str, Any]) -> dict[str, Any]:
         "pipeline_runs": pipeline_runs,
         "pipeline_commands": pipeline_commands[-20:],
         "pipeline_runs_detail": pipeline_runs_detail[-30:],
+        "pipeline_command_errors": pipeline_command_errors[-30:],
         "pipeline_stage_counts": pipeline_stage_counts,
         "submission_writes": submission_writes,
         "submission_write_turns": submission_write_turns[-30:],
@@ -1472,6 +1526,7 @@ def aggregate_session_summaries(summaries: list[dict[str, Any]]) -> dict[str, An
     for key in (
         "pipeline_commands",
         "pipeline_runs_detail",
+        "pipeline_command_errors",
         "turns",
     ):
         value = richest.get(key)
@@ -2045,6 +2100,18 @@ HTML_PAGE = r"""<!doctype html>
           </div>
         </details>`;
       }).join('');
+      const pipelineCommandErrors = (sum.pipeline_command_errors || []).slice().reverse().map((run, idx) => {
+        const shouldOpen = idx === 0;
+        return `<details data-key="pipeline-command-error-${esc(idx)}" ${shouldOpen ? 'open' : ''}>
+          <summary><span class="badge red">command error</span> <span class="small">turn ${esc(run.turn)} · ${esc(run.result_chars || 0)} chars</span></summary>
+          <div class="result">
+            <h3>Command</h3>
+            <pre>${esc(run.command || '')}</pre>
+            <h3>Tool Result</h3>
+            <pre>${esc(run.result_snippet || '(no tool result captured yet)')}</pre>
+          </div>
+        </details>`;
+      }).join('');
       const turns = (sum.turns || []).slice().reverse().map(t => {
         const tools = (t.tool_uses || []).map(tool => {
           const name = tool.name || '';
@@ -2052,12 +2119,15 @@ HTML_PAGE = r"""<!doctype html>
           return `<div class="tool"><span class="badge blue">${esc(name)}</span><pre>${esc(typeof target === 'string' ? target : JSON.stringify(target, null, 2))}</pre></div>`;
         }).join('');
         const results = (t.tool_results || []).map((r, idx) => `<details data-key="turn-${esc(t.index)}-result-${idx}"><summary>tool result ${r.is_error ? '(error)' : ''}</summary><pre>${esc(r.content || '')}</pre></details>`).join('');
+        const reasoning = t.assistant_reasoning ? `<details data-key="turn-${esc(t.index)}-reasoning"><summary>reasoning</summary><pre>${esc(t.assistant_reasoning || '')}</pre></details>` : '';
+        const textBody = t.assistant_text || (t.assistant_reasoning ? '' : '(no assistant text)');
         return `<div class="turn">
           <div class="turn-head"><div><span class="badge">turn ${esc(t.index)}</span> <span class="badge">${esc(t.source)}</span></div><span class="small">${esc((t.tool_uses||[]).length)} tools</span></div>
           <div class="text">${esc(t.assistant_snippet || '(no assistant text)')}</div>
           ${tools}
           ${results}
-          <details data-key="turn-${esc(t.index)}-assistant"><summary>full assistant text</summary><pre>${esc(t.assistant_text || '')}</pre></details>
+          ${reasoning}
+          <details data-key="turn-${esc(t.index)}-assistant"><summary>full assistant text</summary><pre>${esc(textBody)}</pre></details>
         </div>`;
       }).join('');
       $('detail').innerHTML = `
@@ -2067,7 +2137,7 @@ HTML_PAGE = r"""<!doctype html>
           ${metric('LLM requests', fmtNum(cm.request_count), `latest #${cm.latest?.sequence || '-'}`)}
           ${metric('prompt / decode tokens', `${fmtNum(cm.prompt_tokens)} / ${fmtNum(cm.completion_tokens)}`, `cached prompt ${fmtNum(cm.cached_prompt_tokens)}`)}
 	          ${metric('decode throughput', `${fmtRate(cm.completion_tokens_per_second)} tok/s`, `mean latency ${fmtNum(cm.latency_ms_mean, 1)} ms`)}
-	          ${metric('pipeline runs', sum.pipeline_runs || 0, 'actual tools/triton_eval_pipeline.sh executions')}
+	          ${metric('pipeline runs', sum.pipeline_runs || 0, 'budget-counted tools/triton_eval_pipeline.sh feedbacks')}
 	          ${metric('submission writes', sum.submission_writes || 0, `before first pipeline ${sum.writes_before_first_pipeline || 0}`)}
 	          ${metric('workflow', workflowViolation ? 'violation' : 'ok', `first write turn ${firstWrite} · first pipeline turn ${firstPipeline}`)}
 	          ${metric('abnormal', sum.abnormal_termination ? 'yes' : 'no', (sum.abnormal_reasons || []).join(', ') || '-')}
@@ -2085,9 +2155,10 @@ HTML_PAGE = r"""<!doctype html>
           <h3>Injected User Message</h3>
           <p class="hint">这里是完整首轮 user message 的各段。Operator Task、skill 文档和 CLAUDE.md 会分开标记；上面的 Task Prompt 优先展示真实算子任务。</p>
           ${promptBlocks || '<span class="small">No user prompt parsed</span>'}
-          <h3>Latest Assistant Text</h3>
-          ${req.current_response_text ? `<pre>${esc(req.current_response_text || '')}</pre>` : '<div class="result"><span class="small">No text in latest assistant message; this step is likely tool-call only.</span></div>'}
-          <h3>Latest Tool Calls</h3>
+	          <h3>Latest Assistant Text</h3>
+	          ${req.current_response_text ? `<pre>${esc(req.current_response_text || '')}</pre>` : '<div class="result"><span class="small">No text in latest assistant message; this step is likely tool-call only.</span></div>'}
+	          ${req.current_response_reasoning ? `<h3>Latest Reasoning</h3><pre>${esc(req.current_response_reasoning || '')}</pre>` : ''}
+	          <h3>Latest Tool Calls</h3>
           ${currentTools || '<span class="small">No tool calls in latest assistant message</span>'}
         </div></div>
         <div class="split">
@@ -2097,7 +2168,7 @@ HTML_PAGE = r"""<!doctype html>
             <div class="panel"><h2>Readonly Audit</h2><div class="panel-body"><p class="hint">标记模型尝试写入 tools/、.agents/skills/ 或 CLAUDE.md 的行为；只读 mount 是硬边界，这里只做审计展示。</p><h3>Forbidden Writes</h3>${forbiddenWriteRows || '<span class="small">No forbidden write tool call found</span>'}<h3>Readonly Mutation Attempts</h3>${readonlyMutationRows || '<span class="small">No readonly mutation bash command found</span>'}</div></div>
             <div class="panel"><h2>Abnormal Termination</h2><div class="panel-body"><p class="hint">Observer-only 标记：这些 session 仍可能已进入训练，但不应在审查界面里显示成正常 completed。</p>${abnormalRows || '<span class="small">No abnormal termination marker found</span>'}</div></div>
             <div class="panel"><h2>Skill Usage</h2><div class="panel-body"><p class="hint">列出实际调用的 Skill 工具和读取过的 skill reference。正常轨迹通常至少会看到 designer/coding/verifier，优化阶段才会看到 optimizer。</p><h3>Skill Calls</h3>${skillCalls || '<span class="small">No Skill tool call found</span>'}<h3>Reference Reads</h3><div class="files">${skillReads || '<span class="small">No skill reference read found</span>'}</div></div></div>
-            <div class="panel"><h2>Pipeline Runs</h2><div class="panel-body"><p class="hint">只统计实际执行 tools/triton_eval_pipeline.sh 的 Bash 调用。这里展示每次精度验证和性能 profiling 是否到达、是否通过。</p>${pipelineDetails || '<span class="small">No pipeline run found yet</span>'}</div></div>
+	            <div class="panel"><h2>Pipeline Runs</h2><div class="panel-body"><p class="hint">只统计产生 pipeline feedback 的 tools/triton_eval_pipeline.sh 调用；路径错误等 Bash 失败单独列在 Command Errors。</p>${pipelineDetails || '<span class="small">No pipeline run found yet</span>'}<h3>Command Errors</h3>${pipelineCommandErrors || '<span class="small">No pipeline command error found</span>'}</div></div>
             <div class="panel"><h2>Timeline</h2><div class="panel-body"><p class="hint">按倒序展示每一轮模型输出、工具调用和工具返回。这里用来看 CC 是否按设计、编码、验证、迭代的流程推进。</p></div>${turns || '<div class="timeline-empty">No turns parsed yet.</div>'}</div>
           </div>
           <div>
