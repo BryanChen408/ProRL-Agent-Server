@@ -27,7 +27,6 @@ import json
 import logging
 import os
 import sys
-import subprocess
 import traceback
 from dataclasses import dataclass
 
@@ -92,6 +91,7 @@ class InputSpec:
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from _log_utils import setup_logger as _setup_logger_shared  # noqa: E402
 from _common_utils import describe_input as _describe_input_shared  # noqa: E402
+from _polar_runtime import BudgetExceeded, consume_verify_budget, npu_lease, phase_from_impl  # noqa: E402
 
 logger = logging.getLogger("triton_op_verifier.verify")
 
@@ -1065,10 +1065,6 @@ if __name__ == "__main__":
         "--non-compute", action="store_true",
         help="非计算类算子（搬移 / Cast 等），所有 case 走二进制完全一致判定",
     )
-    parser.add_argument(
-        "--subprocess", action="store_true",
-        help=argparse.SUPPRESS,  # 内部参数：子进程模式，直接执行验证
-    )
     args = parser.parse_args()
 
     verify_dir = os.path.abspath(args.verify_dir)
@@ -1076,48 +1072,20 @@ if __name__ == "__main__":
         logger.error("错误: 验证目录不存在: %s", verify_dir)
         sys.exit(1)
 
-    if args.subprocess:
-        # 子进程模式：直接执行验证逻辑
-        try:
+    phase = phase_from_impl(args.triton_impl_name, os.environ.get("POLAR_PIPELINE_PHASE"))
+    try:
+        consume_verify_budget(phase, op_name=args.op_name)
+        with npu_lease(phase, work_dir=verify_dir):
             passed, total = verify_implementations(
                 args.op_name, verify_dir, args.triton_impl_name, args.output,
                 non_compute=args.non_compute,
             )
-        except Exception as e:
-            logger.error("%s", e)
-            logger.error("%s", traceback.format_exc())
-            sys.exit(1)
-        # 策略 A：passed < total → exit 1
-        sys.exit(0 if passed == total and total > 0 else 1)
-    else:
-        # 主进程模式：启动子进程执行验证，超时后 kill 整个进程树
-        cmd = [
-            sys.executable, os.path.abspath(__file__),
-            "--op_name", args.op_name,
-            "--verify_dir", verify_dir,
-            "--triton_impl_name", args.triton_impl_name,
-            "--subprocess",
-        ]
-        if args.output:
-            cmd.extend(["--output", args.output])
-        if args.non_compute:
-            cmd.append("--non-compute")
-        try:
-            proc = subprocess.Popen(
-                cmd,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-            )
-            stdout, stderr = proc.communicate(timeout=args.timeout)
-
-            sys.stdout.buffer.write(stdout)
-            sys.stdout.buffer.flush()
-            sys.stderr.buffer.write(stderr)
-            sys.stderr.buffer.flush()
-            sys.exit(proc.returncode)
-
-        except subprocess.TimeoutExpired:
-            proc.kill()
-            proc.wait()
-            logger.error("验证超时（%d秒），已终止子进程", args.timeout)
-            sys.exit(1)
+    except BudgetExceeded as e:
+        logger.error("%s", e)
+        sys.exit(1)
+    except Exception as e:
+        logger.error("%s", e)
+        logger.error("%s", traceback.format_exc())
+        sys.exit(1)
+    # 策略 A：passed < total → exit 1
+    sys.exit(0 if passed == total and total > 0 else 1)

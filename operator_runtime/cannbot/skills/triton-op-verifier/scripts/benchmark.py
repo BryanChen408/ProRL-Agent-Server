@@ -34,6 +34,7 @@ from dataclasses import dataclass, field
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from _log_utils import setup_logger as _setup_logger_shared  # noqa: E402
 from _common_utils import describe_input as _describe_input_shared  # noqa: E402
+from _polar_runtime import attach_budget_status, npu_lease, phase_from_impl  # noqa: E402
 
 logger = logging.getLogger("triton_op_verifier.benchmark")
 
@@ -1098,7 +1099,10 @@ def main():
     config = _build_config(args, verify_dir)
 
     try:
-        result = benchmark_implementations(config)
+        phase = phase_from_impl(args.triton_impl_name, os.environ.get("POLAR_PIPELINE_PHASE"))
+        attach_budget_status(phase, op_name=args.op_name)
+        with npu_lease(phase, work_dir=verify_dir):
+            result = benchmark_implementations(config)
         result_dict = result_to_dict(result)
         _emit_summary(result_dict)
         _save_or_print_result(result_dict, args.output)
