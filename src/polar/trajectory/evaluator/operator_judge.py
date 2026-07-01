@@ -36,6 +36,7 @@ from __future__ import annotations
 import json
 import logging
 import posixpath
+import shlex
 from pathlib import Path
 from typing import Any
 
@@ -54,32 +55,79 @@ class OperatorJudgeEvaluator(BaseTrajectoryEvaluator):
     """Authoritative operator-gen reward: re-run the submitted kernel under the canonical eval."""
 
     MODE = "operator_judge"
+    LEGACY_MODE = "legacy"
+    CANNBOT_MODE = "cannbot"
+    CANNBOT_BUDGET_ENV_KEYS = frozenset(
+        {
+            "POLAR_GEN_PIPELINE_MAX",
+            "POLAR_OPT_PIPELINE_MAX",
+            "POLAR_PIPELINE_PHASE",
+            "POLAR_PIPELINE_STATUS_FILE",
+        }
+    )
 
     def __init__(
         self,
         *,
         op_name: str,
-        judge_command: str,
+        judge_command: str = "",
+        judge_mode: str = LEGACY_MODE,
         submission_path: str | None = None,
+        submission_candidates: list[str] | None = None,
         submission_dest: str | None = None,
         metrics_path: str = "judge_out/metrics.json",
         metrics_error_path: str = "judge_out/metrics_error.log",
         workdir: str | None = None,
         judge_timeout: float = 1800.0,
+        cannbot_runtime_root: str = "/opt/canonical/cannbot",
+        task_path: str | None = None,
+        verify_dir: str = "judge_out/cannbot_verify",
+        triton_impl_name: str = "triton_ascend_impl",
         **_: Any,
     ) -> None:
         if not str(op_name).strip():
             raise ValueError("operator_judge requires 'op_name'")
-        if not str(judge_command).strip():
+        self.judge_mode = str(judge_mode or self.LEGACY_MODE).strip().lower()
+        if self.judge_mode not in {self.LEGACY_MODE, self.CANNBOT_MODE}:
+            raise ValueError(f"operator_judge unsupported judge_mode: {judge_mode!r}")
+        if self.judge_mode == self.LEGACY_MODE and not str(judge_command).strip():
             raise ValueError("operator_judge requires 'judge_command'")
         self.op_name = op_name
         self.judge_command = judge_command
-        self.submission_path = submission_path or f"output/submission/{op_name}_impl.py"
-        self.submission_dest = submission_dest or self.submission_path
+        self.submission_path = submission_path or self._default_submission_path()
+        self.submission_candidates = list(submission_candidates or self._default_submission_candidates())
+        self.submission_dest = submission_dest or self._default_submission_dest()
         self.metrics_path = metrics_path
         self.metrics_error_path = metrics_error_path
         self.workdir = workdir
         self.judge_timeout = float(judge_timeout)
+        self.cannbot_runtime_root = cannbot_runtime_root.rstrip("/")
+        self.task_path = task_path or f"input/{op_name}.py"
+        self.verify_dir = verify_dir
+        self.triton_impl_name = triton_impl_name
+
+    def _default_submission_path(self) -> str:
+        if self.judge_mode == self.CANNBOT_MODE:
+            return "output/optimized_code.py"
+        return f"output/submission/{self.op_name}_impl.py"
+
+    def _default_submission_candidates(self) -> list[str]:
+        if self.judge_mode == self.CANNBOT_MODE:
+            return [
+                "output/optimized_code.py",
+                "output/generated_code.py",
+                f"{self.op_name}_generated.py",
+            ]
+        candidates: list[str] = []
+        if self.submission_path.endswith(".py"):
+            candidates.append(self.submission_path[:-3] + ".best.py")
+        candidates.append(self.submission_path)
+        return candidates
+
+    def _default_submission_dest(self) -> str:
+        if self.judge_mode == self.CANNBOT_MODE:
+            return "judge_out/cannbot_submission.py"
+        return self.submission_path
 
     def _abs(self, path: str) -> str:
         """Resolve a runtime path against ``workdir`` so the transfer actually finds it.
@@ -133,7 +181,7 @@ class OperatorJudgeEvaluator(BaseTrajectoryEvaluator):
             return self._scored(
                 {"success": False, "ast_check_ok": False, "correctness_ok": False,
                  "error_type": "submission_missing",
-                 "error": f"no submission at {self.submission_path} (or .best.py)"},
+                 "error": f"no submission in candidates: {self.submission_candidates}"},
                 artifacts_dir, submission_used=None,
             )
 
@@ -157,12 +205,8 @@ class OperatorJudgeEvaluator(BaseTrajectoryEvaluator):
             picked = str(picked_value) if picked_value else str(local_impl)
         else:
             assert isinstance(source, BaseRuntime)
-            candidates = []
-            if self.submission_path.endswith(".py"):
-                candidates.append(self.submission_path[:-3] + ".best.py")
-            candidates.append(self.submission_path)
             picked = None
-            for cand in candidates:
+            for cand in self.submission_candidates:
                 try:
                     await source.download_file(self._abs(cand), str(local_impl))
                     picked = cand  # report the logical (relative) path; _abs is a transfer detail
@@ -173,7 +217,7 @@ class OperatorJudgeEvaluator(BaseTrajectoryEvaluator):
                 return self._scored(
                     {"success": False, "ast_check_ok": False, "correctness_ok": False,
                      "error_type": "submission_missing",
-                     "error": f"no submission at {self.submission_path} (or .best.py)"},
+                     "error": f"no submission in candidates: {self.submission_candidates}"},
                     artifacts_dir, submission_used=None,
                 )
 
@@ -181,6 +225,15 @@ class OperatorJudgeEvaluator(BaseTrajectoryEvaluator):
         assert isinstance(judge_rt, BaseRuntime)
         if judge_rt is not source or submission_host_path is not None:
             await judge_rt.upload_file(str(local_impl), self._abs(self.submission_dest))
+
+        if self.judge_mode == self.CANNBOT_MODE:
+            return await self._evaluate_cannbot(
+                judge_rt,
+                artifacts_dir,
+                env,
+                timeout,
+                submission_used=picked,
+            )
 
         # 3) run the canonical eval pipeline inside the judge runtime -> metrics.json.
         result = await judge_rt.exec(self.judge_command, cwd=self.workdir, env=env, timeout_sec=timeout)
@@ -216,6 +269,249 @@ class OperatorJudgeEvaluator(BaseTrajectoryEvaluator):
             submission_used=picked,
             metrics_error_path=str(local_metrics_error) if local_metrics_error is not None else None,
         )
+
+    async def _evaluate_cannbot(
+        self,
+        judge_rt: BaseRuntime,
+        artifacts_dir: Path,
+        env: dict,
+        timeout: float,
+        *,
+        submission_used: str | None,
+    ) -> EvalResult:
+        verify_dir = self._abs(self.verify_dir)
+        verify_result_path = posixpath.join(verify_dir, "verify_result.json")
+        perf_result_path = posixpath.join(verify_dir, "perf_result.json")
+        cannbot_env = self._cannbot_env(env)
+        logs: list[str] = []
+
+        commands = [
+            self._cannbot_stage_command(verify_dir),
+            self._cannbot_verify_command(verify_dir, verify_result_path),
+        ]
+        verify_rc = 0
+        for command in commands:
+            result = await judge_rt.exec(command, cwd=self.workdir, env=cannbot_env, timeout_sec=timeout)
+            logs.append(self._format_command_log(command, result.return_code, result.stdout, result.stderr))
+            if result.return_code == -1:
+                (artifacts_dir / "judge.stdout.log").write_text("".join(logs))
+                raise TimeoutError(f"operator_judge cannbot command timed out after {timeout}s: {command}")
+            if result.return_code != 0:
+                verify_rc = result.return_code
+                if command != commands[-1]:
+                    (artifacts_dir / "judge.stdout.log").write_text("".join(logs))
+                    raise RuntimeError(
+                        f"operator_judge cannbot staging failed "
+                        f"(exit={result.return_code}; see {artifacts_dir / 'judge.stdout.log'})"
+                    )
+                break
+
+        verify_data = await self._download_json(
+            judge_rt,
+            verify_result_path,
+            artifacts_dir / "verify_result.json",
+            label="verify_result.json",
+            required=False,
+        )
+        if verify_data is None:
+            combined_log = "".join(logs)
+            (artifacts_dir / "judge.stdout.log").write_text(combined_log)
+            infra_type = classify_infra_error_text(combined_log)
+            if infra_type:
+                raise RuntimeError(
+                    f"operator_judge cannbot infra failure ({infra_type}); "
+                    f"see {artifacts_dir / 'judge.stdout.log'}"
+                )
+            return self._scored(
+                {
+                    "success": False,
+                    "ast_check_ok": False,
+                    "correctness_ok": False,
+                    "error_type": "correctness_failed",
+                    "error": "verify.py failed before writing verify_result.json",
+                    "verify_return_code": verify_rc,
+                },
+                artifacts_dir,
+                submission_used=submission_used,
+            )
+        if not self._cannbot_verify_ok(verify_data):
+            (artifacts_dir / "judge.stdout.log").write_text("".join(logs))
+            return self._scored(
+                self._cannbot_metrics(verify_data=verify_data, perf_data=None, verify_rc=verify_rc),
+                artifacts_dir,
+                submission_used=submission_used,
+            )
+
+        benchmark_command = self._cannbot_benchmark_command(verify_dir, perf_result_path)
+        result = await judge_rt.exec(benchmark_command, cwd=self.workdir, env=cannbot_env, timeout_sec=timeout)
+        logs.append(self._format_command_log(benchmark_command, result.return_code, result.stdout, result.stderr))
+        (artifacts_dir / "judge.stdout.log").write_text("".join(logs))
+        if result.return_code == -1:
+            raise TimeoutError(f"operator_judge cannbot benchmark timed out after {timeout}s")
+
+        perf_data = await self._download_json(
+            judge_rt,
+            perf_result_path,
+            artifacts_dir / "perf_result.json",
+            label="perf_result.json",
+        )
+        return self._scored(
+            self._cannbot_metrics(
+                verify_data=verify_data,
+                perf_data=perf_data,
+                verify_rc=verify_rc,
+                benchmark_rc=result.return_code,
+            ),
+            artifacts_dir,
+            submission_used=submission_used,
+        )
+
+    def _cannbot_stage_command(self, verify_dir: str) -> str:
+        return self._shell_command(
+            [
+                "python3",
+                f"{self.cannbot_runtime_root}/runtime/stage_verifier_inputs.py",
+                "--op-name",
+                self.op_name,
+                "--task",
+                self._abs(self.task_path),
+                "--impl",
+                self._abs(self.submission_dest),
+                "--verify-dir",
+                verify_dir,
+                "--triton-impl-name",
+                self.triton_impl_name,
+            ]
+        )
+
+    def _cannbot_verify_command(self, verify_dir: str, output_path: str) -> str:
+        return self._shell_command(
+            [
+                "python3",
+                f"{self.cannbot_runtime_root}/skills/triton-op-verifier/scripts/verify.py",
+                "--op_name",
+                self.op_name,
+                "--verify_dir",
+                verify_dir,
+                "--triton_impl_name",
+                self.triton_impl_name,
+                "--output",
+                output_path,
+            ]
+        )
+
+    def _cannbot_benchmark_command(self, verify_dir: str, output_path: str) -> str:
+        return self._shell_command(
+            [
+                "python3",
+                f"{self.cannbot_runtime_root}/skills/triton-op-verifier/scripts/benchmark.py",
+                "--op_name",
+                self.op_name,
+                "--verify_dir",
+                verify_dir,
+                "--triton_impl_name",
+                self.triton_impl_name,
+                "--output",
+                output_path,
+            ]
+        )
+
+    @staticmethod
+    def _shell_command(args: list[str]) -> str:
+        return " ".join(shlex.quote(str(arg)) for arg in args)
+
+    @classmethod
+    def _cannbot_env(cls, env: dict) -> dict:
+        return {str(k): v for k, v in env.items() if str(k) not in cls.CANNBOT_BUDGET_ENV_KEYS}
+
+    @staticmethod
+    def _format_command_log(command: str, return_code: int, stdout: str | None, stderr: str | None) -> str:
+        return (
+            f"\n$ {command}\n"
+            f"[exit={return_code}]\n"
+            f"{stdout or ''}"
+            f"{stderr or ''}"
+        )
+
+    async def _download_json(
+        self,
+        judge_rt: BaseRuntime,
+        remote_path: str,
+        local_path: Path,
+        *,
+        label: str,
+        required: bool = True,
+    ) -> dict | None:
+        try:
+            await judge_rt.download_file(remote_path, str(local_path))
+        except Exception as exc:  # noqa: BLE001
+            if not required:
+                return None
+            raise RuntimeError(f"operator_judge cannbot: no readable {label} at {remote_path}: {exc!r}") from exc
+        try:
+            data = json.loads(local_path.read_text())
+        except Exception as exc:  # noqa: BLE001
+            raise RuntimeError(f"operator_judge cannbot: malformed {label} at {remote_path}: {exc!r}") from exc
+        if not isinstance(data, dict):
+            raise RuntimeError(f"operator_judge cannbot: {label} is not a JSON object")
+        return data
+
+    @staticmethod
+    def _cannbot_verify_ok(verify_data: dict) -> bool:
+        try:
+            total = int(verify_data.get("total_cases") or 0)
+            passed = int(verify_data.get("passed_cases") or 0)
+        except Exception:
+            return False
+        return total > 0 and passed == total
+
+    @staticmethod
+    def _cannbot_benchmark_ok(perf_data: dict | None) -> bool:
+        if not perf_data:
+            return False
+        try:
+            total = int(perf_data.get("total_cases") or 0)
+            passed = int(perf_data.get("passed_cases") or 0)
+        except Exception:
+            return False
+        return total > 0 and passed == total and perf_data.get("speedup_vs_torch") is not None
+
+    def _cannbot_metrics(
+        self,
+        *,
+        verify_data: dict,
+        perf_data: dict | None,
+        verify_rc: int = 0,
+        benchmark_rc: int | None = None,
+    ) -> dict:
+        if not self._cannbot_verify_ok(verify_data):
+            return {
+                "success": False,
+                "ast_check_ok": True,
+                "correctness_ok": False,
+                "error_type": "correctness_failed",
+                "verify_result": verify_data,
+                "verify_return_code": verify_rc,
+            }
+        if not self._cannbot_benchmark_ok(perf_data):
+            return {
+                "success": False,
+                "ast_check_ok": True,
+                "correctness_ok": True,
+                "error_type": "benchmark_failed",
+                "verify_result": verify_data,
+                "perf_data": perf_data,
+                "benchmark_return_code": benchmark_rc,
+            }
+        return {
+            "success": True,
+            "ast_check_ok": True,
+            "correctness_ok": True,
+            "error_type": None,
+            "verify_result": verify_data,
+            "perf_data": perf_data,
+            "benchmark_return_code": benchmark_rc,
+        }
 
     @staticmethod
     def _with_error_log_infra_classification(metrics: dict, error_log_path: Path) -> dict:

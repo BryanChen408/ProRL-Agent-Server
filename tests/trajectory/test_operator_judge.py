@@ -38,11 +38,13 @@ if _DEPS:
     class FakeRuntime(BaseRuntime):
         """In-memory runtime: `files` maps remote_path -> content (None/absent => download raises)."""
 
-        def __init__(self, files: dict | None = None, exec_rc: int = 0) -> None:
+        def __init__(self, files: dict | None = None, exec_rc: int = 0, exec_rcs: list[int] | None = None) -> None:
             self.files = files or {}
             self.exec_rc = exec_rc
+            self.exec_rcs = list(exec_rcs or [])
             self.uploaded: list[tuple[str, str]] = []
             self.execs: list[str] = []
+            self.exec_envs: list[dict] = []
 
         @property
         def runtime_id(self) -> str:
@@ -53,7 +55,9 @@ if _DEPS:
 
         async def exec(self, command, *, cwd=None, env=None, timeout_sec=None):
             self.execs.append(command)
-            return ExecResult(stdout="judge ran\n", stderr="", return_code=self.exec_rc)
+            self.exec_envs.append(dict(env or {}))
+            rc = self.exec_rcs.pop(0) if self.exec_rcs else self.exec_rc
+            return ExecResult(stdout="judge ran\n", stderr="", return_code=rc)
 
         async def upload_file(self, local_path: str, remote_path: str) -> None:
             self.uploaded.append((local_path, remote_path))
@@ -268,6 +272,120 @@ def test_missing_submission_artifact_scores_without_judge_runtime():
         ))
     assert res.outcome_reward == 0.2
     assert res.metadata["error_type"] == "submission_missing"
+
+
+def test_cannbot_judge_runs_native_verify_benchmark_without_budget_env():
+    wd = "/opt/workspace/agent_workdir"
+    verify_dir = f"{wd}/judge_out/cannbot_verify"
+    verify_result = f"{verify_dir}/verify_result.json"
+    perf_result = f"{verify_dir}/perf_result.json"
+    ev = OperatorJudgeEvaluator(
+        op_name=OP,
+        judge_mode="cannbot",
+        task_path=f"input/{OP}.py",
+        workdir=wd,
+    )
+    agent = FakeRuntime(files={f"{wd}/output/optimized_code.py": "# impl"})
+    judge = FakeRuntime(files={
+        verify_result: json.dumps({"op_name": OP, "total_cases": 1, "passed_cases": 1, "failed_cases": 0}),
+        perf_result: json.dumps({
+            "op_name": OP,
+            "total_cases": 1,
+            "passed_cases": 1,
+            "failed_cases": 0,
+            "speedup_vs_torch": 2.0,
+        }),
+    })
+    with tempfile.TemporaryDirectory() as d:
+        res = asyncio.run(ev.evaluate(
+            Trajectory(status="COMPLETED", traces=[]),
+            runtime=agent,
+            fresh_eval_runtime=judge,
+            refresh_runtime=True,
+            artifacts_dir=d,
+            env={
+                "POLAR_GEN_PIPELINE_MAX": "3",
+                "POLAR_OPT_PIPELINE_MAX": "1",
+                "POLAR_PIPELINE_PHASE": "generation",
+                "POLAR_NPU_LEASE_POOL": "0-1",
+            },
+            timeout_seconds=None,
+            session_id="s",
+            task_id="t",
+        ))
+
+    assert res.outcome_reward == 1.0
+    assert res.metadata["submission_used"] == "output/optimized_code.py"
+    assert len(judge.execs) == 3
+    assert "stage_verifier_inputs.py" in judge.execs[0]
+    assert "verify.py" in judge.execs[1]
+    assert "benchmark.py" in judge.execs[2]
+    for env in judge.exec_envs:
+        assert "POLAR_GEN_PIPELINE_MAX" not in env
+        assert "POLAR_OPT_PIPELINE_MAX" not in env
+        assert "POLAR_PIPELINE_PHASE" not in env
+        assert env["POLAR_NPU_LEASE_POOL"] == "0-1"
+    metrics = res.metadata["metrics"]
+    assert metrics["success"] is True
+    assert metrics["perf_data"]["speedup_vs_torch"] == 2.0
+
+
+def test_cannbot_judge_verify_failure_does_not_run_benchmark():
+    wd = "/opt/workspace/agent_workdir"
+    verify_dir = f"{wd}/judge_out/cannbot_verify"
+    verify_result = f"{verify_dir}/verify_result.json"
+    ev = OperatorJudgeEvaluator(op_name=OP, judge_mode="cannbot", workdir=wd)
+    agent = FakeRuntime(files={f"{wd}/output/generated_code.py": "# impl"})
+    judge = FakeRuntime(files={
+        verify_result: json.dumps({
+            "op_name": OP,
+            "total_cases": 2,
+            "passed_cases": 1,
+            "failed_cases": 1,
+            "failures": [{"case_idx": 2, "error_type": "AssertionError"}],
+        }),
+    })
+    with tempfile.TemporaryDirectory() as d:
+        res = asyncio.run(ev.evaluate(
+            Trajectory(status="COMPLETED", traces=[]),
+            runtime=agent,
+            fresh_eval_runtime=judge,
+            refresh_runtime=True,
+            artifacts_dir=d,
+            env={},
+            timeout_seconds=None,
+            session_id="s",
+            task_id="t",
+        ))
+
+    assert res.outcome_reward == 0.3
+    assert res.metadata["submission_used"] == "output/generated_code.py"
+    assert len(judge.execs) == 2
+    assert all("benchmark.py" not in command for command in judge.execs)
+    assert res.metadata["error_type"] == "correctness_failed"
+
+
+def test_cannbot_judge_verify_crash_without_json_scores_operator_failure():
+    wd = "/opt/workspace/agent_workdir"
+    ev = OperatorJudgeEvaluator(op_name=OP, judge_mode="cannbot", workdir=wd)
+    agent = FakeRuntime(files={f"{wd}/output/generated_code.py": "# impl"})
+    judge = FakeRuntime(files={}, exec_rcs=[0, 1])
+    with tempfile.TemporaryDirectory() as d:
+        res = asyncio.run(ev.evaluate(
+            Trajectory(status="COMPLETED", traces=[]),
+            runtime=agent,
+            fresh_eval_runtime=judge,
+            refresh_runtime=True,
+            artifacts_dir=d,
+            env={},
+            timeout_seconds=None,
+            session_id="s",
+            task_id="t",
+        ))
+
+    assert res.outcome_reward == 0.2
+    assert res.metadata["error_type"] == "correctness_failed"
+    assert len(judge.execs) == 2
 
 
 if __name__ == "__main__":

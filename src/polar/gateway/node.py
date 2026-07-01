@@ -943,16 +943,26 @@ class GatewayNodeManager:
     ) -> list[tuple[str, str]]:
         config = evaluator_spec.config
         op_name = str(config.get("op_name") or "").strip()
-        submission_path = str(
-            config.get("submission_path") or f"output/submission/{op_name}_impl.py"
-        )
         workdir_value = config.get("workdir")
         workdir = str(workdir_value) if workdir_value else None
 
-        logical_candidates: list[str] = []
-        if submission_path.endswith(".py"):
-            logical_candidates.append(submission_path[:-3] + ".best.py")
-        logical_candidates.append(submission_path)
+        configured_candidates = config.get("submission_candidates")
+        if isinstance(configured_candidates, list) and configured_candidates:
+            logical_candidates = [str(path) for path in configured_candidates if str(path).strip()]
+        elif str(config.get("judge_mode") or "").strip().lower() == "cannbot":
+            logical_candidates = [
+                "output/optimized_code.py",
+                "output/generated_code.py",
+                f"{op_name}_generated.py",
+            ]
+        else:
+            submission_path = str(
+                config.get("submission_path") or f"output/submission/{op_name}_impl.py"
+            )
+            logical_candidates = []
+            if submission_path.endswith(".py"):
+                logical_candidates.append(submission_path[:-3] + ".best.py")
+            logical_candidates.append(submission_path)
         return [
             (path, self._operator_judge_abs_path(path, workdir))
             for path in logical_candidates
