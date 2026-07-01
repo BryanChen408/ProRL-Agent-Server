@@ -185,6 +185,7 @@ Attempt budgets apply to agent-driven verify/benchmark attempts:
 - `benchmark.py` attaches to the current attempt and does not consume another.
 - Generation and optimization have separate limits.
 - Fresh judge does not pass budget environment variables, so it runs clean verify and benchmark without budget counting.
+- When the budget is exhausted, keep the native CANNBot-style single-line error for now, e.g. `Polar pipeline budget exhausted: phase=generation attempt=4>3`. Do not reintroduce the old `triton_eval_pipeline.sh` multi-line hard-stop feedback in the initial CANNBot runtime.
 
 Suggested environment variables:
 
@@ -198,6 +199,10 @@ POLAR_NPU_LOCK_DIR=/tmp/polar_npu_locks
 ```
 
 No environment variables means native CANNBot behavior.
+
+Deferred follow-up:
+
+- Decide whether CANNBot runtime should add stronger agent-facing budget feedback later. Current implementation writes `pipeline_budget_status.json` for watcher/observer and emits only the single-line budget-exhausted error to the agent.
 
 ## Polar Workflow
 
