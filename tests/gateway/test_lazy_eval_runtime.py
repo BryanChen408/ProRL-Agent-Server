@@ -383,6 +383,27 @@ def test_lazy_eval_stops_agent_before_starting_judge_and_uploads_submission(
     assert Path(local_upload).read_text() == "# final kernel"
 
 
+def test_cannbot_lazy_submission_candidates_prefer_phase5_final() -> None:
+    manager = _run_manager()
+    evaluator = EvaluatorSpec(
+        strategy="operator_judge",
+        refresh_runtime=True,
+        config={
+            "op_name": OP,
+            "judge_mode": "cannbot",
+            "workdir": WORKDIR,
+        },
+    )
+
+    candidates = manager._operator_judge_submission_candidates(evaluator)
+
+    assert candidates == [
+        (f"{OP}_generated.py", f"{WORKDIR}/{OP}_generated.py"),
+        ("output/optimized_code.py", f"{WORKDIR}/output/optimized_code.py"),
+        ("output/generated_code.py", f"{WORKDIR}/output/generated_code.py"),
+    ]
+
+
 def test_lazy_fresh_judge_uses_pipeline_lease_spec_after_agent_stop(
     monkeypatch,
     tmp_path: Path,

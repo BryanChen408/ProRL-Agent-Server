@@ -108,15 +108,15 @@ class OperatorJudgeEvaluator(BaseTrajectoryEvaluator):
 
     def _default_submission_path(self) -> str:
         if self.judge_mode == self.CANNBOT_MODE:
-            return "output/optimized_code.py"
+            return f"{self.op_name}_generated.py"
         return f"output/submission/{self.op_name}_impl.py"
 
     def _default_submission_candidates(self) -> list[str]:
         if self.judge_mode == self.CANNBOT_MODE:
             return [
+                f"{self.op_name}_generated.py",
                 "output/optimized_code.py",
                 "output/generated_code.py",
-                f"{self.op_name}_generated.py",
             ]
         candidates: list[str] = []
         if self.submission_path.endswith(".py"):

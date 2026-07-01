@@ -951,9 +951,9 @@ class GatewayNodeManager:
             logical_candidates = [str(path) for path in configured_candidates if str(path).strip()]
         elif str(config.get("judge_mode") or "").strip().lower() == "cannbot":
             logical_candidates = [
+                f"{op_name}_generated.py",
                 "output/optimized_code.py",
                 "output/generated_code.py",
-                f"{op_name}_generated.py",
             ]
         else:
             submission_path = str(
