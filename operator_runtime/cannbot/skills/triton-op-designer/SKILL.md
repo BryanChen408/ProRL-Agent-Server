@@ -143,13 +143,6 @@ argument-hint: >
 
 **直接输出** `sketch op_name { ... }` 格式的算法草图，如果任务描述中包含 hint 标记，在草图末尾附上"设计适用范围"注释（格式见 `hint-mode.md`）。
 
-**架构决策标注**：在 sketch 开头必须添加注释，说明核心架构选择的依据：
-
-```python
-# @architecture_decision("flat-single-kernel", reason="...")
-sketch op_name { ... }
-```
-
 ---
 
 ## 设计原则
