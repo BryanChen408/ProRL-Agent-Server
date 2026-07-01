@@ -254,3 +254,65 @@ def test_completion_parser_still_recognizes_real_pipeline_execution() -> None:
 
     assert len(state.pipeline_calls) == 1
     assert state.pipeline_calls[0].success is True
+
+
+def test_completion_parser_counts_cd_wrapped_pipeline_and_ignores_shell_error() -> None:
+    module = _load_module()
+    record = {
+        "original_request": {
+            "messages": [
+                {
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "tool_use",
+                            "id": "tool-1",
+                            "name": "Bash",
+                            "input": {
+                                "command": "cd /opt/workspace/agent_workdir && bash tools/triton_eval_pipeline.sh output/submission/op_impl.py"
+                            },
+                        }
+                    ],
+                },
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": "tool-1",
+                            "content": "Exit code 1\n[pipeline-budget] phase=generation attempt=1/5\n[triton-eval] Step1 AST",
+                        }
+                    ],
+                },
+                {
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "tool_use",
+                            "id": "tool-2",
+                            "name": "Bash",
+                            "input": {
+                                "command": "bash tools/triton_eval_pipeline.sh output/submission/op_impl.py"
+                            },
+                        }
+                    ],
+                },
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": "tool-2",
+                            "content": "Exit code 127\nbash: tools/triton_eval_pipeline.sh: No such file or directory",
+                        }
+                    ],
+                },
+            ]
+        }
+    }
+
+    state = module.analyze_budget("s1", record)
+
+    assert len(state.pipeline_calls) == 1
+    assert state.generation_calls == 1
+    assert state.pipeline_calls[0].turn == 1

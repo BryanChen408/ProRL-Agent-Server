@@ -683,7 +683,7 @@ class ObserverStore:
             if choices and isinstance(choices, list):
                 msg = (choices[0] or {}).get("message") or {}
                 finish = (choices[0] or {}).get("finish_reason")
-                response_text = _text_block(msg.get("content"))
+                response_text = _text_block(msg.get("content")) or _assistant_reasoning_text(msg)
                 for tc in msg.get("tool_calls") or []:
                     fn = (tc.get("function") or {}).get("name") or tc.get("name")
                     if fn:

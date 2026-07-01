@@ -164,19 +164,34 @@ def _tool_command(tool: dict[str, Any]) -> str:
 
 
 def _is_pipeline_command(command: str) -> bool:
-    first_segment = re.split(r"\s*(?:\||&&|\|\||;)\s*", command.strip(), maxsplit=1)[0]
-    try:
-        parts = shlex.split(first_segment)
-    except ValueError:
+    for segment in re.split(r"\s*(?:\||&&|\|\||;)\s*", command.strip()):
+        try:
+            parts = shlex.split(segment)
+        except ValueError:
+            continue
+        if not parts:
+            continue
+        executable = parts[0].replace("\\", "/")
+        if executable in {"bash", "sh", "/bin/bash", "/bin/sh"} and len(parts) > 1:
+            script = parts[1].replace("\\", "/")
+        else:
+            script = executable
+        if script.endswith(PIPELINE_MARKER) or script.endswith("/triton_eval_pipeline.sh"):
+            return True
+    return False
+
+
+def _is_pipeline_feedback(text: str) -> bool:
+    if not text:
         return False
-    if not parts:
-        return False
-    executable = parts[0].replace("\\", "/")
-    if executable in {"bash", "sh", "/bin/bash", "/bin/sh"} and len(parts) > 1:
-        script = parts[1].replace("\\", "/")
-    else:
-        script = executable
-    return script.endswith(PIPELINE_MARKER) or script.endswith("/triton_eval_pipeline.sh")
+    low = text.lower()
+    return (
+        "[pipeline-budget]" in low
+        or "[triton-eval]" in low
+        or "完整错误已写入" in text
+        or "judge_out/metrics_error.log" in low
+        or "success=true" in low
+    )
 
 
 @dataclass
@@ -222,6 +237,8 @@ def _extract_pipeline_calls(record: dict[str, Any]) -> list[PipelineCall]:
             result = result_by_id.get(tool.get("id"))
             if result is None:
                 remaining.append((tool_turn, tool))
+                continue
+            if not _is_pipeline_feedback(result):
                 continue
             calls.append(
                 PipelineCall(
