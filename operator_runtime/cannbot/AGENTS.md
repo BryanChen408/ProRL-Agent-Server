@@ -66,33 +66,11 @@ input/{op_name}.py
 
 ## Phase 2: 算法设计
 
-本阶段按 `Step 1` → `Step 2`→ `Step 3` 顺序执行，**严禁跳过 Step 1 直接进入 Step 2**。
+本阶段调用 `triton-op-designer` skill 设计算法草图。
 
-### Step 1：前置检查（先执行，产出 precheck.json）
+**传入**：`op_name`、`task_desc`（任务文件完整内容）、`arch`、`user_requirements`（如有）。
 
-1. 检查 `.claude/memory/kernel-opt-{*}.md` 是否存在当前算子的memory文档。**无论是否存在**，都必须产出 `{工作目录}/precheck.json`，记录 `category`、`memory_path`、`memory_exists`、`layer1_constraints_loaded`（存在时逐条原文摘录，不得为空）、`loaded_via`（只允许 `explicit_path`，**禁止自动发现**）。
-2. 若该文件存在，`precheck.json` 中记录的 Layer 1 约束视为本次草图设计的**硬性边界**；若不存在，标记 `new_category` 并在草图通过后新建该文件回填约束。
-
-**门禁**：`precheck.json` 未产出或 `loaded_via≠explicit_path` 时，**禁止进入 Step 2**。
-
-### Step 2：调用 designer skill 设计草图（后执行）
-
-确认 Step 1 门禁通过后，调用 `triton-op-designer` skill 设计算法草图。
-
-**传入**：`op_name`、`task_desc`（任务文件完整内容）、`arch`、`user_requirements`（如有）、`memory_path`（显式路径，必传）。
-
-**产出**：`{工作目录}/sketch.txt`。
-
-### Step 3：Layer 1 合规检查门（强制）
-
-- sketch 产出后，Agent **必须**读取 `precheck.json` 中已锁定的 Layer 1 约束，逐条核对 `sketch.txt` 是否兼容（`new_category` 时跳过核对）。
-- 若发现冲突（如 Layer 1 禁止单 kernel 展平但草图设计为 flat-kernel；Layer 1 要求逐维度处理但草图无维度循环等），**视为 A 类错误**，必须：
-  1. 不进入 Phase 3
-  2. 将冲突点作为 `conductor_suggestion` 反馈给 `triton-op-designer`
-  3. 重新执行 Step 1 与 Step 2，直到草图与 Layer 1 兼容
-- 该检查门最多重试 2 次，若仍无法通过，终止任务并报告"草图架构与历史 Layer 1 约束持续冲突"。
-
-仅执行一次，后续 Phase 3 迭代不再重新设计草图。
+**产出**：`{工作目录}/sketch.txt`。仅执行一次，后续 Phase 3 迭代不再重新设计草图。
 
 
 ---
@@ -103,10 +81,8 @@ input/{op_name}.py
 
 ### Phase 3 入口断言（强制，新增）
 
-- 进入 3.1 之前，**必须**确认以下两项产物存在，否则视为 Phase 2 未完成：
-  1. `{工作目录}/precheck.json`
-  2. `{工作目录}/sketch.txt`
-- 任一缺失 → **禁止进入 3.1**，立即回退执行 Phase 2 Step 1，并在日志记录"Phase 3 入口断言失败：前置检查产物缺失"。
+- 进入 3.1 之前，**必须**确认 `{工作目录}/sketch.txt` 存在，否则视为 Phase 2 未完成。
+- 若缺失 → **禁止进入 3.1**，立即回退执行 Phase 2，并在日志记录"Phase 3 入口断言失败：算法草图缺失"。
 
 
 ### 状态变量
@@ -827,86 +803,3 @@ L1 闸门由 benchmark.py 在 Phase 3.5 / 4.3 启动时执行，不通过即 **e
 - 专业、技术、简洁
 - 每完成一个 Phase 提供一行状态更新
 - 错误时清晰描述 + 建议操作
-
----
-
-## Phase 7: 经验提炼与归档（算子探索成功后强制执行）
-
-⚠️ **本阶段为跨会话复用保障的关键闭环**。算子任务完成后，必须将验证过的设计决策和性能数据沉淀到项目级 memory，供后续同类算子复用。
-
-### 触发条件
-
-必须同时满足：
-
-1. `summary.json` 中 `"success": true`
-2. `passed_cases == total_cases > 0`
-3. `speedup_vs_torch` 为有限正数（几何平均有效）
-
-### 执行步骤
-
-**Step 1: 人工提炼 Layer 1-3（Agent 必须完成）**
-
-从本次探索中提取可复用经验，按**四层隔离模型**写入对应类别文件：
-
-- **Layer 1（设计约束）**：硬性必须遵守的规则（如 "constant 模式必须拆分为 fill + copy"）
-- **Layer 2（算法骨架）**：核心并行策略的抽象描述（如 grid 分配模式、分支决策树）
-- **Layer 3（关键技巧）**：5-15 行已验证有效的代码片段，标注"可替代方向"
-
-目标文件：`.claude/memory/kernel-opt-{category}.md`
-
-若该算子类别**首次归档**，先初始化经验文件模板（手动创建或使用项目既有工具）。
-
-```bash
-python3 utils/exp_init.py {category} --op-name {op_name}
-```
-
-**Step 2: 物理归档 Layer 4（自动工具）**
-
-运行归档命令：
-
-```bash
-python3 utils/exp_archive.py {work_dir} --create-experience
-```
-
-该命令自动完成：
-
-- 校验归档条件（success、精度全过、加速比有效）
-- 复制 `{op_name}_generated.py` → `archive/{category}/{category}_v{N}_{date}.py`
-- 复制 `report.md` → `archive/{category}/{category}_v{N}_{date}_report.md`
-- 复制 `summary.json` → `archive/{category}/{category}_v{N}_{date}_summary.json`
-- 版本号 N 按 archive 目录已有版本自动递增
-- 更新 `MEMORY.md` 索引
-- `--create-experience` 若该类别尚无经验文件，自动基于模板创建
-
-**Step 3: 规范验证（强制）**
-
-运行检查命令：
-
-```bash
-python3 utils/exp_check.py
-```
-
-要求：**0 失败、0 警告**。任何失败项必须在结束会话前修复。
-
-### 四层隔离复用规则（跨会话）
-
-| 层级    | 内容               | 受众                                            | 访问规则                                      |
-| ------- | ------------------ | ----------------------------------------------- | --------------------------------------------- |
-| Layer 1 | 设计约束、禁止事项 | `triton-op-designer`                            | 必须作为 negative_prompt 遵守                 |
-| Layer 2 | 算法骨架、并行策略 | `triton-op-designer`                            | 仅作参考方向，输出必须是全新草图              |
-| Layer 3 | 关键代码片段       | `triton-op-coding` / `triton-latency-optimizer` | 技巧可参考但不可复制，变量名/结构必须重新设计 |
-| Layer 4 | 完整历史代码路径   | **默认对 Agent 不可见**                         | 仅在用户明确指令对比时才可读取                |
-
-### 关键保障机制
-
-1. **统一存储**：所有经验文件位于项目根目录 `.claude/memory/` 下，**所有会话共享同一套 memory**
-2. **自动发现**：`triton-op-designer` skill 在 Phase 2 必须查询并读取对应类别的 `kernel-opt-{category}.md`（仅 Layer 1-3）
-3. **防复制**：Prompt 中必须包含"历史经验仅供启发，禁止直接复制代码结构"
-4. **多样性保护**：若新实现采用与历史完全不同的思路且通过验证，将该思路**并列记录**到经验文件，而非覆盖旧经验
-
-### 失败处理
-
-| 场景                        | 处理                                                                   |
-| --------------------------- | ---------------------------------------------------------------------- |
-| summary.json 不满足归档条件 | 禁止归档，在 report.md 中标注"未达归档标准"                            |
-| 经验文件已存在              | 仅更新 MEMORY.md 和 archive；Layer 1-3 由 Agent 手动追加到已有经验文件 |

@@ -22,7 +22,6 @@ Expected profile shape:
 ```yaml
 operator_runtime:
   workflow: cannbot
-  root: operator_runtime/cannbot
 
   budget:
     generation_max: 5
@@ -39,7 +38,6 @@ Legacy runtime can use the same shape:
 ```yaml
 operator_runtime:
   workflow: legacy
-  root: operator_runtime/legacy
 
   budget:
     generation_max: 5
@@ -54,14 +52,15 @@ operator_runtime:
 Runtime semantics:
 
 - `workflow`: selects the operator runtime implementation. For Polar CANNBot, this should be `cannbot`.
-- `root`: runtime asset root relative to the Polar repository.
 - `budget`: generation and optimization verify/benchmark attempt limits.
 - `npu_lease`: card pool and lock directory for verifier/benchmark execution.
+
+The concrete runtime asset path is derived by Polar from the selected `workflow`
+and the committed repository layout. It should not be repeated in the profile.
 
 The runtime layer may translate this profile into environment variables for tool execution:
 
 ```text
-POLAR_OPERATOR_RUNTIME=cannbot
 POLAR_GEN_PIPELINE_MAX=5
 POLAR_OPT_PIPELINE_MAX=3
 POLAR_NPU_LEASE_POOL=8,9,10,11,12,13,14,15
@@ -190,7 +189,6 @@ Attempt budgets apply to agent-driven verify/benchmark attempts:
 Suggested environment variables:
 
 ```text
-POLAR_BUDGET_DIR=...
 POLAR_PIPELINE_PHASE=generation|optimization
 POLAR_GEN_PIPELINE_MAX=5
 POLAR_OPT_PIPELINE_MAX=3
@@ -198,7 +196,12 @@ POLAR_NPU_LEASE_POOL=8,9,10,11
 POLAR_NPU_LOCK_DIR=/tmp/polar_npu_locks
 ```
 
-No environment variables means native CANNBot behavior.
+Budget state and `pipeline_budget_status.json` use the session `ARTIFACTS_DIR`
+that Polar already injects. No environment variables means native CANNBot
+behavior.
+
+`POLAR_PIPELINE_PHASE` only selects which budget counter receives the current
+verify attempt. It is not a runtime selector and does not encode any path.
 
 Deferred follow-up:
 

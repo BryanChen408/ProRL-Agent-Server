@@ -62,7 +62,7 @@ def _budget_limit(phase: str) -> int | None:
 
 
 def _budget_dir() -> Path | None:
-    raw = os.environ.get("POLAR_BUDGET_DIR") or os.environ.get("ARTIFACTS_DIR") or os.environ.get("POLAR_ARTIFACTS_DIR")
+    raw = os.environ.get("ARTIFACTS_DIR")
     if not raw:
         return None
     return Path(raw)
@@ -72,9 +72,6 @@ def _status_path(budget_dir: Path) -> Path:
     explicit = os.environ.get("POLAR_PIPELINE_STATUS_FILE")
     if explicit:
         return Path(explicit)
-    artifacts_dir = os.environ.get("ARTIFACTS_DIR") or os.environ.get("POLAR_ARTIFACTS_DIR")
-    if artifacts_dir:
-        return Path(artifacts_dir) / PIPELINE_STATUS_NAME
     return budget_dir / PIPELINE_STATUS_NAME
 
 

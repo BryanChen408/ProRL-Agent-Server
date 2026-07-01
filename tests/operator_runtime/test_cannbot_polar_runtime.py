@@ -38,7 +38,7 @@ def test_phase_from_impl_defaults_to_generation_or_optimization():
 
 def test_verify_budget_allows_limit_and_blocks_next_attempt(tmp_path, monkeypatch):
     runtime = load_runtime()
-    monkeypatch.setenv("POLAR_BUDGET_DIR", str(tmp_path))
+    monkeypatch.setenv("ARTIFACTS_DIR", str(tmp_path))
     monkeypatch.setenv("POLAR_GEN_PIPELINE_MAX", "1")
     monkeypatch.setenv("SESSION_ID", "s1")
 
