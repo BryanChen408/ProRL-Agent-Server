@@ -256,6 +256,64 @@ def test_completion_parser_still_recognizes_real_pipeline_execution() -> None:
     assert state.pipeline_calls[0].success is True
 
 
+def test_completion_parser_recognizes_cannbot_verify_execution() -> None:
+    module = _load_module()
+    record = {
+        "original_request": {
+            "messages": [
+                {
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "tool_use",
+                            "id": "verify",
+                            "name": "Bash",
+                            "input": {
+                                "command": (
+                                    "python3 /opt/canonical/skills/triton-op-verifier/scripts/verify.py "
+                                    "--op_name op --verify_dir output/iter_0/verify"
+                                )
+                            },
+                        },
+                        {
+                            "type": "tool_use",
+                            "id": "bench",
+                            "name": "Bash",
+                            "input": {
+                                "command": (
+                                    "python3 /opt/canonical/skills/triton-op-verifier/scripts/benchmark.py "
+                                    "--op_name op --verify_dir output/iter_0/verify"
+                                )
+                            },
+                        },
+                    ],
+                },
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": "verify",
+                            "content": '验证结果已保存到: output/iter_0/verify/verify_result.json\n{"total_cases":1,"passed_cases":1}',
+                        },
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": "bench",
+                            "content": '结果已保存到: output/iter_0/perf_result.json\n{"speedup_vs_torch":2.0}',
+                        },
+                    ],
+                },
+            ]
+        }
+    }
+
+    state = module.analyze_budget("s1", record)
+
+    assert len(state.pipeline_calls) == 1
+    assert state.pipeline_calls[0].command.endswith("--verify_dir output/iter_0/verify")
+    assert state.generation_calls == 1
+
+
 def test_completion_parser_counts_cd_wrapped_pipeline_and_ignores_shell_error() -> None:
     module = _load_module()
     record = {

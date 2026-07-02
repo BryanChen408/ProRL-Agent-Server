@@ -188,6 +188,102 @@ def test_analyze_session_messages_recognizes_cached_success_case_insensitively()
     assert summary["pipeline_stage_counts"]["profiling"]["attempts"] == 1
 
 
+def test_analyze_session_messages_recognizes_cannbot_verify_and_benchmark() -> None:
+    module = _load_module()
+    verify_json = json.dumps(
+        {"total_cases": 2, "passed_cases": 2, "failed_cases": 0},
+        ensure_ascii=False,
+    )
+    perf_json = json.dumps(
+        {"total_cases": 2, "passed_cases": 2, "failed_cases": 0, "speedup_vs_torch": 3.5},
+        ensure_ascii=False,
+    )
+    payload = {
+        "original_request": {
+            "messages": [
+                {
+                    "role": "user",
+                    "content": (
+                        "Implement the Ascend Triton operator `safe_op`.\n"
+                        "The prepared reference task is at `input/safe_op.py`.\n"
+                        "Follow `./CLAUDE.md` for the workflow."
+                    ),
+                },
+                {
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "tool_use",
+                            "id": "verify",
+                            "name": "Bash",
+                            "input": {
+                                "command": (
+                                    "python3 /opt/canonical/skills/triton-op-verifier/scripts/verify.py "
+                                    "--op_name safe_op --verify_dir output/iter_0/verify"
+                                )
+                            },
+                        }
+                    ],
+                },
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": "verify",
+                            "content": f"验证结果已保存到: output/iter_0/verify/verify_result.json\n{verify_json}",
+                        }
+                    ],
+                },
+                {
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "tool_use",
+                            "id": "bench",
+                            "name": "Bash",
+                            "input": {
+                                "command": (
+                                    "python3 /opt/canonical/skills/triton-op-verifier/scripts/benchmark.py "
+                                    "--op_name safe_op --verify_dir output/iter_0/verify"
+                                )
+                            },
+                        }
+                    ],
+                },
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": "bench",
+                            "content": f"性能测试结果:\n结果已保存到: output/iter_0/perf_result.json\n{perf_json}",
+                        }
+                    ],
+                },
+            ]
+        },
+        "response": {"choices": [{"message": {"content": "", "tool_calls": []}}]},
+    }
+
+    summary = module.analyze_session_messages(payload)
+
+    assert summary["request"]["task_prompt_is_operator"] is True
+    assert summary["pipeline_runs"] == 1
+    assert summary["validation"]["success"] == 2
+    assert summary["pipeline_stage_counts"]["precision"]["attempts"] == 1
+    assert summary["pipeline_stage_counts"]["precision"]["pass"] == 1
+    assert summary["pipeline_stage_counts"]["profiling"]["attempts"] == 1
+    assert summary["pipeline_stage_counts"]["profiling"]["pass"] == 1
+    verify_detail, benchmark_detail = summary["pipeline_runs_detail"]
+    assert verify_detail["kind"] == "cannbot_verify"
+    assert verify_detail["budget_counted"] is True
+    assert verify_detail["status"] == "verify_success"
+    assert benchmark_detail["kind"] == "cannbot_benchmark"
+    assert benchmark_detail["budget_counted"] is False
+    assert benchmark_detail["status"] == "success"
+
+
 def test_analyze_session_messages_audits_forbidden_write_tools() -> None:
     module = _load_module()
     payload = {
@@ -685,3 +781,55 @@ def test_observer_aggregates_historical_quality_when_latest_completion_lacks_his
     assert detail["summary_source"] == "disk_aggregate"
     assert detail["summary"]["pipeline_runs"] == 1
     assert detail["summary"]["pipeline_runs_detail"][0]["status"] == "success"
+
+
+def test_observer_lists_cannbot_artifacts(tmp_path: Path) -> None:
+    module = _load_module()
+    session = (
+        tmp_path
+        / "rollout_results"
+        / "task_run-a-polar-op-0-0"
+        / "sessions"
+        / "sk-cannbot"
+    )
+    (session / "completions").mkdir(parents=True)
+    (session / "completions" / "0001.json").write_text(
+        json.dumps({"original_request": {"messages": [{"role": "user", "content": "task"}]}}),
+        encoding="utf-8",
+    )
+    artifacts = session / "artifacts"
+    artifacts.mkdir()
+    (artifacts / "verify_result.json").write_text(
+        json.dumps({"total_cases": 2, "passed_cases": 2, "failed_cases": 0}),
+        encoding="utf-8",
+    )
+    (artifacts / "perf_result.json").write_text(
+        json.dumps({"total_cases": 2, "passed_cases": 2, "failed_cases": 0, "speedup_vs_torch": 4.25}),
+        encoding="utf-8",
+    )
+    output = session / "output"
+    output.mkdir()
+    (output / "generated_code.py").write_text("class ModelNew: pass\n", encoding="utf-8")
+
+    store = module.ObserverStore(tmp_path, "http://127.0.0.1:1")
+    store.gateway_health = lambda: {"status": "ok"}
+    store.gateway_sessions = lambda: []
+    store.device_map = lambda: {}
+
+    summary = store.session_summary()
+    quality = summary["sessions"][0]["quality"]
+
+    assert quality["cannbot_artifacts"] == {
+        "verify_result": 1,
+        "perf_result": 1,
+        "generated_code": 1,
+        "optimized_code": 0,
+    }
+
+    detail = store.get_session("sk-cannbot")
+    assert detail is not None
+    by_kind = {item["kind"]: item for item in detail["cannbot_artifacts"]}
+    assert by_kind["verify_result"]["success"] is True
+    assert by_kind["verify_result"]["passed_cases"] == 2
+    assert by_kind["perf_result"]["speedup_vs_torch"] == 4.25
+    assert by_kind["generated_code"]["path"] == "output/generated_code.py"

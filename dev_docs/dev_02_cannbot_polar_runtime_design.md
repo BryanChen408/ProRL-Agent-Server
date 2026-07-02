@@ -422,6 +422,20 @@ Rationale:
 - Watcher and observer should describe actual session state, not become another
   source of pipeline policy.
 
+Implemented notes:
+
+- Watcher cancellation remains driven by `pipeline_budget_status.json`; legacy
+  completion parsing is only a fallback diagnostic and now recognizes CANNBot
+  `verify.py` attempts.
+- Observer keeps the legacy `pipeline_runs` API field for compatibility, but
+  the UI labels it as validation attempts. CANNBot `verify.py` is budget-counted;
+  CANNBot `benchmark.py` contributes profiling status without consuming another
+  attempt.
+- Observer lists CANNBot trusted artifacts from the session directory, including
+  `verify_result*.json`, `perf_result*.json`, `generated_code.py`, and
+  `optimized_code.py`. This is display-only; reward still comes from fresh judge
+  artifacts.
+
 ### Step 7: Cleanup Gates
 
 Planned action:

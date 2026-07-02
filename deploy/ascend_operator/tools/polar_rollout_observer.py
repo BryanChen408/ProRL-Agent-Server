@@ -163,6 +163,66 @@ def _safe_json_load(path: Path) -> dict[str, Any] | None:
         return None
 
 
+def _rel_path(path: Path, root: Path) -> str:
+    try:
+        return path.relative_to(root).as_posix()
+    except Exception:
+        return path.as_posix()
+
+
+def _json_int(data: dict[str, Any] | None, key: str) -> int | None:
+    if not isinstance(data, dict):
+        return None
+    try:
+        return int(data.get(key))
+    except Exception:
+        return None
+
+
+def _json_float(data: dict[str, Any] | None, key: str) -> float | None:
+    if not isinstance(data, dict):
+        return None
+    try:
+        value = data.get(key)
+        return None if value is None else float(value)
+    except Exception:
+        return None
+
+
+def _artifact_summary(path: Path, root: Path) -> dict[str, Any]:
+    data = _safe_json_load(path) if path.suffix == ".json" else None
+    total = _json_int(data, "total_cases")
+    passed = _json_int(data, "passed_cases")
+    failed = _json_int(data, "failed_cases")
+    speedup = _json_float(data, "speedup_vs_torch")
+    kind = "file"
+    name = path.name
+    low = name.lower()
+    if "verify_result" in low:
+        kind = "verify_result"
+    elif "perf_result" in low or "benchmark" in low:
+        kind = "perf_result"
+    elif name == "generated_code.py":
+        kind = "generated_code"
+    elif name == "optimized_code.py":
+        kind = "optimized_code"
+    stat = path.stat()
+    return {
+        "path": _rel_path(path, root),
+        "name": name,
+        "kind": kind,
+        "size": stat.st_size,
+        "mtime": stat.st_mtime,
+        "time": _format_time(stat.st_mtime),
+        "total_cases": total,
+        "passed_cases": passed,
+        "failed_cases": failed,
+        "speedup_vs_torch": speedup,
+        "success": bool(total and passed == total and (failed is None or failed == 0)),
+        "snippet": _snippet(_read_text(path, limit=2000), 700) if path.suffix in {".json", ".py", ".log", ".txt"} else "",
+    }
+
+
 def _extract_shallow_json_value(text: str, key: str) -> str | None:
     pattern = re.compile(rf'"{re.escape(key)}"\s*:\s*"((?:\\.|[^"\\])*)"')
     match = pattern.search(text)
@@ -372,6 +432,38 @@ class ObserverStore:
         self._json_cache[key] = (sig[0], sig[1], result)
         return result
 
+    def cannbot_artifacts(self, session: SessionPath | None) -> list[dict[str, Any]]:
+        if session is None or not session.path.is_dir():
+            return []
+        candidates: list[Path] = []
+        for base in (
+            session.path / "artifacts",
+            session.path / "eval_runtime" / "artifacts",
+            session.path / "output",
+        ):
+            if not base.is_dir():
+                continue
+            for pattern in (
+                "**/verify_result*.json",
+                "**/perf_result*.json",
+                "**/optimized_perf_result.json",
+                "**/baseline_perf_result.json",
+                "**/generated_code.py",
+                "**/optimized_code.py",
+            ):
+                candidates.extend(path for path in base.glob(pattern) if path.is_file())
+        unique = sorted(set(candidates), key=lambda path: path.stat().st_mtime, reverse=True)
+        return [_artifact_summary(path, session.path) for path in unique[:80]]
+
+    @staticmethod
+    def cannbot_artifact_counts(artifacts: list[dict[str, Any]]) -> dict[str, int]:
+        counts = {"verify_result": 0, "perf_result": 0, "generated_code": 0, "optimized_code": 0}
+        for item in artifacts:
+            kind = str(item.get("kind") or "")
+            if kind in counts:
+                counts[kind] += 1
+        return counts
+
     @staticmethod
     def classify_session_status(
         active_status: Any,
@@ -505,6 +597,8 @@ class ObserverStore:
             latest_mtime = stat.st_mtime if stat else _latest_activity_mtime(active)
             live_metrics = metrics_by_id.get(session.session_id, {})
             summary = self.aggregate_completion_summary(files[-2:]) if files else analyze_session_messages({})
+            cannbot_artifacts = self.cannbot_artifacts(session)
+            cannbot_artifact_counts = self.cannbot_artifact_counts(cannbot_artifacts)
             status = self.classify_session_status(
                 active.get("status"),
                 has_files=bool(files),
@@ -565,6 +659,7 @@ class ObserverStore:
                         "abnormal_termination": summary["abnormal_termination"],
                         "abnormal_reasons": summary["abnormal_reasons"],
                         "abnormal_events": summary["abnormal_events"],
+                        "cannbot_artifacts": cannbot_artifact_counts,
                     },
                 }
             )
@@ -623,6 +718,7 @@ class ObserverStore:
                         "abnormal_termination": summary["abnormal_termination"],
                         "abnormal_reasons": summary["abnormal_reasons"],
                         "abnormal_events": summary["abnormal_events"],
+                        "cannbot_artifacts": self.cannbot_artifact_counts([]),
                     },
                 }
             )
@@ -653,6 +749,7 @@ class ObserverStore:
         if not found and not active and not gateway_records and not live_metrics:
             return None
         files = self.completion_files(found) if found else []
+        cannbot_artifacts = self.cannbot_artifacts(found)
         latest_file = files[-1] if files else None
         latest_disk_data = self.load_json(latest_file) if latest_file else None
         latest_data = gateway_records[-1] if gateway_records else latest_disk_data
@@ -734,6 +831,8 @@ class ObserverStore:
             "timeout_last_time": timeout_info.get("last_time"),
             "timeout_last_line": timeout_info.get("last_line"),
             "summary": summary,
+            "cannbot_artifacts": cannbot_artifacts,
+            "cannbot_artifact_counts": self.cannbot_artifact_counts(cannbot_artifacts),
             "completion_metrics": (
                 (active or {}).get("completion_metrics")
                 or live_metrics.get("completion_metrics")
@@ -804,6 +903,8 @@ def _tool_results(content: Any) -> list[dict[str, Any]]:
 
 def _is_operator_task_text(text: str) -> bool:
     if "Implement a Triton operator" in text:
+        return True
+    if "Implement the Ascend Triton operator" in text and "input/" in text:
         return True
     if "reference task is at src/" in text and "output/submission/" in text:
         return True
@@ -987,6 +1088,23 @@ def _classify_tool_result(text: str) -> dict[str, Any]:
         labels.append("verify_fail")
     if "benchmark failed" in low or "性能测试失败" in text:
         labels.append("benchmark_fail")
+    if "polar pipeline budget exhausted" in low or "pipeline budget exhausted" in low:
+        labels.append("budget_exhausted")
+    if "verify_result.json" in low or "验证结果已保存到" in text:
+        total = _extract_shallow_json_number(text, "total_cases")
+        passed = _extract_shallow_json_number(text, "passed_cases")
+        failed = _extract_shallow_json_number(text, "failed_cases")
+        if total is not None and passed is not None and int(total) > 0 and int(passed) == int(total):
+            labels.append("verify_success")
+        elif (failed is not None and int(failed) > 0) or "验证失败" in text:
+            labels.append("verify_fail")
+        else:
+            labels.append("verify")
+    if "perf_result.json" in low or "性能测试结果" in text or "speedup_vs_torch" in low:
+        if "性能测试失败" in text or "benchmark failed" in low or "verify gate" in low or "l1 闸门" in low:
+            labels.append("benchmark_fail")
+        elif "success" not in labels:
+            labels.append("benchmark_success")
     if "unsupportedlanguageconstruct" in low:
         labels.append("unsupported_construct")
     if "cbuf" in low:
@@ -1001,6 +1119,9 @@ PROTECTED_PATH_PREFIXES = ("tools/", ".agents/skills/")
 PROTECTED_EXACT_PATHS = ("CLAUDE.md", "./CLAUDE.md")
 SUBMISSION_PATH_RE = re.compile(r"(?:^|/)output/submission/[^/\s]+_impl\.py$")
 DOC_DRIFT_TERMS = ("总结", "点评", "评价", "改写", "重写", "完整", "全面", "实用", "详细", "涵盖", "包括", "提供", "介绍")
+LEGACY_PIPELINE_LABEL = "legacy_pipeline"
+CANNBOT_VERIFY_LABEL = "cannbot_verify"
+CANNBOT_BENCHMARK_LABEL = "cannbot_benchmark"
 RAW_TOOL_CALL_TEXT_RE = re.compile(
     r'(<\s*/?\s*(?:tool_use|tool_call|toolcall|tool_use_error)\b|'
     r'"type"\s*:\s*"(?:tool_use|tool_result)"|'
@@ -1032,6 +1153,10 @@ def _looks_like_raw_tool_call_text(text: str) -> bool:
 
 
 def _is_pipeline_command(command: str) -> bool:
+    return _validation_command_kind(command) is not None
+
+
+def _validation_command_kind(command: str) -> str | None:
     for segment in re.split(r"\s*(?:\||&&|\|\||;)\s*", command.strip()):
         try:
             parts = shlex.split(segment)
@@ -1042,11 +1167,17 @@ def _is_pipeline_command(command: str) -> bool:
         executable = parts[0].replace("\\", "/")
         if executable in {"bash", "sh", "/bin/bash", "/bin/sh"} and len(parts) > 1:
             script = parts[1].replace("\\", "/")
+        elif executable in {"python", "python3", "/usr/bin/python", "/usr/bin/python3"} and len(parts) > 1:
+            script = parts[1].replace("\\", "/")
         else:
             script = executable
         if script.endswith("tools/triton_eval_pipeline.sh") or script.endswith("/triton_eval_pipeline.sh"):
-            return True
-    return False
+            return LEGACY_PIPELINE_LABEL
+        if script.endswith("verify.py") or script.endswith("/verify.py"):
+            return CANNBOT_VERIFY_LABEL
+        if script.endswith("benchmark.py") or script.endswith("/benchmark.py"):
+            return CANNBOT_BENCHMARK_LABEL
+    return None
 
 
 def _is_submission_path(path: str) -> bool:
@@ -1113,8 +1244,17 @@ def _bash_readonly_mutation(command: str) -> dict[str, str] | None:
 
 
 def _pipeline_status(labels: list[str], text: str) -> str:
-    if "success" in labels and "verify_fail" not in labels and "ast_fail" not in labels and "benchmark_fail" not in labels:
+    if "budget_exhausted" in labels:
+        return "budget_exhausted"
+    if (
+        ("success" in labels or "benchmark_success" in labels)
+        and "verify_fail" not in labels
+        and "ast_fail" not in labels
+        and "benchmark_fail" not in labels
+    ):
         return "success"
+    if "verify_success" in labels and "verify_fail" not in labels:
+        return "verify_success"
     if "ast_fail" in labels:
         return "ast_fail"
     if "verify_fail" in labels:
@@ -1134,7 +1274,12 @@ def _is_pipeline_feedback(text: str) -> bool:
     low = text.lower()
     return (
         "[pipeline-budget]" in low
+        or "polar pipeline budget exhausted" in low
         or "[triton-eval]" in low
+        or "verify_result.json" in low
+        or "perf_result.json" in low
+        or "验证结果已保存到" in text
+        or "性能测试结果" in text
         or "完整错误已写入" in text
         or "judge_out/metrics_error.log" in low
         or "success=true" in low
@@ -1145,32 +1290,39 @@ def _pipeline_stage_status(labels: list[str], text: str) -> dict[str, str]:
     low = text.lower()
     precision_started = (
         "[triton-eval] step2 verify" in low
+        or "verify_result.json" in low
+        or "验证结果已保存到" in text
         or "verify failed" in low
         or "verify_fail" in low
         or "数值验证失败" in text
+        or "验证失败" in text
     )
     profiling_started = (
         "[triton-eval] step3" in low
+        or "perf_result.json" in low
         or "benchmark" in low
         or "性能测试" in text
+        or "speedup_vs_torch" in low
     )
 
-    if "ast_fail" in labels:
+    if "budget_exhausted" in labels:
+        precision = "fail" if precision_started else "not_reached"
+    elif "ast_fail" in labels:
         precision = "not_reached"
     elif "verify_fail" in labels:
         precision = "fail"
-    elif profiling_started or "success" in labels or "benchmark_fail" in labels:
+    elif profiling_started or "success" in labels or "verify_success" in labels or "benchmark_success" in labels or "benchmark_fail" in labels:
         precision = "pass"
     elif precision_started:
         precision = "unknown"
     else:
         precision = "not_reached"
 
-    if "ast_fail" in labels or "verify_fail" in labels:
+    if "ast_fail" in labels or "verify_fail" in labels or "budget_exhausted" in labels:
         profiling = "not_reached"
     elif "benchmark_fail" in labels:
         profiling = "fail"
-    elif "success" in labels:
+    elif "success" in labels or "benchmark_success" in labels:
         profiling = "pass"
     elif profiling_started:
         profiling = "unknown"
@@ -1221,6 +1373,7 @@ def analyze_session_messages(data: dict[str, Any]) -> dict[str, Any]:
     pipeline_commands: list[dict[str, Any]] = []
     pipeline_runs_detail: list[dict[str, Any]] = []
     pipeline_command_errors: list[dict[str, Any]] = []
+    validation_events = 0
     submission_writes = 0
     submission_write_turns: list[int] = []
     first_submission_write_turn: int | None = None
@@ -1286,37 +1439,80 @@ def analyze_session_messages(data: dict[str, Any]) -> dict[str, Any]:
                             "command": _snippet(target, 800),
                         }
                     )
-            if name == "Bash" and _is_pipeline_command(target):
+            if name == "Bash":
+                validation_kind = _validation_command_kind(target)
+            else:
+                validation_kind = None
+            if name == "Bash" and validation_kind is not None:
                 result = result_by_id.get(tool.get("id")) or {}
                 result_text = str(result.get("content") or "")
                 if not _is_pipeline_feedback(result_text):
-                    pipeline_command_errors.append(
+                    budget_counted = validation_kind in {LEGACY_PIPELINE_LABEL, CANNBOT_VERIFY_LABEL}
+                    validation_events += 1
+                    event_index = validation_events
+                    if budget_counted:
+                        pipeline_runs += 1
+                        if first_pipeline_turn is None:
+                            first_pipeline_turn = turn["index"]
+                    pipeline_commands.append({"turn": turn["index"], "command": target})
+                    if result_text:
+                        pipeline_command_errors.append(
+                            {
+                                "turn": turn["index"],
+                                "tool_id": tool.get("id"),
+                                "command": target,
+                                "kind": validation_kind,
+                                "is_error": bool(result.get("is_error")),
+                                "result_chars": len(result_text),
+                                "result_snippet": _snippet(result_text, 1200),
+                            }
+                        )
+                    pipeline_runs_detail.append(
                         {
+                            "index": event_index,
                             "turn": turn["index"],
                             "tool_id": tool.get("id"),
                             "command": target,
+                            "kind": validation_kind,
+                            "budget_counted": budget_counted,
+                            "labels": [],
+                            "status": "pending" if not result_text else "command_error",
+                            "precision_status": "not_reached",
+                            "profiling_status": "not_reached",
                             "is_error": bool(result.get("is_error")),
                             "result_chars": len(result_text),
                             "result_snippet": _snippet(result_text, 1200),
+                            "result": result_text,
                         }
                     )
                     continue
-                pipeline_runs += 1
-                if first_pipeline_turn is None:
-                    first_pipeline_turn = turn["index"]
+                budget_counted = validation_kind in {LEGACY_PIPELINE_LABEL, CANNBOT_VERIFY_LABEL}
+                validation_events += 1
+                event_index = validation_events
+                if budget_counted:
+                    pipeline_runs += 1
+                    if first_pipeline_turn is None:
+                        first_pipeline_turn = turn["index"]
                 pipeline_commands.append({"turn": turn["index"], "command": target})
                 cls = _classify_tool_result(result_text)
                 stage = _pipeline_stage_status(cls["labels"], result_text)
+                if validation_kind == CANNBOT_VERIFY_LABEL:
+                    stage["profiling"] = "not_reached"
+                elif validation_kind == CANNBOT_BENCHMARK_LABEL:
+                    stage["precision"] = "not_reached"
                 _update_pipeline_stage_counts(pipeline_stage_counts, stage)
                 for label in cls["labels"]:
-                    if label in validation:
-                        validation[label] += 1
+                    validation_label = "success" if label in {"verify_success", "benchmark_success"} else label
+                    if validation_label in validation:
+                        validation[validation_label] += 1
                 pipeline_runs_detail.append(
                     {
-                        "index": pipeline_runs,
+                        "index": event_index,
                         "turn": turn["index"],
                         "tool_id": tool.get("id"),
                         "command": target,
+                        "kind": validation_kind,
+                        "budget_counted": budget_counted,
                         "labels": cls["labels"],
                         "status": _pipeline_status(cls["labels"], result_text),
                         "precision_status": stage["precision"],
@@ -2007,6 +2203,7 @@ HTML_PAGE = r"""<!doctype html>
         const precision = stages.precision || {};
         const profiling = stages.profiling || {};
         const cm = s.completion_metrics || {};
+        const artifacts = s.quality?.cannbot_artifacts || {};
         const timeoutCount = Number(s.timeout_count || 0);
         const timeoutBadge = timeoutCount ? `<span class="badge red">timeouts ${esc(timeoutCount)}${s.timeout_last_time ? ' · ' + esc(s.timeout_last_time) : ''}</span>` : '';
         const abnormalReasons = s.quality?.abnormal_reasons || [];
@@ -2024,6 +2221,8 @@ HTML_PAGE = r"""<!doctype html>
 	            <span class="badge ${docDrift ? 'amber':''}">doc drift ${esc(docDrift)}</span>
 	            <span class="badge ${precision.pass ? 'green':(precision.fail ? 'amber':'')}">precision ${esc(precision.pass || 0)}/${esc(precision.attempts || 0)}</span>
             <span class="badge ${profiling.pass ? 'green':(profiling.fail ? 'amber':'')}">profile ${esc(profiling.pass || 0)}/${esc(profiling.attempts || 0)}</span>
+            <span class="badge ${artifacts.verify_result ? 'green':''}">verify json ${esc(artifacts.verify_result || 0)}</span>
+            <span class="badge ${artifacts.perf_result ? 'green':''}">perf json ${esc(artifacts.perf_result || 0)}</span>
             <span class="badge ${val.verify_fail ? 'amber':''}">verify ${esc(val.verify_fail || 0)}</span>
             <span class="badge ${forbidden ? 'red':''}">forbidden writes ${esc(forbidden)}</span>
             <span class="badge ${readonlyMut ? 'red':''}">readonly mutations ${esc(readonlyMut)}</span>
@@ -2044,6 +2243,7 @@ HTML_PAGE = r"""<!doctype html>
       const forbiddenWrites = sum.forbidden_writes || [];
       const readonlyMutations = sum.readonly_mutation_attempts || [];
       const abnormalEvents = sum.abnormal_events || [];
+	      const cannbotArtifacts = detail.cannbot_artifacts || [];
 	      const stages = sum.pipeline_stage_counts || {};
 	      const precision = stages.precision || {};
 	      const profiling = stages.profiling || {};
@@ -2112,6 +2312,16 @@ HTML_PAGE = r"""<!doctype html>
           </div>
         </details>`;
       }).join('');
+      const artifactRows = cannbotArtifacts.map((item, idx) => {
+        const cls = item.success ? 'green' : (item.kind === 'verify_result' || item.kind === 'perf_result' ? 'amber' : 'blue');
+        const summary = item.kind === 'verify_result' || item.kind === 'perf_result'
+          ? `cases ${item.passed_cases ?? '-'} / ${item.total_cases ?? '-'} · failed ${item.failed_cases ?? '-'} · speedup ${item.speedup_vs_torch ?? '-'}`
+          : `${Math.round((item.size || 0) / 1024)}KB`;
+        return `<details data-key="cannbot-artifact-${esc(idx)}">
+          <summary><span class="badge ${cls}">${esc(item.kind || 'artifact')}</span> <span class="mono">${esc(item.path || '')}</span> <span class="small">${esc(summary)} · ${esc(item.time || '')}</span></summary>
+          ${item.snippet ? `<pre>${esc(item.snippet)}</pre>` : '<span class="small">No preview available</span>'}
+        </details>`;
+      }).join('');
       const turns = (sum.turns || []).slice().reverse().map(t => {
         const tools = (t.tool_uses || []).map(tool => {
           const name = tool.name || '';
@@ -2137,7 +2347,7 @@ HTML_PAGE = r"""<!doctype html>
           ${metric('LLM requests', fmtNum(cm.request_count), `latest #${cm.latest?.sequence || '-'}`)}
           ${metric('prompt / decode tokens', `${fmtNum(cm.prompt_tokens)} / ${fmtNum(cm.completion_tokens)}`, `cached prompt ${fmtNum(cm.cached_prompt_tokens)}`)}
 	          ${metric('decode throughput', `${fmtRate(cm.completion_tokens_per_second)} tok/s`, `mean latency ${fmtNum(cm.latency_ms_mean, 1)} ms`)}
-	          ${metric('pipeline runs', sum.pipeline_runs || 0, 'budget-counted tools/triton_eval_pipeline.sh feedbacks')}
+	          ${metric('pipeline attempts', sum.pipeline_runs || 0, 'budget-counted verify/pipeline feedbacks')}
 	          ${metric('submission writes', sum.submission_writes || 0, `before first pipeline ${sum.writes_before_first_pipeline || 0}`)}
 	          ${metric('workflow', workflowViolation ? 'violation' : 'ok', `first write turn ${firstWrite} · first pipeline turn ${firstPipeline}`)}
 	          ${metric('abnormal', sum.abnormal_termination ? 'yes' : 'no', (sum.abnormal_reasons || []).join(', ') || '-')}
@@ -2168,7 +2378,8 @@ HTML_PAGE = r"""<!doctype html>
             <div class="panel"><h2>Readonly Audit</h2><div class="panel-body"><p class="hint">标记模型尝试写入 tools/、.agents/skills/ 或 CLAUDE.md 的行为；只读 mount 是硬边界，这里只做审计展示。</p><h3>Forbidden Writes</h3>${forbiddenWriteRows || '<span class="small">No forbidden write tool call found</span>'}<h3>Readonly Mutation Attempts</h3>${readonlyMutationRows || '<span class="small">No readonly mutation bash command found</span>'}</div></div>
             <div class="panel"><h2>Abnormal Termination</h2><div class="panel-body"><p class="hint">Observer-only 标记：这些 session 仍可能已进入训练，但不应在审查界面里显示成正常 completed。</p>${abnormalRows || '<span class="small">No abnormal termination marker found</span>'}</div></div>
             <div class="panel"><h2>Skill Usage</h2><div class="panel-body"><p class="hint">列出实际调用的 Skill 工具和读取过的 skill reference。正常轨迹通常至少会看到 designer/coding/verifier，优化阶段才会看到 optimizer。</p><h3>Skill Calls</h3>${skillCalls || '<span class="small">No Skill tool call found</span>'}<h3>Reference Reads</h3><div class="files">${skillReads || '<span class="small">No skill reference read found</span>'}</div></div></div>
-	            <div class="panel"><h2>Pipeline Runs</h2><div class="panel-body"><p class="hint">只统计产生 pipeline feedback 的 tools/triton_eval_pipeline.sh 调用；路径错误等 Bash 失败单独列在 Command Errors。</p>${pipelineDetails || '<span class="small">No pipeline run found yet</span>'}<h3>Command Errors</h3>${pipelineCommandErrors || '<span class="small">No pipeline command error found</span>'}</div></div>
+	            <div class="panel"><h2>Validation Attempts</h2><div class="panel-body"><p class="hint">统计可信验证路径的工具反馈：legacy eval pipeline 或 CANNBot verify.py/benchmark.py。CANNBot benchmark 只计入 profiling，不额外消耗 budget attempt。</p>${pipelineDetails || '<span class="small">No validation attempt found yet</span>'}<h3>Command Errors</h3>${pipelineCommandErrors || '<span class="small">No validation command error found</span>'}</div></div>
+            <div class="panel"><h2>CANNBot Artifacts</h2><div class="panel-body"><p class="hint">只展示可信 verifier/benchmark 与最终代码产物，reward 仍由 fresh judge 读取自己的 verify_result.json / perf_result.json。</p>${artifactRows || '<span class="small">No CANNBot artifact found yet</span>'}</div></div>
             <div class="panel"><h2>Timeline</h2><div class="panel-body"><p class="hint">按倒序展示每一轮模型输出、工具调用和工具返回。这里用来看 CC 是否按设计、编码、验证、迭代的流程推进。</p></div>${turns || '<div class="timeline-empty">No turns parsed yet.</div>'}</div>
           </div>
           <div>

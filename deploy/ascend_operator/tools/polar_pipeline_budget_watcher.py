@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-"""Cancel Polar sessions that keep running the operator eval pipeline too long.
+"""Cancel Polar sessions that exceed their operator validation budget.
 
 The watcher intentionally stays outside Polar's critical path. It reads the same
 gateway completion stream as the rollout observer and uses DELETE /sessions/{id}
-only after the actual tools/triton_eval_pipeline.sh call count exceeds the
-configured budget.
+only after session artifacts report an exhausted validation budget. Completion
+parsing remains as a legacy diagnostic fallback; cancellation is driven by
+pipeline_budget_status.json.
 """
 
 from __future__ import annotations
@@ -174,9 +175,13 @@ def _is_pipeline_command(command: str) -> bool:
         executable = parts[0].replace("\\", "/")
         if executable in {"bash", "sh", "/bin/bash", "/bin/sh"} and len(parts) > 1:
             script = parts[1].replace("\\", "/")
+        elif executable in {"python", "python3", "/usr/bin/python", "/usr/bin/python3"} and len(parts) > 1:
+            script = parts[1].replace("\\", "/")
         else:
             script = executable
         if script.endswith(PIPELINE_MARKER) or script.endswith("/triton_eval_pipeline.sh"):
+            return True
+        if script.endswith("verify.py") or script.endswith("/verify.py"):
             return True
     return False
 
@@ -187,7 +192,10 @@ def _is_pipeline_feedback(text: str) -> bool:
     low = text.lower()
     return (
         "[pipeline-budget]" in low
+        or "polar pipeline budget exhausted" in low
         or "[triton-eval]" in low
+        or "verify_result.json" in low
+        or "验证结果已保存到" in text
         or "完整错误已写入" in text
         or "judge_out/metrics_error.log" in low
         or "success=true" in low
