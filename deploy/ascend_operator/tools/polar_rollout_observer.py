@@ -599,10 +599,11 @@ class ObserverStore:
             summary = self.aggregate_completion_summary(files[-2:]) if files else analyze_session_messages({})
             cannbot_artifacts = self.cannbot_artifacts(session)
             cannbot_artifact_counts = self.cannbot_artifact_counts(cannbot_artifacts)
-            abort_traces = sum(
-                1 for _f in files
-                if _response_finish_reason(self.load_json(_f) or {}) == "abort"
-            )
+            # Cheap O(1): only the already-loaded latest completion's finish_reason.
+            # (Scanning ALL completion files per /api/state killed the observer at
+            # scale — 15k+ large JSONs reloaded every request.) This counts sessions
+            # whose latest turn ended in abort, which is the common abort case.
+            abort_traces = 1 if _response_finish_reason(latest_data or {}) == "abort" else 0
             status = self.classify_session_status(
                 active.get("status"),
                 has_files=bool(files),
