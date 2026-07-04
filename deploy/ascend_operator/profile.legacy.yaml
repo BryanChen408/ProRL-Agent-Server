@@ -1,0 +1,53 @@
+service:
+  bind_host: 0.0.0.0
+  rollout_url: http://80.48.5.88:8080
+  gateway_url: http://80.48.5.88:8100
+  sglang_router_url: http://80.48.5.52:4077
+
+paths:
+  output_dir: output/ascend_operator
+  operator_runtime_dir: operator_runtime
+
+operator_runtime:
+  workflow: legacy
+  budget:
+    generation_max: 5
+    optimization_max: 2
+    interval_seconds: 2
+  npu_lease:
+    enabled: true
+    pool: [8, 9, 10, 11, 12, 13, 14, 15]
+    lock_dir: /dev/shm/npu-locks
+
+observer:
+  host: 0.0.0.0
+  port: 18088
+
+gateway:
+  node_id: ascend-node-01
+  max_init_workers: 16
+  max_run_workers: 64
+  max_postrun_workers: 64
+  completion_persistence:
+    enabled: true
+    max_field_bytes: 67108864
+    queue_size: 4096
+
+operator:
+  profile: operator_npu
+  timeout_seconds: 7200.0
+  runtime:
+    image: sandbox:v1
+    network: host
+    workdir: /opt/workspace/agent_workdir
+  agent:
+    model_name: claude-opus-4-5
+    max_turns: 100
+    max_output_tokens: 12288
+    inference_timeout_ms: 14400000
+    disallowed_tools: "AskUserQuestion CronCreate CronDelete CronList EnterPlanMode EnterWorktree ExitPlanMode ExitWorktree NotebookEdit ScheduleWakeup TaskCreate TaskGet TaskList TaskOutput TaskStop TaskUpdate TodoWrite WebFetch WebSearch"
+    append_system_prompt: "Follow ./CLAUDE.md. The user instruction provides the concrete operator name and src/output paths. Do not ask user questions in this non-interactive run."
+  evaluator:
+    judge_command: "bash tools/triton_eval_pipeline.sh --op_name {op_name} --impl output/submission/{op_name}_impl.py --task src/{op_name}.py --out_dir judge_out"
+    submission_path: output/submission/{op_name}_impl.py
+    metrics_path: judge_out/metrics.json

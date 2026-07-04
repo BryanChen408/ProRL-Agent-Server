@@ -599,6 +599,10 @@ class ObserverStore:
             summary = self.aggregate_completion_summary(files[-2:]) if files else analyze_session_messages({})
             cannbot_artifacts = self.cannbot_artifacts(session)
             cannbot_artifact_counts = self.cannbot_artifact_counts(cannbot_artifacts)
+            abort_traces = sum(
+                1 for _f in files
+                if _response_finish_reason(self.load_json(_f) or {}) == "abort"
+            )
             status = self.classify_session_status(
                 active.get("status"),
                 has_files=bool(files),
@@ -628,6 +632,7 @@ class ObserverStore:
                     "idle_seconds": active.get("idle_seconds"),
                     "completion_count": active.get("completion_count") or len(files),
                     "completion_files": len(files),
+                    "abort_traces": abort_traces,
                     "latest_completion": latest_file.name if latest_file else None,
                     "latest_mtime": latest_mtime,
                     "latest_time": _format_time(latest_mtime),
@@ -2132,7 +2137,8 @@ HTML_PAGE = r"""<!doctype html>
       const ok = h.status === 'ok';
       $('health').className = `badge ${ok ? 'green':'red'}`;
       const counts = h.active_status_counts || {};
-      $('health').textContent = ok ? `gateway ok · running ${counts.RUNNING || 0}` : `gateway error`;
+      const abortN = (state.sessions || []).reduce((n, s) => n + (s.abort_traces || 0), 0);
+      $('health').textContent = ok ? `gateway ok · running ${counts.RUNNING || 0} · abort ${abortN}` : `gateway error`;
       $('root').textContent = state.root;
       $('updated').textContent = `updated ${new Date().toLocaleTimeString()}`;
     }

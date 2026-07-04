@@ -226,48 +226,41 @@ def _extract_pipeline_calls(record: dict[str, Any]) -> list[PipelineCall]:
     messages = req.get("messages") if isinstance(req.get("messages"), list) else []
     current = _response_message(record)
     calls: list[PipelineCall] = []
-    pending_tools: list[tuple[int, dict[str, Any]]] = []
     turn = 0
 
-    def append_matching_results(results: list[dict[str, Any]]) -> None:
-        nonlocal pending_tools
-        result_by_id = {
-            item.get("tool_use_id"): str(item.get("content") or "")
-            for item in results
-            if item.get("tool_use_id")
-        }
-        remaining: list[tuple[int, dict[str, Any]]] = []
-        for tool_turn, tool in pending_tools:
-            command = _tool_command(tool)
-            if not _is_pipeline_command(command):
-                remaining.append((tool_turn, tool))
-                continue
-            result = result_by_id.get(tool.get("id"))
-            if result is None:
-                remaining.append((tool_turn, tool))
-                continue
-            if not _is_pipeline_feedback(result):
-                continue
-            calls.append(
-                PipelineCall(
-                    index=len(calls) + 1,
-                    turn=tool_turn,
-                    command=command,
-                    result=result,
-                    success=bool(SUCCESS_RE.search(result)),
-                    completed=True,
-                )
-            )
-        pending_tools = remaining
-
+    # Count a call the moment the assistant issues a pipeline command (command
+    # match) -- independent of whether its tool-result is recognised -- so
+    # runaway / bypassed calls cannot escape the count. The result, when present,
+    # only marks success (used for the gen/opt split).
+    pending: dict[str, PipelineCall] = {}
     for msg in messages:
         role = msg.get("role")
         content = msg.get("content")
         if role == "assistant":
             turn += 1
-            pending_tools = [(turn, tool) for tool in _tool_uses(content)]
+            for tool in _tool_uses(content):
+                command = _tool_command(tool)
+                if not _is_pipeline_command(command):
+                    continue
+                call = PipelineCall(
+                    index=len(calls) + 1,
+                    turn=turn,
+                    command=command,
+                    result="",
+                    success=False,
+                    completed=True,
+                )
+                calls.append(call)
+                tool_id = tool.get("id")
+                if tool_id:
+                    pending[str(tool_id)] = call
         elif role == "user":
-            append_matching_results(_tool_results(content))
+            for item in _tool_results(content):
+                call = pending.pop(str(item.get("tool_use_id") or ""), None)
+                if call is not None:
+                    result = str(item.get("content") or "")
+                    call.result = result
+                    call.success = bool(SUCCESS_RE.search(result))
 
     if current:
         turn += 1
@@ -454,8 +447,13 @@ def run_once(args: argparse.Namespace, cancelled: set[str]) -> None:
     for session_id in ids:
         if session_id in cancelled:
             continue
-        status = _load_pipeline_status(args.root, session_id, args.session_base_dir)
-        cancel, reason = should_cancel_from_status(status)
+        # Bypass-proof: count pipeline invocations from the conversation
+        # transcript (analyze_budget/should_cancel), not the agent-resettable
+        # status file. Kills the runaway that the file counter never caught.
+        record = latest_completion_record(args.gateway, args.root, session_id, args.timeout)
+        if record is None:
+            continue
+        cancel, reason = should_cancel(analyze_budget(session_id, record), args.gen_max, args.opt_max)
         if not cancel:
             if args.verbose:
                 _log(f"ok {session_id}: {reason}", args.log_file)
