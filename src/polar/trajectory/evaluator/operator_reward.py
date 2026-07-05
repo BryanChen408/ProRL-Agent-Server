@@ -65,7 +65,7 @@ def reward_from_metrics(metrics: dict) -> float:
     """Authoritative ladder (mirrors openhands_agent._reward_from_metrics).
 
     not success:  correctness_ok -> 0.4 | ast_check_ok -> 0.3 | else -> 0.2
-    success:      min(0.5 + 0.5 * speedup/2, 1.0)   # 0.5 (no speedup) .. 1.0 (>=2x)
+    success:      0.75 + 0.25*tanh(ln speedup)   # 0.5(<-0x) .. 0.75(1x hold) .. ->1.0(soft, no cap)
     """
     if not bool(metrics.get("success", False)):
         if bool(metrics.get("correctness_ok", False)):
@@ -77,7 +77,12 @@ def reward_from_metrics(metrics: dict) -> float:
         speedup = float((metrics.get("perf_data") or {}).get("speedup_vs_torch", 1.0))
     except (TypeError, ValueError):
         speedup = float("nan")  # non-numeric -> judge_outcome's finiteness gate treats it as infra
-    return min(0.5 + 0.5 * (speedup / 2.0), 1.0)
+    # Soft-saturating speedup: 0.75 + 0.25*tanh(ln speedup), written as the algebraic
+    # identity (s^2-1)/(s^2+1) (no math import, s=0 -> 0.5, no overflow on huge s).
+    # Continuous (no hard 2x cap) so equal-speedup success clones don't collapse to a
+    # single 1.0 -> zero-std GRPO dead group; bounded (->1.0) so tail speedups (e.g. a
+    # 700x measurement artifact) can't dominate the correctness ladder (0.3->0.75=+0.45).
+    return 0.75 + 0.25 * (speedup * speedup - 1.0) / (speedup * speedup + 1.0)
 
 
 def is_infra_failure(metrics: dict | None) -> bool:
@@ -124,8 +129,8 @@ def test_ladder_not_success():
 def test_ladder_success_speedup():
     assert reward_from_metrics({"success": True, "perf_data": {"speedup_vs_torch": 0.0}}) == 0.5
     assert reward_from_metrics({"success": True, "perf_data": {"speedup_vs_torch": 1.0}}) == 0.75
-    assert reward_from_metrics({"success": True, "perf_data": {"speedup_vs_torch": 2.0}}) == 1.0
-    assert reward_from_metrics({"success": True, "perf_data": {"speedup_vs_torch": 9.0}}) == 1.0  # capped
+    assert round(reward_from_metrics({"success": True, "perf_data": {"speedup_vs_torch": 2.0}}), 4) == 0.9  # 2x no longer hard-capped
+    assert round(reward_from_metrics({"success": True, "perf_data": {"speedup_vs_torch": 9.0}}), 4) == 0.9939  # soft-saturating toward 1.0
     assert reward_from_metrics({"success": True, "perf_data": None}) == 0.75  # default speedup 1.0
 
 
@@ -165,7 +170,7 @@ def test_judge_outcome_operator_failure_scored():
 
 def test_judge_outcome_success():
     o = judge_outcome({"success": True, "perf_data": {"speedup_vs_torch": 2.0}, "error_type": None})
-    assert o["status"] == "COMPLETED" and o["reward"] == 1.0 and o["retry"] is False
+    assert o["status"] == "COMPLETED" and round(o["reward"], 4) == 0.9 and o["retry"] is False
 
 
 def test_malformed_speedup_is_infra_not_nan_reward():
