@@ -417,6 +417,17 @@ class PrefixMergingBuilder(BaseTrajectoryBuilder):
         merged["chain_segment_start"] = segment_start
         merged["source_completion_ids"] = [completion.completion_id for completion in chain]
         merged["kept_completion_count"] = kept_completion_count
+        # Option-B signal (dev_07): prefix-merging keeps only the LAST completion's
+        # finish_reason (see build below), which hides a MID-chain ``abort`` (a
+        # weight-update cut-off that then resumed on new weights = a mixed-policy
+        # trajectory). Preserve whether ANY raw completion in this chain aborted so
+        # the rllm adapter can mark the whole session non-trainable.
+        def _raw_finish_reason(c: CompletionRecord) -> str | None:
+            resp = c.response if isinstance(c.response, dict) else {}
+            choices = resp.get("choices")
+            first = choices[0] if isinstance(choices, list) and choices and isinstance(choices[0], dict) else {}
+            return first.get("finish_reason")
+        merged["had_abort"] = any(_raw_finish_reason(c) == "abort" for c in chain)
         if break_reason:
             merged["break_reason"] = break_reason
         return merged
