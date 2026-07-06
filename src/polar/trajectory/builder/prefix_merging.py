@@ -53,6 +53,18 @@ logger = logging.getLogger(__name__)
 _NATURAL_STOP_REASONS = frozenset({"stop", "tool_calls", "stop_sequence"})
 
 
+def _completion_finish_reason(completion: CompletionRecord) -> str | None:
+    """Raw per-completion finish_reason from a completion record (pre-merge).
+
+    dev_09: any completion with finish_reason=="abort" (weight-update cutoff)
+    marks the WHOLE session non-trainable via trajectory.status="ERROR".
+    """
+    resp = completion.response if isinstance(completion.response, dict) else {}
+    choices = resp.get("choices")
+    first = choices[0] if isinstance(choices, list) and choices and isinstance(choices[0], dict) else {}
+    return first.get("finish_reason")
+
+
 @dataclass(frozen=True, slots=True)
 class _FinalizedChain:
     trace: Trace
@@ -163,8 +175,16 @@ class PrefixMergingBuilder(BaseTrajectoryBuilder):
             else:
                 stats["chains_reconstructed_full"] += 1
 
+        # dev_09: any raw completion aborted (weight-update cutoff) -> whole session
+        # is non-trainable. status="ERROR" propagates via gateway (SessionResult.status
+        # = trajectory.status) to slime, which only trains status=="COMPLETED" sessions
+        # -> the aborted session is dropped and oversampling backfills a clean one.
+        session_had_abort = any(
+            _completion_finish_reason(c) == "abort" for c in session.completions
+        )
         return Trajectory(
-            status="COMPLETED",
+            status="ERROR" if session_had_abort else "COMPLETED",
+            error="aborted generation (weight-update cutoff)" if session_had_abort else None,
             metadata={
                 "builder": "prefix_merging",
                 "session_id": session.session_id,
@@ -417,17 +437,9 @@ class PrefixMergingBuilder(BaseTrajectoryBuilder):
         merged["chain_segment_start"] = segment_start
         merged["source_completion_ids"] = [completion.completion_id for completion in chain]
         merged["kept_completion_count"] = kept_completion_count
-        # Option-B signal (dev_07): prefix-merging keeps only the LAST completion's
-        # finish_reason (see build below), which hides a MID-chain ``abort`` (a
-        # weight-update cut-off that then resumed on new weights = a mixed-policy
-        # trajectory). Preserve whether ANY raw completion in this chain aborted so
-        # the rllm adapter can mark the whole session non-trainable.
-        def _raw_finish_reason(c: CompletionRecord) -> str | None:
-            resp = c.response if isinstance(c.response, dict) else {}
-            choices = resp.get("choices")
-            first = choices[0] if isinstance(choices, list) and choices and isinstance(choices[0], dict) else {}
-            return first.get("finish_reason")
-        merged["had_abort"] = any(_raw_finish_reason(c) == "abort" for c in chain)
+        # dev_09: had_abort removed — abort is now handled session-level via
+        # trajectory.status="ERROR" in build(), not via this per-trace metadata
+        # flag (which was dropped in Polar->slime serialization, never took effect).
         if break_reason:
             merged["break_reason"] = break_reason
         return merged
