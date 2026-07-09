@@ -2,7 +2,7 @@ service:
   bind_host: 0.0.0.0
   rollout_url: http://80.48.5.88:8080
   gateway_url: http://80.48.5.88:8100
-  sglang_router_url: http://80.48.5.64:4077
+  sglang_router_url: http://80.48.5.52:4077
 
 paths:
   output_dir: output/ascend_operator
@@ -10,8 +10,8 @@ paths:
 operator_runtime:
   workflow: cannbot
   budget:
-    generation_max: 3
-    optimization_max: 1
+    generation_max: 5
+    optimization_max: 2
     interval_seconds: 2
   npu_lease:
     enabled: true
@@ -34,14 +34,14 @@ gateway:
 
 operator:
   profile: operator_npu
-  timeout_seconds: 3600.0
+  timeout_seconds: 7200.0
   runtime:
     image: sandbox:v1
     network: host
     workdir: /opt/workspace/agent_workdir
   agent:
     model_name: claude-opus-4-5
-    max_turns: 45
+    max_turns: 100
     max_output_tokens: 32768
     inference_timeout_ms: 14400000
     disallowed_tools: "AskUserQuestion CronCreate CronDelete CronList EnterPlanMode EnterWorktree ExitPlanMode ExitWorktree NotebookEdit ScheduleWakeup TaskCreate TaskGet TaskList TaskOutput TaskStop TaskUpdate TodoWrite WebFetch WebSearch"

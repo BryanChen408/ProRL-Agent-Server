@@ -42,7 +42,7 @@ operator:
     workdir: /opt/workspace/agent_workdir
   agent:
     model_name: claude-opus-4-5
-    max_turns: 100
+    max_turns: 50
     max_output_tokens: 12288
     inference_timeout_ms: 14400000
     disallowed_tools: "AskUserQuestion CronCreate CronDelete CronList EnterPlanMode EnterWorktree ExitPlanMode ExitWorktree NotebookEdit ScheduleWakeup TaskCreate TaskGet TaskList TaskOutput TaskStop TaskUpdate TodoWrite WebFetch WebSearch"

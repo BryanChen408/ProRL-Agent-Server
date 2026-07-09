@@ -18,6 +18,7 @@ import argparse
 import ast
 import json
 import re
+import os
 from pathlib import Path
 from typing import Any
 
@@ -37,7 +38,25 @@ META_KEYS = (
 )
 
 
-def _instruction(op: str) -> str:
+def _instruction(op: str, *, workflow: str = "cannbot") -> str:
+    if workflow == "legacy":
+        task = f"src/{op}.py"
+        impl = f"output/submission/{op}_impl.py"
+        pipeline = f"bash tools/triton_eval_pipeline.sh --op_name {op} --impl {impl} --task {task} --out_dir judge_out"
+        return (
+            f"Implement a Triton operator for Ascend NPU. The reference task is at {task}. "
+            f"Write your implementation as class ModelNew to {impl}.\n\n"
+            "Use this fixed validation entry to judge pass/fail:\n"
+            f"  {pipeline}\n\n"
+            "You may inspect the task, relevant skill references, and fixed-pipeline error logs "
+            "to localize issues. Small read-only probes against the reference task are allowed "
+            "when they clarify semantics, shapes, dtypes, broadcasting, strides, or boundary behavior. "
+            "Only modify the submission implementation. Do not modify task files, tools, verifier scripts, "
+            "or pipeline parameters. Do not use custom tests, torch.allclose, probe output, or manual "
+            "inspection as a substitute for fixed-pipeline pass/fail."
+        )
+    if workflow != "cannbot":
+        raise ValueError(f"unsupported workflow: {workflow!r}")
     return (
         f"Implement the Ascend Triton operator `{op}`.\n"
         f"The prepared reference task is at `input/{op}.py`.\n"
@@ -82,7 +101,7 @@ def _metadata(extra_info: dict[str, Any], op: str) -> dict[str, Any]:
     return meta
 
 
-def build_assets(*, parquet: Path, out_dir: Path, limit: int = 0) -> int:
+def build_assets(*, parquet: Path, out_dir: Path, limit: int = 0, workflow: str = "cannbot") -> int:
     import pandas as pd
 
     df = pd.read_parquet(parquet)
@@ -117,7 +136,7 @@ def build_assets(*, parquet: Path, out_dir: Path, limit: int = 0) -> int:
             task_path.write_text(code if code.endswith("\n") else code + "\n", encoding="utf-8")
 
             payload = {
-                "prompt": [{"role": "user", "content": _instruction(op)}],
+                "prompt": [{"role": "user", "content": _instruction(op, workflow=workflow)}],
                 "label": op,
                 "metadata": _metadata(extra_info, op),
             }
@@ -126,6 +145,7 @@ def build_assets(*, parquet: Path, out_dir: Path, limit: int = 0) -> int:
             code_lens.append(len(code))
             op_names.append(op)
 
+    print(f"[gen] workflow -> {workflow}")
     print(f"[gen] parquet rows={len(df)} -> emitted={rows_out} skipped={len(skipped)}")
     print(f"[gen] jsonl    -> {jsonl_path}")
     print(f"[gen] tasks    -> {tasks_dir}/<op_name>.py  ({rows_out} files)")
@@ -153,8 +173,14 @@ def main() -> int:
         default=default_out,
     )
     parser.add_argument("--limit", type=int, default=0, help="0 = all rows")
+    parser.add_argument(
+        "--workflow",
+        choices=("cannbot", "legacy"),
+        default=os.environ.get("POLAR_OPERATOR_WORKFLOW", "cannbot"),
+        help="Prompt/runtime contract to emit.",
+    )
     args = parser.parse_args()
-    build_assets(parquet=args.parquet, out_dir=args.out_dir, limit=args.limit)
+    build_assets(parquet=args.parquet, out_dir=args.out_dir, limit=args.limit, workflow=args.workflow)
     return 0
 
 

@@ -72,6 +72,25 @@ def test_instruction_delegates_workflow_to_claude_md():
     assert "Do NOT edit anything under tools/" not in text
 
 
+def test_instruction_legacy_uses_lightweight_fixed_pipeline_prompt():
+    module = _load_module()
+
+    text = module._instruction("kernelbench_l1_19_19_ReLU", workflow="legacy")
+
+    assert "src/kernelbench_l1_19_19_ReLU.py" in text
+    assert "output/submission/kernelbench_l1_19_19_ReLU_impl.py" in text
+    assert "bash tools/triton_eval_pipeline.sh" in text
+    assert "--op_name kernelbench_l1_19_19_ReLU" in text
+    assert "--task src/kernelbench_l1_19_19_ReLU.py" in text
+    assert "Use this fixed validation entry to judge pass/fail" in text
+    assert "Small read-only probes" in text
+    assert "Do not modify task files, tools, verifier scripts" in text
+    assert "custom tests, torch.allclose, probe output" in text
+    assert "第一次 Write/Edit/MultiEdit" not in text
+    assert "禁止第二次 Write/Edit/MultiEdit" not in text
+    assert "input/kernelbench_l1_19_19_ReLU.py" not in text
+
+
 def test_build_assets_limit_writes_jsonl_and_task_file(monkeypatch, tmp_path: Path):
     module = _load_module()
 
@@ -196,3 +215,32 @@ def test_refresh_operator_task_prompts_rewrites_existing_jsonl(tmp_path: Path):
     assert "tools/triton_eval_pipeline.sh" not in prompt
     assert "output/submission" not in prompt
     assert "--json" not in prompt
+
+
+def test_refresh_operator_task_prompts_can_emit_legacy_prompt(tmp_path: Path):
+    refresh = _load_refresh_module()
+
+    path = tmp_path / "operator_tasks.jsonl"
+    path.write_text(
+        json.dumps(
+            {
+                "prompt": [{"role": "user", "content": "old prompt"}],
+                "label": "safe_op",
+                "metadata": {"op_name": "safe_op"},
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    result = refresh.refresh_prompts(path, backup=False, workflow="legacy")
+    rows = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+    prompt = rows[0]["prompt"][0]["content"]
+
+    assert result["workflow"] == "legacy"
+    assert result["changed"] == 1
+    assert "src/safe_op.py" in prompt
+    assert "output/submission/safe_op_impl.py" in prompt
+    assert "tools/triton_eval_pipeline.sh" in prompt
+    assert "Small read-only probes" in prompt
+    assert "第一次 Write/Edit/MultiEdit" not in prompt

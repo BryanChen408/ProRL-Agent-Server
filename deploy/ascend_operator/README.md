@@ -49,6 +49,13 @@ python3 deploy/ascend_operator/gen_op_assets.py   --parquet /path/to/kernelbench
 OPERATOR_TASKS_DIR=output/ascend_operator/op_assets/op_tasks OPERATOR_TASK_JSONL=output/ascend_operator/op_assets/operator_tasks.jsonl bash deploy/ascend_operator/preflight.sh
 ```
 
+For the legacy skills profile, emit or refresh the original strict prompt contract:
+
+```bash
+python3 deploy/ascend_operator/gen_op_assets.py --workflow legacy --parquet /path/to/kernelbench.parquet
+python3 deploy/ascend_operator/tools/refresh_operator_task_prompts.py --workflow legacy <dataset>/operator_tasks.jsonl
+```
+
 ## Start Polar
 
 Single-host default:
@@ -72,6 +79,8 @@ Use another profile when needed:
 ```bash
 POLAR_PROFILE=/path/to/profile.yaml bash deploy/ascend_operator/restart_polar_host.sh
 ```
+
+Use `deploy/ascend_operator/profile.legacy.yaml` to run the old skills runtime.
 
 The launcher materializes the profile to:
 

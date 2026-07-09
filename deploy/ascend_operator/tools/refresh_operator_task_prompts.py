@@ -32,7 +32,7 @@ def _sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
-def refresh_prompts(path: Path, *, backup: bool = True) -> dict[str, Any]:
+def refresh_prompts(path: Path, *, backup: bool = True, workflow: str = "cannbot") -> dict[str, Any]:
     module = _load_gen_module()
     old_hash = _sha256(path)
     backup_path = None
@@ -62,7 +62,7 @@ def refresh_prompts(path: Path, *, backup: bool = True) -> dict[str, Any]:
                     prompt[0] = {"role": "user"}
                 prompt[0]["role"] = prompt[0].get("role") or "user"
                 before = prompt[0].get("content")
-                after = module._instruction(op)
+                after = module._instruction(op, workflow=workflow)
                 if before != after:
                     changed += 1
                 prompt[0]["content"] = after
@@ -81,6 +81,7 @@ def refresh_prompts(path: Path, *, backup: bool = True) -> dict[str, Any]:
         "backup": str(backup_path) if backup_path else None,
         "rows": rows,
         "changed": changed,
+        "workflow": workflow,
         "old_sha256": old_hash,
         "new_sha256": _sha256(path),
     }
@@ -90,8 +91,9 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("jsonl", type=Path, help="Existing operator_tasks.jsonl to rewrite in place.")
     parser.add_argument("--no-backup", action="store_true")
+    parser.add_argument("--workflow", choices=("cannbot", "legacy"), default="cannbot")
     args = parser.parse_args(argv)
-    result = refresh_prompts(args.jsonl, backup=not args.no_backup)
+    result = refresh_prompts(args.jsonl, backup=not args.no_backup, workflow=args.workflow)
     print(json.dumps(result, ensure_ascii=False, indent=2))
     return 0
 
