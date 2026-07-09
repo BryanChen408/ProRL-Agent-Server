@@ -104,13 +104,13 @@ class ModelNew(nn.Module):
 
 ## 与 verifier 的强制交接
 
-本 skill 每轮只生成或修复一个候选实现。候选实现写入 `output/submission/{op_name}_impl.py` 后，必须立即停止本轮代码生成，把控制权交给 `triton-op-verifier`，由它运行固定入口：
+本 skill 每轮生成或修复一个候选实现。一次修复批次内可以连续执行多次 `Write` / `Edit` / `MultiEdit`，但只能修改 `output/submission/{op_name}_impl.py`，并且不得运行任何自写测试。修复批次结束后，把控制权交给 `triton-op-verifier`，由它运行固定入口：
 
 ```bash
 bash tools/triton_eval_pipeline.sh --op_name {op_name} --impl output/submission/{op_name}_impl.py --task src/{op_name}.py --out_dir judge_out
 ```
 
-在看到本轮固定入口输出之前，禁止再次 `Write` / `Edit` / `MultiEdit` `output/submission/{op_name}_impl.py`。不要连续写多版候选代码来“自我改进”；下一次修改必须基于 verifier 的本轮输出或 `judge_out/metrics_error.log`。
+在看到本轮固定入口输出之前，禁止开始下一轮修复批次。不要通过自写 Python/Triton 测试、手动 import/forward 比较、`torch.allclose`、临时 kernel 微测、环境/API introspection 或 inspect verifier 内部实现来自我验证；下一轮修改必须基于固定入口输出或 `judge_out/metrics_error.log`。
 
 阅读 reference 文档后，只提取与当前实现/修复有关的规则。禁止总结、点评、改写 reference 文档，也不要把任务转成文档审阅。
 
