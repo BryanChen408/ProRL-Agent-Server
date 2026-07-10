@@ -288,8 +288,11 @@ def main() -> int:
                     "max_init_workers": int(gateway.get("max_init_workers", 8)),
                     "max_run_workers": int(gateway.get("max_run_workers", 32)),
                     "max_postrun_workers": int(gateway.get("max_postrun_workers", 32)),
-                    "model_served": "",
-                    "inference": {"engine": "sglang", "base_url": router_url},
+                    "model_served": str(service.get("model_served", "")),
+                    "inference": {
+                        "engine": str(service.get("inference_engine", "sglang")),
+                        "base_url": router_url,
+                    },
                 }
             ],
         },
