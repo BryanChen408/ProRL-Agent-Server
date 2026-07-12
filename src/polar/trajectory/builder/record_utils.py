@@ -70,7 +70,13 @@ def _logprob_integrity(choice: dict[str, Any], response_ids: list[int]) -> dict[
         if not isinstance(item, dict):
             missing += 1
             continue
-        if item.get("logprob") is None:
+        lp = item.get("logprob")
+        # vLLM sets logprob to -9999.0 both as the field default (missing →
+        # chat_completion/protocol.py:69) and as the clamp floor (serving.py:1448/1502),
+        # so `is None` never fires for vLLM: a missing/degenerate logprob reads as a valid
+        # very-negative value and fabricates probability into the GRPO ratio. Treat the
+        # -9999.0 sentinel as missing so the adapter rejects the trace.
+        if lp is None or (isinstance(lp, (int, float)) and lp <= -9999.0):
             missing += 1
         tid = item.get("token_id")
         if tid is not None and i < len(response_ids) and int(tid) != int(response_ids[i]):
