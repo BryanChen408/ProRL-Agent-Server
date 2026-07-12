@@ -29,6 +29,9 @@ class _SessionState:
     api_type: str | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
     completions: list[CompletionRecord] = field(default_factory=list)
+    # policy_version live when this session generated its FIRST turn.  The version-span
+    # guard rejects the session's next request if current_version != gen_version.
+    gen_version: int | None = None
     completion_metrics: CompletionMetricsAggregate = field(
         default_factory=CompletionMetricsAggregate
     )
@@ -58,6 +61,35 @@ class SessionStore:
         )
         self._late_message_drop_count = 0
         self._completion_writer = completion_writer
+        # Live policy_version, bumped by the trainer at each weight sync (during the
+        # engine pause, before resume) via POST /admin/policy_version.  Stamped onto
+        # each completion and used for the version-span guard.  None = never set yet.
+        self._current_policy_version: int | None = None
+
+    def set_policy_version(self, version: int) -> None:
+        """Set the live policy_version (called at each weight sync, during pause)."""
+        with self._lock:
+            self._current_policy_version = int(version)
+
+    def get_policy_version(self) -> int | None:
+        with self._lock:
+            return self._current_policy_version
+
+    def session_gen_version(self, session_id: str) -> int | None:
+        """O(1) read of a session's first-generation version (version-span guard)."""
+        with self._lock:
+            state = self._sessions.get(session_id)
+            return state.gen_version if state is not None else None
+
+    def session_would_span(self, session_id: str) -> bool:
+        """True iff this session already generated under a version != current, so its
+        NEXT turn would span a weight update (mixed-weight).  O(1); reject before
+        generating.  False for fresh sessions (no gen_version) and when version unset."""
+        with self._lock:
+            cur = self._current_policy_version
+            state = self._sessions.get(session_id)
+            gen = state.gen_version if state is not None else None
+            return cur is not None and gen is not None and cur != gen
 
     def close(self) -> None:
         with self._lock:
@@ -177,6 +209,14 @@ class SessionStore:
                 api_type=api_type,
                 metadata=metadata,
             )
+            # version-span guard: stamp the live policy_version onto this completion and
+            # record the session's first-generation version.  Used by the gateway entry
+            # interception (reject next turn if current != gen_version) and the
+            # prefix_merging cross-version fallback.
+            if self._current_policy_version is not None:
+                record.metadata["policy_version"] = self._current_policy_version
+                if state.gen_version is None:
+                    state.gen_version = self._current_policy_version
             state.completions.append(record)
             state.completion_count = len(state.completions)
             metric_event = build_completion_metric_event(
@@ -211,7 +251,11 @@ class SessionStore:
                     "original_request": original_request or {},
                     "transformed_request": request,
                     "response": response,
-                    "metadata": dict(metadata or {}),
+                    # version-span: persist record.metadata (carries the live per-turn
+                    # policy_version stamped in save_message), NOT the raw session-level
+                    # scheduler metadata param -- else disk shows the constant submission
+                    # version and cross-version can't be audited from the persisted files.
+                    "metadata": dict(record.metadata),
                 },
             )
             self._completion_writer.enqueue_metric(

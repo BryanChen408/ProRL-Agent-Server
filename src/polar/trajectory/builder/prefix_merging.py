@@ -65,6 +65,24 @@ def _completion_finish_reason(completion: CompletionRecord) -> str | None:
     return first.get("finish_reason")
 
 
+def _completion_policy_version(completion: CompletionRecord) -> int | None:
+    """Live weights version when this turn was generated, stamped by the gateway at
+    completion-record time (``metadata['policy_version']``).  A session whose raw
+    completions span >1 version crossed a weight update mid-interaction (mixed-weight).
+    """
+    meta = completion.metadata if isinstance(completion.metadata, dict) else {}
+    v = meta.get("policy_version")
+    try:
+        return int(v) if v is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _session_policy_versions(completions: list[CompletionRecord]) -> set[int]:
+    """Distinct policy_versions across a session's raw completions (>1 == mixed-weight)."""
+    return {v for c in completions if (v := _completion_policy_version(c)) is not None}
+
+
 @dataclass(frozen=True, slots=True)
 class _FinalizedChain:
     trace: Trace
@@ -182,9 +200,21 @@ class PrefixMergingBuilder(BaseTrajectoryBuilder):
         session_had_abort = any(
             _completion_finish_reason(c) == "abort" for c in session.completions
         )
+        # version-span fallback (behind the gateway entry-interception): a session whose
+        # raw completions were generated under >1 policy_version crossed a weight update
+        # mid-interaction (mixed-weight).  Precise -- only true spans, no false kills.
+        session_versions = _session_policy_versions(session.completions)
+        session_spanned = len(session_versions) > 1
+        _non_trainable = session_had_abort or session_spanned
+        if session_had_abort:
+            _span_error: str | None = "aborted generation (weight-update cutoff)"
+        elif session_spanned:
+            _span_error = f"policy_version span (mixed-weight): {sorted(session_versions)}"
+        else:
+            _span_error = None
         return Trajectory(
-            status="ERROR" if session_had_abort else "COMPLETED",
-            error="aborted generation (weight-update cutoff)" if session_had_abort else None,
+            status="ERROR" if _non_trainable else "COMPLETED",
+            error=_span_error,
             metadata={
                 "builder": "prefix_merging",
                 "session_id": session.session_id,

@@ -473,6 +473,17 @@ async def pause_inference_generation(timeout_seconds: float = 300.0):
     return status
 
 
+@app.post("/admin/policy_version")
+async def set_policy_version(version: int):
+    """Trainer bumps the live policy_version at each weight sync -- called DURING the
+    engine pause, BEFORE resume (see design doc hard-constraint) -- so every turn
+    generated after resume is stamped with the new version and the version-span guard
+    rejects any session's continuation that would cross the weight boundary."""
+    get_state().storage.set_policy_version(version)
+    logger.info("Gateway policy_version -> %s (weight-sync boundary)", version)
+    return {"policy_version": version}
+
+
 @app.post("/admin/inference/resume")
 async def resume_inference_generation():
     status = await get_state().inference.resume_generation()
@@ -728,6 +739,53 @@ async def proxy_request(request: Request, path: str):
     )
 
 
+def _version_span_abort(
+    api_type: APIType,
+    transformer: BaseTransformer,
+    openai_request: dict[str, Any],
+    original_request: dict[str, Any],
+    session_id: str,
+    *,
+    original_model: str,
+    session_info: Any | None,
+) -> JSONResponse:
+    """version-span guard: the session already generated under an older policy_version, so
+    its next turn would cross a weight update (mixed-weight).  Record a synthetic abort turn
+    (-> dev_09 + version-span fallback both mark the session ERROR) and return WITHOUT
+    proxying to the engine (no wasted generation)."""
+    state = get_state()
+    abort_response = {
+        "id": f"chatcmpl-vspan-{session_id[:8]}",
+        "object": "chat.completion",
+        "model": openai_request.get("model", ""),
+        "choices": [
+            {"index": 0, "message": {"role": "assistant", "content": ""}, "finish_reason": "abort"}
+        ],
+    }
+    metadata = _completion_metadata(session_info)
+    metadata["version_span_cutoff"] = True
+    state.storage.save_message(
+        session_id,
+        openai_request,
+        abort_response,
+        original_request=original_request,
+        model_requested=original_model,
+        model_used=openai_request.get("model", ""),
+        api_type=api_type.value,
+        task_id=session_info.task_id if session_info else None,
+        created_at=session_info.created_at.isoformat() if session_info else None,
+        metadata=metadata,
+        latency_ms=0.0,
+        streaming=False,
+    )
+    logger.info(
+        "version-span cutoff: session %s next turn would span a weight update; aborted "
+        "without generating",
+        session_id,
+    )
+    return JSONResponse(transformer.transform_response(abort_response, original_request))
+
+
 async def _handle_non_streaming(
     api_type: APIType,
     transformer: BaseTransformer,
@@ -741,6 +799,11 @@ async def _handle_non_streaming(
     state = get_state()
     if state.storage.is_session_closed(session_id):
         return _closed_session_response(api_type, session_id)
+    if state.storage.session_would_span(session_id):
+        return _version_span_abort(
+            api_type, transformer, openai_request, original_request, session_id,
+            original_model=original_model, session_info=session_info,
+        )
     try:
         generation = await state.inflight.run(
             session_id,
@@ -787,6 +850,11 @@ async def _handle_streaming(
     state = get_state()
     if state.storage.is_session_closed(session_id):
         return _closed_session_response(api_type, session_id)
+    if state.storage.session_would_span(session_id):
+        return _version_span_abort(
+            api_type, transformer, openai_request, original_request, session_id,
+            original_model=original_model, session_info=session_info,
+        )
     non_stream_request = {k: v for k, v in openai_request.items() if k != "stream_options"}
     non_stream_request["stream"] = False
     try:

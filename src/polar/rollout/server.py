@@ -166,6 +166,16 @@ async def resume_gateway_generation():
     return await _forward_gateway_admin("/admin/inference/resume")
 
 
+@app.post("/rollout/admin/policy_version")
+async def set_gateway_policy_version(version: int):
+    # version-span: forward the trainer's new weight version to the gateway(s) so per-turn
+    # policy_version stamping + span rejection can fire. Mirrors pause/resume forwarding.
+    return await _forward_gateway_admin(
+        "/admin/policy_version",
+        params={"version": version},
+    )
+
+
 @app.post("/nodes/register", response_model=GatewayNodeInfo)
 async def register_node(request: NodeRegistrationRequest):
     try:
