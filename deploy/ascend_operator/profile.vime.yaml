@@ -7,12 +7,15 @@ service:
   bind_host: 0.0.0.0
   rollout_url: http://80.48.5.88:8080
   gateway_url: http://80.48.5.88:8100
-  # 【vime 差异 1/3】指向 vime 的 vllm WORKER(:15000),不是 sglang(52:4077)、也不是 router(:8001)。
-  #   原因见 docs/design/router_return_token_ids_passthrough.md:vllm_router_rs(:8001)转发时丢掉
-  #   非标准字段 return_token_ids → choice.token_ids/prompt_token_ids 全 null → trace 校验失败 → session 全 ERROR。
-  #   worker(:15000)直连完整返回。单 engine 直连无损失;多 engine/DP 前需落地 router 透传(方案 A)再切回 :8001。
-  #   worker 端口来自 vime 日志 "Added worker: http://80.48.5.88:<port>",重启后请核对(自动从 15000 起分配)。
-  sglang_router_url: http://80.48.5.88:15000
+  # 【vime 差异 1/3】推理端点。
+  #   ▸ 单引擎:直连 vllm WORKER(:15000)——因 vllm_router_rs(:8001,Rust router)转发丢
+  #     return_token_ids → choice.token_ids/prompt_token_ids 全 null → session 全 ERROR
+  #     (见 docs/design/router_return_token_ids_passthrough.md)。单引擎旁路 router 无损。
+  #   ▸ PD 分离(当前 FEAT_PD_DISAGG=1):切到我们的 Python PD proxy(:8001,**非** Rust router)——
+  #     它对 /v1/*completions 用 StreamingResponse 原样透传 chunk → return_token_ids 不丢,多引擎也 OK。
+  #     proxy 由 vime rollout manager 起、绑 --vllm-router-port(=8001);见 pd_disaggregation_dev_plan.md。
+  #   切回单引擎请改回 :15000(worker 端口见 vime 日志 "Added worker",自动从 15000 起)。
+  sglang_router_url: http://80.48.5.88:8001
   # 【vime 差异 2/3 + 3/3】vime 后端是 vllm(legacy 是 sglang)。让 gateway:
   #   (2) 用 VLLMEngine 策略发 return_token_ids + top_logprobs;
   #   (3) 把 OpenAI 请求的 model 字段改写成 vllm 实际 serve 的名字(gateway 无条件 model=model_served;
