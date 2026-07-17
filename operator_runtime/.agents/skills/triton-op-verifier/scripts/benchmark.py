@@ -19,6 +19,7 @@ import logging
 import math
 import os
 import shutil
+import subprocess
 import sys
 import time
 import traceback
@@ -1013,6 +1014,13 @@ def _build_argparser():
     parser.add_argument("--warmup", type=int, default=WARMUP_DEFAULT, help="warmup 次数（默认 5）")
     parser.add_argument("--repeats", type=int, default=REPEATS_DEFAULT, help="正式测试次数（默认 50）")
     parser.add_argument("--output", help="输出文件路径（JSON 格式）")
+    parser.add_argument("--timeout", type=int, default=None,
+                        help="固定超时秒数;不传则按 shape 数自动缩放(base + per_shape × num_shapes)")
+    parser.add_argument("--timeout-base", type=int, default=60,
+                        help="自动缩放基线秒数(torch import + 首次编译),默认 60")
+    parser.add_argument("--timeout-per-shape", type=int, default=60,
+                        help="自动缩放每 shape 秒数(warmup+repeats+profiler),默认 60")
+    parser.add_argument("--subprocess", action="store_true", help=argparse.SUPPRESS)  # 内部：子进程模式
     # 不提供 --skip_framework / --framework_latency_ms / --verify_not_required：
     # framework 一律实测，verify 闸门一律强制。
     return parser
@@ -1065,10 +1073,8 @@ def _build_config(args, verify_dir):
     )  # 不传 skip_framework/framework_latency_ms，framework 一律实测
 
 
-def main():
-    _setup_logger()
-    args = _build_argparser().parse_args()
-
+def _run_benchmark(args):
+    """子进程模式：真正执行 benchmark（含 kernel + NPU synchronize，可能挂死）。"""
     verify_dir = os.path.abspath(args.verify_dir)
     if not os.path.isdir(verify_dir):
         logger.error("错误: 验证目录不存在: %s", verify_dir)
@@ -1092,6 +1098,60 @@ def main():
     except Exception as e:
         logger.error("性能测试失败: %s", e)
         logger.error("%s", traceback.format_exc())
+        sys.exit(1)
+
+
+def main():
+    _setup_logger()
+    args = _build_argparser().parse_args()
+
+    if args.subprocess:
+        # 子进程模式：直接执行 benchmark
+        _run_benchmark(args)
+        return
+
+    # 主进程模式：起子进程执行 benchmark，超时后 kill 子进程（挂死 kernel 的唯一护栏；
+    # 与 verify.py 同款 self re-exec + communicate(timeout) + proc.kill()——
+    # NPU 上挂死的 synchronize 无法被 Python 信号打断，必须 SIGKILL 子进程释放设备 context）。
+    cmd = [
+        sys.executable, os.path.abspath(__file__),
+        "--op_name", args.op_name,
+        "--verify_dir", args.verify_dir,
+        "--triton_impl_name", args.triton_impl_name,
+        "--warmup", str(args.warmup),
+        "--repeats", str(args.repeats),
+        "--subprocess",
+    ]
+    if args.output:
+        cmd.extend(["--output", args.output])
+
+    # 超时秒数：显式 --timeout 优先；否则按 shape 数自动缩放(base + per_shape × num_shapes)——
+    # 单 shape 紧、多 shape 不误杀。只 import torch 数 get_input_groups() 个数，不跑 kernel、不碰 NPU；
+    # len() 后输入 list 即释放，无 2× 峰值；数不出来则回退保守 900s(child 若真坏会 fast-fail)。
+    if args.timeout is not None:
+        timeout = args.timeout
+    else:
+        try:
+            num_shapes = max(1, len(resolve_inputs(args.op_name, os.path.abspath(args.verify_dir))))
+            timeout = args.timeout_base + args.timeout_per_shape * num_shapes
+        except Exception as e:
+            timeout = 900
+            logger.warning("预取 shape 数失败(%s)，超时回退 %ds", e, timeout)
+    logger.info("benchmark 超时预算 = %ds", timeout)
+
+    proc = None
+    try:
+        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        stdout, stderr = proc.communicate(timeout=timeout)
+        sys.stdout.buffer.write(stdout)
+        sys.stdout.buffer.flush()
+        sys.stderr.buffer.write(stderr)
+        sys.stderr.buffer.flush()
+        sys.exit(proc.returncode)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.wait()
+        logger.error("性能测试超时（%d秒），已终止子进程", timeout)
         sys.exit(1)
 
 
