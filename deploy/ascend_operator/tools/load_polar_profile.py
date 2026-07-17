@@ -62,8 +62,17 @@ def _operator_prepare(
     require_claude: bool,
 ) -> list[dict]:
     if workflow == "math":
-        # math 无算子任务文件:只搭 agent 工作目录(CLAUDE.md + .claude 会话),不 upload_file。
+        # 照 cannbot/legacy 的 prepare 结构:它们靠 upload_file 的 `mkdir -p {workdir}/...` 顺带建出
+        # workdir,之后才跑 cwd=workdir(或 -w workdir)的 exec。math 无任务文件可 upload → 用一条从
+        # 【已存在的 /】运行的 mkdir 显式建 workdir(等价 cannbot upload 的副作用;否则
+        # docker exec -w <不存在的 workdir> 在 OCI chdir 直接崩,见 runtime/docker.py:200 +
+        # _patch_utils.py:267)。第二条 exec 与 cannbot 同构:cwd=workdir、相对路径 cp CLAUDE.md、ln .claude。
         return [
+            {
+                "type": "exec",
+                "cwd": "/",
+                "command": f"mkdir -p {workdir}",
+            },
             {
                 "type": "exec",
                 "cwd": workdir,
