@@ -110,6 +110,41 @@ rollout:
       builder:
         strategy: prefix_merging
         config: {}
+    # 数学 agentic 管线验证 profile —— 照 operator_npu 结构,去掉所有算子内容:
+    #   无 prepare(不上传 {op_name}.py)、无 ascend NPU 租借(agent 纯 CPU 解题)、
+    #   skill 换 math-solver、evaluator 换 math_judge(纯 in-process,无 docker/judge_command)。
+    math_npu:
+      timeout_seconds: 1200.0
+      operator_runtime_dir: math_runtime
+      runtime:
+        backend: docker
+        image: sandbox:v1
+        network: host
+        workdir: /opt/workspace/agent_workdir
+        env:
+          DISABLE_AUTOUPDATER: "1"
+          API_TIMEOUT_MS: "14400000"
+          CLAUDE_CODE_MAX_RETRIES: "1"
+          CLAUDE_CODE_MAX_OUTPUT_TOKENS: "32768"
+          POLAR_ANTHROPIC_DEFAULT_MAX_TOKENS: "32768"
+        kwargs:
+          volumes:
+            - math_runtime:/opt/canonical:ro
+      agent:
+        harness: claude_code
+        model_name: claude-opus-4-5
+        skills_path: /opt/canonical/skills
+        settings:
+          max_turns: 20
+          disallowed_tools: "AskUserQuestion CronCreate CronDelete CronList EnterPlanMode EnterWorktree ExitPlanMode ExitWorktree NotebookEdit ScheduleWakeup TaskCreate TaskGet TaskList TaskOutput TaskStop TaskUpdate TodoWrite WebFetch WebSearch"
+          append_system_prompt: "You are solving a competition math problem with a single integer answer. You MAY write and run Python (via the Bash tool) to compute or verify. Reason step by step, then give the final answer on its own line exactly as the problem asks (a line 'Answer: <integer>'). Do not ask the user any questions in this non-interactive run."
+      evaluator:
+        strategy: math_judge
+        config:
+          format_bonus: 0.0
+      builder:
+        strategy: prefix_merging
+        config: {}
 
 gateway:
   heartbeat_interval_seconds: 30
