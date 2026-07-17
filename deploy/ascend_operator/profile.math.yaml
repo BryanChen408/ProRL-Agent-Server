@@ -1,0 +1,57 @@
+# math agentic 管线验证 profile —— 第三套 workflow(平行 legacy / cannbot)。
+# 以 profile.vime.yaml 的 service 块为基线(vllm 后端 + :8001 LB proxy);其余为 math 专属:
+#   workflow=math → 生成器用 math 分支:runtime=math_runtime、prepare 只搭 workdir(无 upload_file)、
+#   evaluator=math_judge(纯 in-process,无 docker 判题)、不租 NPU。
+# 跑 math:POLAR_PROFILE=deploy/ascend_operator/profile.math.yaml bash restart_polar_host.sh
+service:
+  bind_host: 0.0.0.0
+  rollout_url: http://80.48.5.88:8080
+  gateway_url: http://80.48.5.88:8100
+  # 沿用 vime 现状:LB proxy(:8001)。单引擎裸跑改 :15000(worker,见 vime 日志 "Added worker")。
+  sglang_router_url: http://80.48.5.88:8001
+  inference_engine: vllm
+  model_served: /home/docker/Qwen3.6-35B-A3B
+
+paths:
+  output_dir: output/ascend_operator
+  operator_runtime_dir: math_runtime      # ← math 自己的完整 runtime
+
+operator_runtime:
+  workflow: math                          # ← 第三套 workflow(生成器新分支)
+  budget:
+    generation_max: 5
+    optimization_max: 2
+    interval_seconds: 2
+  npu_lease:
+    enabled: false                        # 数学题纯 CPU 解,agent 不租 NPU(生成器 math 分支据此不发 ascend kwargs)
+
+observer:
+  host: 0.0.0.0
+  port: 18088
+
+gateway:
+  node_id: ascend-node-01
+  max_init_workers: 16
+  max_run_workers: 64
+  max_postrun_workers: 64
+  completion_persistence:
+    enabled: true
+    max_field_bytes: 67108864
+    queue_size: 4096
+
+operator:
+  profile: math_npu
+  timeout_seconds: 1200.0
+  runtime:
+    image: sandbox:v1
+    network: host
+    workdir: /opt/workspace/agent_workdir
+  agent:
+    model_name: claude-opus-4-5
+    max_turns: 20
+    max_output_tokens: 32768
+    inference_timeout_ms: 14400000
+    disallowed_tools: "AskUserQuestion CronCreate CronDelete CronList EnterPlanMode EnterWorktree ExitPlanMode ExitWorktree NotebookEdit ScheduleWakeup TaskCreate TaskGet TaskList TaskOutput TaskStop TaskUpdate TodoWrite WebFetch WebSearch"
+    append_system_prompt: "You are solving a competition math problem with a single integer answer. You MAY write and run Python (via the Bash tool) to compute or verify. Reason step by step, then give the final answer on its own line exactly as the problem asks (a line 'Answer: <integer>'). Do not ask the user any questions in this non-interactive run."
+  evaluator:
+    format_bonus: 0.0

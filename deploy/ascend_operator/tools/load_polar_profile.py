@@ -61,6 +61,15 @@ def _operator_prepare(
     workdir: str,
     require_claude: bool,
 ) -> list[dict]:
+    if workflow == "math":
+        # math 无算子任务文件:只搭 agent 工作目录(CLAUDE.md + .claude 会话),不 upload_file。
+        return [
+            {
+                "type": "exec",
+                "cwd": workdir,
+                "command": "mkdir -p output && cp /opt/canonical/CLAUDE.md CLAUDE.md && ln -sfn /polar/session/.claude .claude",
+            },
+        ]
     if workflow == "cannbot":
         return [
             {
@@ -142,7 +151,7 @@ def main() -> int:
     agent = _mapping(operator.get("agent"))
     evaluator = _mapping(operator.get("evaluator"))
     workflow = str(operator_runtime.get("workflow") or "legacy").strip().lower()
-    if workflow not in {"legacy", "cannbot"}:
+    if workflow not in {"legacy", "cannbot", "math"}:
         raise SystemExit(f"unsupported operator_runtime.workflow: {workflow!r}")
 
     output_root = path(paths.get("output_dir", "output/ascend_operator"))
@@ -216,13 +225,18 @@ def main() -> int:
         workdir=workdir,
         require_claude=False,
     )
+    # math 纯 CPU 解题,不租 NPU → kwargs 不带 ascend(避免占用 polar 卡池 0-3)。
+    runtime_kwargs: dict = {}
+    if workflow != "math":
+        runtime_kwargs["ascend"] = {"pool": npu_pool, "lock_dir": npu_lock_dir, "lease_at_start": False}
+    runtime_kwargs["volumes"] = volumes
     runtime_spec = {
         "backend": "docker",
         "image": str(runtime.get("image", "sandbox:v1")),
         "network": str(runtime.get("network", "host")),
         "workdir": workdir,
         "env": runtime_env,
-        "kwargs": {"ascend": {"pool": npu_pool, "lock_dir": npu_lock_dir, "lease_at_start": False}, "volumes": volumes},
+        "kwargs": runtime_kwargs,
         "prepare": prepare,
         "eval_prepare": eval_prepare,
     }
@@ -235,6 +249,23 @@ def main() -> int:
         "kwargs": runtime_spec["kwargs"],
         "eval_prepare": eval_prepare,
     }
+    if workflow == "math":
+        # math_judge 纯 in-process(解析文本 + 比整数),无 docker 判题 runtime。
+        evaluator_block: dict = {
+            "strategy": "math_judge",
+            "config": {"format_bonus": float(evaluator.get("format_bonus", 0.0))},
+        }
+    else:
+        evaluator_block = {
+            "strategy": "operator_judge",
+            "refresh_runtime": True,
+            "runtime": evaluator_runtime,
+            "config": _evaluator_config(
+                workflow=workflow,
+                evaluator=evaluator,
+                workdir=str(runtime_spec["workdir"]),
+            ),
+        }
     topology = {
         "rollout": {
             "host": bind_host,
@@ -257,16 +288,7 @@ def main() -> int:
                             "append_system_prompt": str(agent.get("append_system_prompt", "")),
                         },
                     },
-                    "evaluator": {
-                        "strategy": "operator_judge",
-                        "refresh_runtime": True,
-                        "runtime": evaluator_runtime,
-                        "config": _evaluator_config(
-                            workflow=workflow,
-                            evaluator=evaluator,
-                            workdir=str(runtime_spec["workdir"]),
-                        ),
-                    },
+                    "evaluator": evaluator_block,
                     "builder": {"strategy": "prefix_merging", "config": {}},
                 }
             },
