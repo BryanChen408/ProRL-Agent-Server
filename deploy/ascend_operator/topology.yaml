@@ -7,7 +7,7 @@ rollout:
   port: 8080
   public_url: http://127.0.0.1:8080
   save_dir: ./rollout_results
-  default_operator_profile: operator_npu
+  default_operator_profile: math_npu   # [math 验证期] vime 不传 profile → polar 用此默认;跑回 operator 改回 operator_npu
   operator_profiles:
     operator_npu:
       timeout_seconds: 3600.0
