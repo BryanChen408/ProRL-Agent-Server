@@ -25,8 +25,10 @@ from typing import Any
 from polar.trajectory.evaluator.base import BaseTrajectoryEvaluator
 from polar.trajectory.models import EvalResult, Trajectory
 
-_BOXED = re.compile(r"\\boxed\{([^{}]*)\}")
-_ANSWER_IS = re.compile(r"(?:final\s+answer|answer)\s*(?:is|:|=)?\s*\$?-?\d", re.I)
+# DAPO 题面要求 "put your answer on its own line after 'Answer:'"(常见 "Answer: 34" 或
+# "Answer: $\boxed{34}$")→ 优先认 Answer: 行,再认 boxed,最后兜底最后一个整数。
+_ANSWER = re.compile(r"Answer:\s*[^\n]*?(-?\d+)", re.I)
+_BOXED = re.compile(r"\\boxed\{\s*(-?\d+)\s*\}")
 _INT = re.compile(r"-?\d+")
 
 
@@ -84,11 +86,11 @@ def _answer_from_trajectory(trajectory: Trajectory) -> str | None:
 
 
 def _extract_answer(text: str) -> str | None:
-    boxed = _BOXED.findall(text)
-    if boxed:
-        return boxed[-1].strip()
-    # fallback: last integer in the text (DAPO answers are integers)
-    nums = _INT.findall(text)
+    for pat in (_ANSWER, _BOXED):  # DAPO 显式格式优先
+        m = pat.findall(text)
+        if m:
+            return m[-1].strip()
+    nums = _INT.findall(text)  # 兜底:最后一个整数
     return nums[-1] if nums else None
 
 
