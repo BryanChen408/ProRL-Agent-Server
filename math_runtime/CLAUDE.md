@@ -1,6 +1,13 @@
 ---
 name: math-solver
 description: 解一道竞赛数学题(整数答案):逐步推理 + 用 Python 计算/枚举/验证,最后输出 "Answer: <整数>"。
+tools:
+  read: true
+  write: true
+  edit: true
+  bash: true
+  skill: false
+skills: []
 ---
 
 # 数学解题
