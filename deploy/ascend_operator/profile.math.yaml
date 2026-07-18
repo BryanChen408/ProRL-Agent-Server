@@ -31,9 +31,9 @@ observer:
 
 gateway:
   node_id: ascend-node-01
-  max_init_workers: 256
-  max_run_workers: 256
-  max_postrun_workers: 256
+  max_init_workers: 32
+  max_run_workers: 64
+  max_postrun_workers: 64
   completion_persistence:
     enabled: true
     max_field_bytes: 67108864
@@ -51,7 +51,7 @@ operator:
     max_turns: 20
     max_output_tokens: 32768
     inference_timeout_ms: 14400000
-    disallowed_tools: "AskUserQuestion CronCreate CronDelete CronList EnterPlanMode EnterWorktree ExitPlanMode ExitWorktree NotebookEdit ScheduleWakeup TaskCreate TaskGet TaskList TaskOutput TaskStop TaskUpdate TodoWrite WebFetch WebSearch"
+    disallowed_tools: "AskUserQuestion CronCreate CronDelete CronList EnterPlanMode EnterWorktree ExitPlanMode ExitWorktree NotebookEdit ScheduleWakeup TaskCreate TaskGet TaskList TaskOutput TaskStop TaskUpdate TodoWrite WebFetch WebSearch Bash Write Edit Task Workflow Skill"
     append_system_prompt: "Follow ./CLAUDE.md. The user instruction is one competition math problem with an integer answer; solve it and give the final answer as a line 'Answer: <integer>'. Do not ask user questions in this non-interactive run."
   evaluator:
     format_bonus: 0.0
