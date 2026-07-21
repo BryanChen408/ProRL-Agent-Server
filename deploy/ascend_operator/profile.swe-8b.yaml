@@ -1,0 +1,42 @@
+# SWE-Gym coding-agent (codex) task_request profile — Qwen3-8B / vime vLLM / NPU.
+#
+#   workflow: task_request → load_polar_profile.py generates a BARE topology (gateway+inference,
+#   NO baked operator). The SWE task def (docker runtime + per-instance image, codex agent,
+#   swebench_harness evaluator) arrives per-task from vime's --polar-task-template payload.
+#   Reuses restart_polar_host.sh / start_polar_nohup.sh UNCHANGED, exactly like the operator/math
+#   profiles — no separate launcher/topology.
+#
+#   Run (on the polar host):
+#     POLAR_PROFILE=deploy/ascend_operator/profile.swe-8b.yaml bash restart_polar_host.sh
+#
+#   Prereqs: docker daemon reachable; vime vLLM serving Qwen3-8B on :8001; swegym/swebench
+#   installed in the polar venv. Swap model_served to the Qwen3-4B path when that lands.
+service:
+  bind_host: 0.0.0.0
+  rollout_url: http://80.48.5.88:8080
+  gateway_url: http://80.48.5.88:8100
+  sglang_router_url: http://80.48.5.88:8001   # vime LB proxy (:8001) — preserves return_token_ids
+  inference_engine: vllm                        # vime serves via vllm-ascend (NOT sglang)
+  model_served: /home/docker/Qwen3-8B          # MUST equal the model vime's vLLM serves, else 400
+
+paths:
+  output_dir: output/ascend_swe                 # separate output root from operator/math
+
+operator_runtime:
+  workflow: task_request                        # → bare topology; no operator baked in
+  npu_lease:
+    enabled: false                              # SWE agent is CPU-only (codex edits files + pytest)
+
+observer:
+  host: 0.0.0.0
+  port: 18088
+
+gateway:
+  node_id: ascend-node-01
+  max_init_workers: 16
+  max_run_workers: 16                           # SWE grading is heavy; start modest, raise later
+  max_postrun_workers: 16
+  completion_persistence:
+    enabled: true
+    max_field_bytes: 67108864
+    queue_size: 4096

@@ -142,8 +142,12 @@ def main() -> int:
     agent = _mapping(operator.get("agent"))
     evaluator = _mapping(operator.get("evaluator"))
     workflow = str(operator_runtime.get("workflow") or "legacy").strip().lower()
-    if workflow not in {"legacy", "cannbot"}:
+    if workflow not in {"legacy", "cannbot", "task_request"}:
         raise SystemExit(f"unsupported operator_runtime.workflow: {workflow!r}")
+    # task_request: the trainer submits self-contained tasks (runtime + agent + evaluator) via
+    # --polar-task-template, so the server runs a BARE gateway+inference topology with no baked
+    # operator. Used by the SWE-Gym coding-agent (codex) pipeline; see profile.swe-8b.yaml.
+    task_request = workflow == "task_request"
 
     output_root = path(paths.get("output_dir", "output/ascend_operator"))
     run_id = _run_id()
@@ -235,42 +239,46 @@ def main() -> int:
         "kwargs": runtime_spec["kwargs"],
         "eval_prepare": eval_prepare,
     }
+    # rollout block: bare (host/port/url/save_dir) for task_request; operator_samples adds the
+    # baked default_operator_profile + operator_profiles (runtime/agent/evaluator).
+    rollout_cfg: dict = {
+        "host": bind_host,
+        "port": rollout_port,
+        "public_url": rollout_url,
+        "save_dir": str(rollout_results_dir),
+    }
+    if not task_request:
+        rollout_cfg["default_operator_profile"] = profile_name
+        rollout_cfg["operator_profiles"] = {
+            profile_name: {
+                "timeout_seconds": float(operator.get("timeout_seconds", 3600.0)),
+                "operator_runtime_dir": str(operator_runtime_dir),
+                "runtime": runtime_spec,
+                "agent": {
+                    "harness": "claude_code",
+                    "model_name": str(agent.get("model_name", "claude-opus-4-5")),
+                    "skills_path": "/opt/canonical/skills",
+                    "settings": {
+                        "max_turns": int(agent.get("max_turns", 45)),
+                        "disallowed_tools": str(agent.get("disallowed_tools", "")),
+                        "append_system_prompt": str(agent.get("append_system_prompt", "")),
+                    },
+                },
+                "evaluator": {
+                    "strategy": "operator_judge",
+                    "refresh_runtime": True,
+                    "runtime": evaluator_runtime,
+                    "config": _evaluator_config(
+                        workflow=workflow,
+                        evaluator=evaluator,
+                        workdir=str(runtime_spec["workdir"]),
+                    ),
+                },
+                "builder": {"strategy": "prefix_merging", "config": {}},
+            }
+        }
     topology = {
-        "rollout": {
-            "host": bind_host,
-            "port": rollout_port,
-            "public_url": rollout_url,
-            "save_dir": str(rollout_results_dir),
-            "default_operator_profile": profile_name,
-            "operator_profiles": {
-                profile_name: {
-                    "timeout_seconds": float(operator.get("timeout_seconds", 3600.0)),
-                    "operator_runtime_dir": str(operator_runtime_dir),
-                    "runtime": runtime_spec,
-                    "agent": {
-                        "harness": "claude_code",
-                        "model_name": str(agent.get("model_name", "claude-opus-4-5")),
-                        "skills_path": "/opt/canonical/skills",
-                        "settings": {
-                            "max_turns": int(agent.get("max_turns", 45)),
-                            "disallowed_tools": str(agent.get("disallowed_tools", "")),
-                            "append_system_prompt": str(agent.get("append_system_prompt", "")),
-                        },
-                    },
-                    "evaluator": {
-                        "strategy": "operator_judge",
-                        "refresh_runtime": True,
-                        "runtime": evaluator_runtime,
-                        "config": _evaluator_config(
-                            workflow=workflow,
-                            evaluator=evaluator,
-                            workdir=str(runtime_spec["workdir"]),
-                        ),
-                    },
-                    "builder": {"strategy": "prefix_merging", "config": {}},
-                }
-            },
-        },
+        "rollout": rollout_cfg,
         "gateway": {
             "heartbeat_interval_seconds": 30,
             "rollout_server_url": rollout_url,
