@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from copy import deepcopy
 from typing import Any
 
@@ -109,6 +110,11 @@ def _response_loss_mask(
 
     if end_index is None:
         return mask, {"masked_tokens": 0, "reason": "think_end_token_not_found"}
+
+    # [CoT-train gate] POLAR_MASK_REASONING=0 → 训 reasoning(不 mask <think>…</think>),但仍记录 span
+    #   到 metadata 供下游用。默认 "1" = 现状(mask)。放开时 loss_mask 保持全 1,reasoning 进训练。
+    if os.environ.get("POLAR_MASK_REASONING", "1") == "0":
+        return mask, {"masked_tokens": 0, "reasoning_span": end_index + 1, "reason": "reasoning_masking_disabled"}
 
     masked_tokens = end_index + 1
     for idx in range(masked_tokens):
