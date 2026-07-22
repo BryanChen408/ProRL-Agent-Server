@@ -68,6 +68,11 @@ class DockerRuntime(BaseRuntime):
         if self._destroyed:
             raise RuntimeError("docker runtime was already destroyed")
         create_args = ["docker", "create", "--name", self._container_name]
+        # Raise the open-file limit: under high rollout load a fresh eval container
+        # running `pip install -e .` (PEP517 build isolation spawns many procs and
+        # sockets) can exhaust the default nofile and die with
+        # `OSError: [Errno 24] Too many open files` mid-evaluation.
+        create_args.extend(["--ulimit", "nofile=65536:65536"])
         if not self.spec.allow_internet:
             create_args.extend(["--network", "none"])
         elif self.spec.network:
