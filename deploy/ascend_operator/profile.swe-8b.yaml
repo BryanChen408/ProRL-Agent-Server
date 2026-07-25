@@ -17,7 +17,7 @@ service:
   gateway_url: http://80.48.5.88:8100
   sglang_router_url: http://80.48.5.88:8001   # vime LB proxy (:8001) — preserves return_token_ids
   inference_engine: vllm                        # vime serves via vllm-ascend (NOT sglang)
-  model_served: /home/docker/Qwen3-8B          # MUST equal the model vime's vLLM serves, else 400
+  model_served: /home/docker/Qwen3.5-4B          # MUST equal the model vime's vLLM serves, else 400
 
 paths:
   output_dir: output/ascend_swe                 # separate output root from operator/math
