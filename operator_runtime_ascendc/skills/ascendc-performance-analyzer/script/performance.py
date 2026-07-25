@@ -394,9 +394,27 @@ def _measure_single_with_profiler(
         _ = model(*inputs)
     torch.npu.synchronize()
 
+    # A 方案(RL 判分链专用,默认关闭 → cannbot 真人流程行为一字不变):
+    # 置 ASCENDC_PERF_INPUT_VARIANTS=K(K>1)时,预生成 K 份同 shape/同 dtype、不同数值的输入
+    # 并逐次轮换。预生成在计时区外,轮换只是取模索引,不污染延迟测量。
+    # 【射程】堵掉"按输入 id/值缓存"以及 cache 命中导致的虚假加速,并让测量跨越不同数据分布;
+    # **堵不掉 `self._cache = ...` 这种不看输入的缓存** —— 那个由固定入口的
+    # tools/detect_stateful_impl.py(C 方案:变输入探测输出是否跟着变)负责。
+    _variants = [inputs]
+    try:
+        _k = int(os.environ.get("ASCENDC_PERF_INPUT_VARIANTS", "1"))
+    except ValueError:
+        _k = 1
+    if _k > 1:
+        for _ in range(_k - 1):
+            _variants.append(_clone_value(inputs))
+    _n = len(_variants)
+    _i = {"v": 0}
+
     def test_fn():
         with torch.no_grad():
-            _ = model(*inputs)
+            _ = model(*_variants[_i["v"] % _n])
+        _i["v"] += 1
         torch.npu.synchronize()
 
     try:
