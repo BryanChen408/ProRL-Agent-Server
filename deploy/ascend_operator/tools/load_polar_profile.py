@@ -60,6 +60,9 @@ def _operator_prepare(
     upload_source: str,
     workdir: str,
     require_claude: bool,
+    backend: str = "triton",
+    task_assets_dir: str | None = None,
+    only_project_skills: bool = False,
 ) -> list[dict]:
     if workflow == "cannbot":
         return [
@@ -80,16 +83,37 @@ def _operator_prepare(
         "--op-name {op_name} --workdir /opt/workspace/agent_workdir "
         "--no-stub --readonly-tools"
     )
+    if backend == "ascendc":
+        command += " --backend ascendc"
+        if only_project_skills:
+            # 规则:非本项目(canonical/skills)提供的 CLI 自带 skill 一律关掉 —— prepare 据此
+            # 写 .claude/settings.json 的 skillOverrides={name: off}。名单在 prepare 里(CLI 无通配符),
+            # 不配 agent.only_project_skills = 不加这个参数 = prepare 不写文件,行为一字不变。
+            command += " --only-project-skills"
     if require_claude:
         command += " --require-claude"
-    return [
-        {
-            "type": "upload_file",
-            "source": upload_source,
-            "target": f"{workdir}/src/{{op_name}}.py",
-        },
-        {"type": "exec", "command": command},
+    target = (
+        f"{workdir}/input/{{op_name}}.py" if backend == "ascendc"
+        else f"{workdir}/src/{{op_name}}.py"
+    )
+    actions: list[dict] = [
+        {"type": "upload_file", "source": upload_source, "target": target},
     ]
+    if backend == "ascendc" and task_assets_dir:
+        # NPUKernelBench 的 model.py 用 get_input_groups() 读**同名 .json**(用例规格),
+        # 必须与 {op}.py 并排落在 input/。{op}.py 走 vime 的 sample.task_source(内容寻址
+        # 缓存,polar 会把这条 upload 的 source 改写成 cache 路径);.json 没有这条通道,
+        # 直接从数据集目录上传 —— polar 的 _is_operator_task_upload_action 只匹配 .py,
+        # 不会改写这条。triton 侧不配 task_assets_dir,动作列表一字不变。
+        actions.append(
+            {
+                "type": "upload_file",
+                "source": f"{task_assets_dir.rstrip('/')}/{{op_name}}.json",
+                "target": f"{workdir}/input/{{op_name}}.json",
+            }
+        )
+    actions.append({"type": "exec", "command": command})
+    return actions
 
 
 def _evaluator_config(*, workflow: str, evaluator: dict, workdir: str) -> dict:
@@ -102,7 +126,7 @@ def _evaluator_config(*, workflow: str, evaluator: dict, workdir: str) -> dict:
             "cannbot_runtime_root": "/opt/canonical",
             "workdir": workdir,
         }
-    return {
+    config = {
         "lazy_refresh_runtime": True,
         "op_name": "{op_name}",
         "judge_command": str(evaluator.get("judge_command")),
@@ -110,6 +134,14 @@ def _evaluator_config(*, workflow: str, evaluator: dict, workdir: str) -> dict:
         "metrics_path": str(evaluator.get("metrics_path")),
         "workdir": workdir,
     }
+    # submission_candidates(operator_judge.py:76 的 EvaluatorSpec.config 字段):按顺序取第一个
+    # 存在的文件跨 fresh-judge 边界。ascendc 用它实现"优先取历史最优包(.best.tar.gz)",
+    # 不透传的话 profile 里配了也等于没配(judge 永远只评最后一次打的包)。
+    # triton 的 profile 不配这个键 → 不产生该字段,行为一字不变。
+    candidates = [str(c).strip() for c in (evaluator.get("submission_candidates") or []) if str(c).strip()]
+    if candidates:
+        config["submission_candidates"] = candidates
+    return config
 
 
 def main() -> int:
@@ -144,6 +176,8 @@ def main() -> int:
     workflow = str(operator_runtime.get("workflow") or "legacy").strip().lower()
     if workflow not in {"legacy", "cannbot", "task_request"}:
         raise SystemExit(f"unsupported operator_runtime.workflow: {workflow!r}")
+    # backend: triton(默认,原样)| ascendc(prepare 上传 input/{op}.py + --backend ascendc)
+    backend = str(operator_runtime.get("backend") or "triton").strip().lower()
     # task_request: the trainer submits self-contained tasks (runtime + agent + evaluator) via
     # --polar-task-template, so the server runs a BARE gateway+inference topology with no baked
     # operator. Used by the SWE-Gym coding-agent (codex) pipeline; see profile.swe-8b.yaml.
@@ -195,6 +229,10 @@ def main() -> int:
                 "POLAR_NPU_LOCK_DIR": npu_lock_dir,
             }
         )
+    # profile 显式追加/覆盖 agent 容器 env(operator.runtime.env);profile 不配=一字不变。
+    runtime_env.update(
+        {str(k): str(v) for k, v in _mapping(runtime.get("env")).items()}
+    )
     eval_env = {
         "DISABLE_AUTOUPDATER": "1",
     }
@@ -208,17 +246,27 @@ def main() -> int:
     volumes = _runtime_volumes(operator_runtime_dir, workflow)
     upload_source = str(op_assets_dir / "op_tasks" / "{op_name}.py")
     workdir = str(runtime.get("workdir", "/opt/workspace/agent_workdir"))
+    # ascendc 专用:算子同名 .json(用例规格)所在的数据集目录;triton 侧不配=不产生该动作
+    task_assets_dir = str(operator_runtime.get("task_assets_dir") or "").strip() or None
+    # ascendc 专用:只保留 canonical/skills 的 skill(CLI 自带的关掉);triton 侧不配=不产生该参数
+    only_project_skills = bool(agent.get("only_project_skills"))
     prepare = _operator_prepare(
         workflow=workflow,
         upload_source=upload_source,
         workdir=workdir,
         require_claude=True,
+        backend=backend,
+        task_assets_dir=task_assets_dir,
+        only_project_skills=only_project_skills,
     )
     eval_prepare = _operator_prepare(
         workflow=workflow,
         upload_source=upload_source,
         workdir=workdir,
         require_claude=False,
+        backend=backend,
+        task_assets_dir=task_assets_dir,
+        only_project_skills=only_project_skills,
     )
     runtime_spec = {
         "backend": "docker",
@@ -247,6 +295,27 @@ def main() -> int:
         "public_url": rollout_url,
         "save_dir": str(rollout_results_dir),
     }
+    # skills_path:polar 的 claude_code harness 把它拷进 agent HOME($CLAUDE_CONFIG_DIR/skills)
+    # = **用户级**安装点。ascendc 的 prepare 已把同一份拷进 workdir/.claude/skills(**项目级**,
+    # CLAUDE.md 与任务 prompt 里的命令走相对路径 `.claude/skills/...`,必须有这份)。两处都装
+    # → 同一个 skill 在 prompt 里列两遍(会话无 MCP 时 CLI 不按 name 去重)。profile 显式写
+    # `skills_path: ""` 即只留项目级那份;不写该字段=保持原值(triton 的 prepare 不拷 skills,靠它)。
+    skills_path = (
+        str(agent.get("skills_path") or "").strip()
+        if "skills_path" in agent
+        else "/opt/canonical/skills"
+    )
+    agent_block: dict = {
+        "harness": "claude_code",
+        "model_name": str(agent.get("model_name", "claude-opus-4-5")),
+    }
+    if skills_path:  # 键序保持与原来一致(harness/model_name/skills_path/settings)
+        agent_block["skills_path"] = skills_path
+    agent_block["settings"] = {
+        "max_turns": int(agent.get("max_turns", 45)),
+        "disallowed_tools": str(agent.get("disallowed_tools", "")),
+        "append_system_prompt": str(agent.get("append_system_prompt", "")),
+    }
     if not task_request:
         rollout_cfg["default_operator_profile"] = profile_name
         rollout_cfg["operator_profiles"] = {
@@ -254,16 +323,7 @@ def main() -> int:
                 "timeout_seconds": float(operator.get("timeout_seconds", 3600.0)),
                 "operator_runtime_dir": str(operator_runtime_dir),
                 "runtime": runtime_spec,
-                "agent": {
-                    "harness": "claude_code",
-                    "model_name": str(agent.get("model_name", "claude-opus-4-5")),
-                    "skills_path": "/opt/canonical/skills",
-                    "settings": {
-                        "max_turns": int(agent.get("max_turns", 45)),
-                        "disallowed_tools": str(agent.get("disallowed_tools", "")),
-                        "append_system_prompt": str(agent.get("append_system_prompt", "")),
-                    },
-                },
+                "agent": agent_block,
                 "evaluator": {
                     "strategy": "operator_judge",
                     "refresh_runtime": True,
