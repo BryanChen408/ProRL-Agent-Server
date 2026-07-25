@@ -29,6 +29,7 @@ DEFAULT_GATEWAY = "http://127.0.0.1:8100"
 DEFAULT_ROOT = Path(__file__).resolve().parents[3] / "output" / "ascend_operator"
 DEFAULT_SESSION_BASE_DIR = Path(os.environ.get("POLAR_SESSION_BASE_DIR", DEFAULT_ROOT / "polar_sessions"))
 PIPELINE_MARKER = "tools/triton_eval_pipeline.sh"
+ASCENDC_PIPELINE_MARKER = "tools/ascendc_eval_pipeline.sh"
 PIPELINE_STATUS_NAME = "pipeline_budget_status.json"
 SUCCESS_RE = re.compile(
     r"(\[triton-eval\]\s+done\s+.*success=true|verdict\s+.*success=True|cached verdict\s+.*success=True)",
@@ -180,6 +181,12 @@ def _is_pipeline_command(command: str) -> bool:
         else:
             script = executable
         if script.endswith(PIPELINE_MARKER) or script.endswith("/triton_eval_pipeline.sh"):
+            return True
+        # AscendC(backend=ascendc)的 agent 侧固定入口叫 ascendc_selfcheck.sh —— 只认 triton 的
+        # 名字会让预算对 ascendc 完全失效(数不到一次调用 → 永不 cancel → session 无限迭代)。
+        # 纯增量:triton 侧命中的仍是上面两条,行为不变。
+        if script.endswith(ASCENDC_PIPELINE_MARKER) or script.endswith("/ascendc_eval_pipeline.sh") \
+           or script.endswith("/ascendc_selfcheck.sh"):  # 薄壳转发,一并计数
             return True
         if script.endswith("verify.py") or script.endswith("/verify.py"):
             return True
