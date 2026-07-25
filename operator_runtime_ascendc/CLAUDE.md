@@ -832,3 +832,77 @@ except ImportError:
 - 专业、技术、简洁
 - 每完成一个 Phase 提供一行状态更新
 - 错误时清晰描述 + 建议操作
+
+---
+## 评测:统一走固定入口(禁止自写测试)
+
+> 逐字派生 triton 侧 `operator_runtime/CLAUDE.md` 的同名小节,仅替换脚本名与路径。
+
+所有功能验证 + 性能采集**统一**通过固定入口执行:
+
+```bash
+bash tools/ascendc_eval_pipeline.sh --op_name {op_name} \
+    --impl output/submission/{op_name}_impl.tar.gz --out_dir judge_out
+```
+
+**这条命令和 judge 判分时跑的是同一个脚本、同一行参数** —— 所以你看到的判定就是最终得分依据,
+不存在"自检过了 judge 却挂"的落差。它内部按固定顺序跑:自动打包提交物 → 退化检测(AST)→
+编译 + 安装 whl → `verification_ascendc.py`(NPU 数值正确性)→ `performance.py`(性能),
+并维护 `.best.tar.gz`(历史最高档那一版)。结果写 `judge_out/metrics.json`,
+完整错误写 `judge_out/metrics_error.log`。
+
+> **⚠️ 本环境覆盖 Phase 4.3 / Phase 4-D / Phase 5 里"运行 evaluate_ascendc.sh / performance.py"
+> 的所有写法(共 8 处)** —— 一律改跑上面这条固定入口。直调 skill 脚本会绕过抢卡与预算,
+> 且判定基准与 judge 不一致。
+
+> **⚠️ 本环境跳过 Phase 2(测试用例精简)与 Phase 6(全量用例恢复验证)。**
+> 数据集的 `{op}.json` 已经是定稿的精简用例(每算子 5 个 case),不需要再砍,也没有 `.json.bak`
+> 可恢复。judge 恒用数据集原版覆盖你提交的同名文件,所以精简它对判分没有任何影响,只会让你
+> 自己的验证跑得和判分不一致。**不要调用 `ascendc-case-simplifier`,不要改 `{op}.json`。**
+
+⚠️ **禁止**自创测试方法 —— 具体包括:**禁止**自己写 python/临时脚本 import 或 forward 跑算子、
+**禁止** `torch.allclose` 手动对拍、**禁止**写临时 kernel 试探、**禁止**用 `python -c` 做任何
+上 NPU 的探针、**禁止** `npu-smi` 之类的环境探测。**固定入口是唯一可执行的验证路径。**
+
+⚠️ **禁止**直接调用或修改 `tools/` 下的脚本、`.claude/skills/ascendc-*/scripts/` 下的评测脚本
+(`evaluate_ascendc.sh` / `verification_ascendc.py` / `performance.py` / `validate_ascendc_impl.py`);
+**禁止**改评测参数(SOC_VERSION / warmup / repeats / 精度阈值由入口写死);
+**禁止**自己设 `ASCEND_RT_VISIBLE_DEVICES`。
+
+> **为什么**:本环境的 NPU 卡是**共享卡池**,agent 容器与 judge 容器共用同一批卡。固定入口内部
+> 会去卡池排队抢锁(哪张空占哪张,用完释放)。绕过它直接上卡 = 和别的 session 撞在同一张卡上,
+> 轻则性能测量失真(speedup 是你的分数)、重则显存互撞把双方都跑挂。
+
+失败时按固定入口输出指示行动:若未耗尽阶段次数,读取 `{op}/.eval_last.log` 的完整错误后修复;
+若输出 `LIMIT_EXHAUSTED`,不要再读日志、不要再调用工具,直接结束任务(提交物已自动留存)。
+
+---
+## polar RL 判分契约(本环境专属,务必遵守)
+
+0. **固定评测入口 = 上一节那条 `tools/ascendc_eval_pipeline.sh` 命令**(与 judge 判分同一个脚本)。
+   它一次做完:自动打包 → 退化检测 → 编译+安装 → 对拍 → 性能,并维护 `.best.tar.gz`。
+   - **每完成一轮修改就跑一次**。session 随时可能被权重同步打断(实测 66%),被打断时
+     judge 评的是你**已打包的最好版本** —— 所以"早跑多跑"严格优于"留到最后跑"。
+   - 它自带**调用预算**(generation/optimization 两阶段)。打印 `LIMIT_EXHAUSTED` 时立即停手:
+     提交物已自动留存,工作文件状态不重要。
+   - 它自带**内容哈希短路**:`{op}/` 源码没变时直接复用上次结论,不消耗预算、不占卡。
+   - 它自带 **NPU 抢卡**:在预留卡池里排队,哪张空占哪张,用完释放。**不要**自己设
+     `ASCEND_RT_VISIBLE_DEVICES`,也不要绕过它直接调 `evaluate_ascendc.sh`(会撞别的 session 的卡)。
+
+
+1. **提交物必须是单个 tarball**:你产出的 `{op}/` 工程必须打成**一个**
+   `output/submission/{op}_impl.tar.gz`(tar 根目录就是 `{op}/`)。judge 只跨边界取这一个文件,
+   忘打或多文件散着 → submission_missing → 0 分。**无论成败都要打**:编译不过也交,
+   judge 会给出真实错误分类(比不交高),不交等于弃权。
+   - **必须包含**(你的产出):`model_new_ascendc.py`、`kernel/`(op_host/ + op_kernel/ + ops.h +
+     register.cpp + CMakeLists.txt + setup.py + utils/);`design/` 可选。
+   - **不用包含**(judge 自带):`model.py`(golden 参考实现)和 `{op}.json`(用例规格)由 judge
+     从数据集原版注入,你交的同名文件**会被覆盖**。所以 Phase 2 精简用例只影响你自己的迭代速度,
+     不影响判分 —— 判分恒用全量原版用例。
+   - **不用包含**(judge 自己重编):`kernel/build/`、`kernel/dist/`、`*.so`、`*.a`、`*.whl`。
+     judge 在 fresh 容器里从你的源码重新 cmake+make+装 whl,预编译产物一律不采信,白白撑大 tarball。
+2. **SOC/arch 钉死**:`kernel/CMakeLists.txt` 走 `SOC_VERSION=$ENV{SOC_VERSION}`(本机 910B2C=A2,judge 传 ascend910b1/dav-2201),
+   路径用 `x86_64-linux`(非 aarch64)。
+3. **model_new_ascendc.py 必须真调 `torch.ops.npu.<op>`**(禁纯 torch 计算,否则退化检测判 0)。
+4. judge 会在 fresh runtime 里**重编 + 重对拍 + 重测速**(`ascendc_eval_pipeline.sh`),你的自评测只作你自己迭代参考,
+   分数以 judge 重评为准。
