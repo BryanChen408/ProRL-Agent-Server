@@ -78,6 +78,19 @@ def _has_empty_choices(completion: CompletionRecord) -> bool:
 
 
 def _is_non_agent_side_completion(completion: CompletionRecord) -> bool:
+    """True when a request cannot have come from the agent loop.
+
+    Judged purely on request *shape*, never on payload text. Every agent-side
+    call carries the harness system prompt, the tool schema, and at least one
+    SDK-only field (``thinking`` / ``stream`` / ...); a request with a lone user
+    message and none of those is a bare completion the harness emitted outside
+    the agent loop — typically the body of a large file the agent just Read.
+
+    Content matching used to gate this check against one hardcoded Triton
+    handbook, so the same shape carrying any other payload (cmake sources,
+    judge output, skill frontmatter) slipped through and became a trainable
+    trace. Shape alone is sufficient and task-agnostic.
+    """
     request = _request_for_shape_check(completion)
     messages = request.get("messages")
     if not isinstance(messages, list) or len(messages) != 1:
@@ -94,12 +107,7 @@ def _is_non_agent_side_completion(completion: CompletionRecord) -> bool:
         return False
     if any(key in request for key in ("context_management", "thinking", "output_config", "stream")):
         return False
-
-    content = _text_content(message.get("content"))
-    return (
-        content.startswith("# Triton Ascend 基础知识参考手册")
-        or "本文档汇集 Triton Ascend 编程" in content
-    )
+    return True
 
 
 def _request_for_shape_check(completion: CompletionRecord) -> dict[str, Any]:
@@ -107,19 +115,3 @@ def _request_for_shape_check(completion: CompletionRecord) -> dict[str, Any]:
         if isinstance(request, dict) and request:
             return request
     return {}
-
-
-def _text_content(value: Any) -> str:
-    if isinstance(value, str):
-        return value
-    if isinstance(value, list):
-        parts: list[str] = []
-        for item in value:
-            if isinstance(item, str):
-                parts.append(item)
-            elif isinstance(item, dict):
-                text = item.get("text")
-                if isinstance(text, str):
-                    parts.append(text)
-        return "\n".join(parts)
-    return ""

@@ -52,7 +52,8 @@ def _sglang_record(
     }
     return CompletionRecord(
         completion_id=completion_id,
-        request={"messages": prompt_messages},
+        # `system` marks agent-side traffic so record_filters keeps the record.
+        request={"system": "harness", "messages": prompt_messages},
         response=response,
     )
 
@@ -92,7 +93,7 @@ def _vllm_record(
     response = VLLMEngine().normalize_response(response)
     return CompletionRecord(
         completion_id=completion_id,
-        request={"messages": prompt_messages},
+        request={"system": "harness", "messages": prompt_messages},
         response=response,
     )
 

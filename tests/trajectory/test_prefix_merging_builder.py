@@ -19,7 +19,12 @@ def _record(
 ) -> CompletionRecord:
     return CompletionRecord(
         completion_id=completion_id,
-        request={"messages": prompt_messages or [{"role": "user", "content": completion_id}]},
+        # `system` marks this as agent-side traffic; without it the record has the
+        # bare shape record_filters drops as a non-agent-side completion.
+        request={
+            "system": "harness",
+            "messages": prompt_messages or [{"role": "user", "content": completion_id}],
+        },
         response={
             "choices": [
                 {
@@ -148,7 +153,7 @@ def test_prefix_merge_preserves_reasoning_loss_mask() -> None:
     records = [
         CompletionRecord(
             completion_id="00-main1",
-            request={"messages": [{"role": "user", "content": "q"}]},
+            request={"system": "harness", "messages": [{"role": "user", "content": "q"}]},
             response={
                 "choices": [
                     {

@@ -180,7 +180,7 @@ def test_qwen_reasoning_tokens_are_loss_masked_without_changing_token_alignment(
         completions=[
             CompletionRecord(
                 completion_id="completion-1",
-                request={"messages": [{"role": "user", "content": "Write code"}]},
+                request={"system": "harness", "messages": [{"role": "user", "content": "Write code"}]},
                 response={
                     "choices": [
                         {
@@ -226,7 +226,7 @@ def test_logprob_integrity_flagged_for_misattribution_and_missing() -> None:
         session_id="s", task_id="t",
         completions=[CompletionRecord(
             completion_id="c1",
-            request={"messages": [{"role": "user", "content": "hi"}]},
+            request={"system": "harness", "messages": [{"role": "user", "content": "hi"}]},
             response={"choices": [{
                 "token_ids": [3, 4],
                 "message": {"role": "assistant", "content": "x"},
@@ -248,7 +248,8 @@ def _normal_record(
     return CompletionRecord(
         completion_id=completion_id,
         timestamp=f"2026-01-01T00:00:{len(completion_id):02d}+00:00",
-        request={"messages": [{"role": "user", "content": completion_id}]},
+        # `system` marks agent-side traffic so record_filters keeps the record.
+        request={"system": "harness", "messages": [{"role": "user", "content": completion_id}]},
         response={
             "choices": [
                 {
@@ -268,11 +269,14 @@ def _normal_record(
 
 
 def _side_read_record(completion_id: str) -> CompletionRecord:
+    # A bare request the harness emitted outside the agent loop, carrying the body of
+    # a file the agent just Read. Dropped on shape (lone user message, no system /
+    # tools / SDK fields), so any payload is covered — not just one known document.
     request = {
         "messages": [
             {
                 "role": "user",
-                "content": "# Triton Ascend 基础知识参考手册\n\n本文档汇集 Triton Ascend 编程的基础知识。",
+                "content": "# Copyright (c) 2025 Huawei\nfunction(ascendc_compile_kernel)\nendfunction()\n",
             }
         ],
     }
