@@ -390,8 +390,16 @@ kernel_tpipe.h    → /usr/local/Ascend/cann-9.0.0/x86_64-linux/asc/include/basi
 kernel_macros.h   → /usr/local/Ascend/cann-9.0.0/x86_64-linux/asc/impl/basic_api/
 ```
 
-它们由 AscendC 的 cmake 工具链(`ascendc_kernel_cmake`)负责注入,裸 `g++ -I…/include/ascendc`
-当然找不到(那个目录根本不存在)。**反证**:jn5za7tz 走固定入口时
+它们由 AscendC 的 cmake 工具链(`ascendc_kernel_cmake`)负责注入,裸 `g++` 指错目录就找不到。
+
+⚠️ **更正(2026-07-28,`ascendc-sandbox:v1` 容器内实测)**:先前写的"`-I…/include/ascendc`
+那个目录根本不存在"是**错的**。sandbox 里 `kernel_operator.h` 就在
+`x86_64-linux/include/ascendc/basic_api/kernel_operator.h` —— 目录存在,头文件在**下一层**
+`basic_api/`。agent 差的是一级目录,不是路径瞎写。
+(先前的查证是在另一个容器里做的,那里 `find | head -1` 命中的是 `tikcpp/tikcfw/` 那份副本。)
+结论不变,理由要改。
+
+**反证**:jn5za7tz 走固定入口时
 `Step2 compile + install (no NPU)` 顺利通过并进到 Step2b —— **官方路径编得过**。
 ⇒ 不是模板缺陷,是 agent 绕过固定入口自己 `make` 造成的。护栏层面归入 skill-1 的 hook。
 

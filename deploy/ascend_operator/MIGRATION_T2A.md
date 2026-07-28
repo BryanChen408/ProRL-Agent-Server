@@ -148,7 +148,49 @@ skill-4b(trace-recorder 引用不存在的 scripts)、skill-6(asc-devkit 路径)
 
 | # | 待办 | 卡住哪个阶段 |
 |---|---|---|
-| 1 | `msprof` 在 `ascendc-sandbox:v1` 里可用性 + 权限要求 | 闸门 B |
+| ~~1~~ | ~~`msprof` 在 `ascendc-sandbox:v1` 里可用性 + 权限要求~~ | **已解除,见下** |
 | 2 | 适-6a 在 gateway 侧的具体打标位置(`SessionResult` 有无承载位) | 阶段 C |
 | 3 | `mean_speedup` vs `geomean_speedup` 选哪个 | 阶段 B |
 | 4 | `validate_ascendc_impl.py` 新旧 108 行 diff —— 退化判据是否仍等价 | 阶段 D |
+
+---
+
+## msprof 可用性探测结果(2026-07-28,`ascendc-sandbox:v1` 容器内实测)
+
+探测脚本:`/home/docker/t2a_probe_msprof.sh`(v2,自动 `docker run` 进容器,
+容器参数逐字取自 `src/polar/runtime/ascend.py:_DRIVER_MOUNTS` + `ascend_mount_create_args`)。
+
+**13 项全 PASS —— msprof 路线可行,阶段 B 按计划做。**
+
+```
+msprof     /usr/local/Ascend/cann-9.0.0/bin/msprof   (source set_env.sh 后在 PATH)
+容器 CANN  只有 9.0.0 一套
+torch      2.8.0+cpu   torch_npu 2.8.0.post4.dev20260309   npu 可用
+msprof 采集 rc=0,op_summary(5行) / task_time(8行) / api_statistic(26行) 全部生成
+cmake      3.31.10(符合 ascendc-sandbox:v1 = sandbox:v1 + cmake<4)
+权限       /dev/davinci* 17 节点,perf_event_paranoid=4,日志无权限类报错
+```
+
+**顺带确认的三件事:**
+
+1. **镜像烤了默认 `ASCEND_RT_VISIBLE_DEVICES`** —— `/dev/davinci*` 有 17 个节点但
+   `torch.npu.device_count()==1`。正是 `docker.py:112-114` 注释所述
+   "Docker image ENV survives unless explicitly overridden, clear any baked default here"。
+   代码与现实对上。
+2. **pipeline 能拿到 msprof,但靠的是巧合** —— `tools/env.sh` 把
+   `BISHENGIR_BIN=/usr/local/Ascend/cann-9.0.0/bin` 加进 PATH,而 msprof 恰好在同一目录。
+   那个变量本意是给 bisheng 编译器用的。⇒ **阶段 B 加 msprof 步骤时必须显式解析路径**
+   (优先 `$ASCEND_HOME_PATH/bin/msprof`,回落 PATH),不依赖这个巧合。
+3. **更正 F 的一处细节** —— sandbox 里 `kernel_operator.h` 在
+   `x86_64-linux/include/ascendc/basic_api/`(不是我先前在别的容器查到的 `tikcpp/tikcfw/`)。
+   所以 agent 那条 `g++ -I.../x86_64-linux/include/ascendc` 探针,**目录是存在的**,
+   只是头文件在下一层 `basic_api/` —— 它差一级目录,不是路径瞎写。
+   F 的结论(agent 违规、非模板缺陷)不变,理由要改。
+
+**探测脚本 v1 → v2 修的两个 bug**(值得记,同类脚本别再犯):
+
+- **CANN 版本挑错**:宿主机有 8.5.1 与 9.0.0 两套,`find | head -1` 按字典序挑到 8.5.1。
+  改为优先 `ASCEND_HOME_PATH`、否则 `sort -V | tail -1`。
+- **`msprof --version` 不存在**(报 `unrecognized option`),改用 `--help` 探活。
+- v1 还犯了个方法错误:**在宿主机上跑**(宿主机没 torch),结论无效。
+  v2 检测到不在容器就自动 `exec docker run` 进去。
