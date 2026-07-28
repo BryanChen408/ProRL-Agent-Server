@@ -27,6 +27,48 @@ def _copy_tree(src: Path, dst: Path) -> None:
     shutil.copytree(src, dst, symlinks=True)
 
 
+def _link_cannbot_skills_path(workdir: Path) -> None:
+    """在 workdir 里补一条 cannbot 原版 skill 路径的 symlink(仅 ascendc 分支)。
+
+    CLAUDE.md 是 cannbot `ascend-kernel-developer.md` 的**逐字拷贝**,里面的 skill 路径写的是
+    cannbot 的**宿主机**布局 `ops-lab/tilelang-to-ascendc/skills/<name>/`(真身在
+    `/home/docker/cannbot-skills/ops-lab/...`);而本环境按 init.sh 约定铺在 `.claude/skills/`。
+    实测 agent 因此 ≥20 次去找不存在的 `ops-lab/...`,其中 CLAUDE.md:234 那条
+    `cp .../csrc/utils/torch_kernel_helper.h` 是 **Phase 1.2 的固定动作**,每个 session 必踩,
+    而该头文件是 kernel 编译必需的。
+
+    修在这里而不是改 CLAUDE.md:铁律 2 要求逐字派生 cannbot 流程,改文档等于跟上游分叉;
+    且 cannbot 原文里同类路径不止这两处 —— 补一条 symlink 让两种写法同时成立,一次覆盖全部。
+
+    用相对链接(从 `<workdir>/ops-lab/tilelang-to-ascendc/` 上跳两级即 workdir),
+    workdir 整体被搬运/重挂也不会断。不新增可写面:`.claude/skills` 本来就是 `_copy_tree`
+    复制进来的可写目录,symlink 只是多一条通往同一处的路径。
+    """
+    link = workdir / "ops-lab" / "tilelang-to-ascendc" / "skills"
+    link.parent.mkdir(parents=True, exist_ok=True)
+    if link.is_symlink() or link.exists():        # prepare 可能重复执行 → 幂等
+        if link.is_symlink() or link.is_file():
+            link.unlink()
+        else:
+            shutil.rmtree(link)
+    link.symlink_to(Path("../../.claude/skills"), target_is_directory=True)
+
+    # ---- 对账断言 ----
+    # 根因里最要紧的一条是"仓库里没有任何东西会对账文档写的路径和容器里真实的文件",
+    # 所以光建链接只治当前这一处;上游哪天改布局,照样要等 rollout 撞出来才知道。
+    # 这里挑 CLAUDE.md:234 那条固定动作要 cp 的文件做探针 —— 它过了就等于 Phase 1.2 走得通。
+    # 与本文件已有的做法一致(缺 {op}.json 在 prepare 就 fail fast,不等 judge 才炸)。
+    probe = link / ("ascendc-operator-project-init/templates/ascend-kernel"
+                    "/csrc/utils/torch_kernel_helper.h")
+    if not probe.is_file():
+        raise FileNotFoundError(
+            f"cannbot skill path contract broken: {probe} 不可读。"
+            f"CLAUDE.md 用 ops-lab/tilelang-to-ascendc/skills/<name>/ 引用 skill,"
+            f"本环境靠该 symlink → .claude/skills 兑现;"
+            f"探针失败说明 canonical/skills 的布局变了或链接没建起来。"
+        )
+
+
 def _copy_file(src: Path, dst: Path) -> None:
     if not src.is_file():
         raise FileNotFoundError(f"required file missing: {src}")
@@ -211,6 +253,7 @@ def _prepare_ascendc_workdir(args) -> int:
     if not (canonical / "skills").is_dir():
         raise FileNotFoundError(f"required directory missing: {canonical / 'skills'}")
     _copy_tree(canonical / "skills", workdir / ".claude" / "skills")
+    _link_cannbot_skills_path(workdir)   # ops-lab/tilelang-to-ascendc/skills → .claude/skills
     _copy_file(canonical / "CLAUDE.md", workdir / "CLAUDE.md")
     off_names = _non_project_skills(canonical) if args.only_project_skills else []
     off_names += [
