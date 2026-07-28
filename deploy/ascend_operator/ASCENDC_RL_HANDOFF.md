@@ -130,7 +130,81 @@ interleaved M-RoPE(`mrope_section: [11,11,10]`),误差随位置增长 —— 上
 - 对抗审查 22 条里未处理的:预算可绕过(直调 skill / `bash -c` / Skill 工具不被 watcher 计数)
 - vime 侧缺"系统性全 ERROR 就早停":438 个 session 全挂时它仍一组组提交、一组组丢,白跑 8 分钟
 - CLAUDE.md 内联 27,976 字符占 prompt 注入的 79%,要瘦身得把 Phase 3/4 迭代伪代码挪进按需加载的 skill
+  ⚠️ 瘦身本身不影响断链率;**真正决定断链率的是 CLAUDE.md 给不给 skill 的文件路径**,
+  见下面「prefix merge 断链」一条 —— 动第 171-180 行那份路径清单前先读那条
 - B7:用 `profile.sing52.yaml` 起一次 triton run,确认可切回
+
+## 遗留:prefix merge / 轨迹重建
+
+### 1. 断链不可观测(优先级最高的一条,因为它挡住其它判断)
+
+**现象**:`PrefixMergingBuilder` 在**分组阶段**接不上任何开链时会直接新起一条链
+(`prefix_merging.py:_find_extendable_chain` 返回 `None`),这条路径**不写 `break_reasons`**
+—— 只有 finalize 阶段的断因才计。所以线上看到的 `break_reasons` 恒为 `{}`,
+唯一信号是 `reconstruction_stats.chains_total > 1`,而它把三类完全不同的东西混在一起:
+
+| 类别 | 特征 | 是否问题 |
+|---|---|---|
+| 真 subagent(Agent 工具 / Explore) | 第二链 prompt 小(≈6k)、**system prompt 不同** | 否,本来就该独立成样本 |
+| 重渲染丢 CoT 断链 | 第二链 prompt 大(35k~46k)、**system prompt 相同**、只是同一会话在更深处重启 | 是,同一 session 被计成 N 个样本 |
+| abort 空壳 | `prompt_ids=[]`,空 tip 永不匹配前缀 → 每条自成一链 | 见下条 |
+
+**建议**:`_find_extendable_chain` 返回 `None` 时打点,按上表三分类记进
+`reconstruction_stats.new_chain_reasons`。**这不是为了好看** —— 任何"按 session 归一化 trace 权重"
+的处理都必须先能把「同会话碎片」和「真子 agent」分开,不做这条就无从下手。
+
+**已知触发条件(2026-07-27 实测)**:claude-code 调 `Skill` 工具后,会用 qwen3.6 模板把下一轮的
+历史上下文整个重渲染一遍,该动作**丢掉历史里的 CoT**,`<|im_start|>assistant\n<think>\n` 这段
+前缀消失 → 严格 token 前缀检查失败 → 断链。ascendc 侧目前几乎不断链**不是因为修好了,是因为
+agent 基本不调 Skill 工具**;能对上轨迹的 3 个调过 Skill 的 ascendc session,3/3 全部断成 2 链。
+
+**为什么不调(核实过,别照抄直觉结论)**:不是"CLAUDE.md 里已经有 skill 的内容"——
+11 个 skill 合计 ≈912 KB(`ascendc-precision-tuning/SKILL.md` 单个 51,863 字符就比整份
+CLAUDE.md 大),CLAUDE.md 只有编排骨架(分支、迭代计数器、传参、产物清单),
+模板 / API 手册 / TileLang 映射表 / 精度知识库一个字都没有。
+真实区别在**入口**——两边同样重度消耗 skill 内容,只是进门方式不同:
+
+| | ascendc(64 session) | triton(86 session) |
+|---|---|---|
+| Read/Grep 命中 `skills/` 路径 | 486 / 792 = 61% | 476 / 727 = 66% |
+| 有调 `Skill` 工具的 session | **5(8%)** | **72(84%)** |
+| 首次读 skill 文件早于首次调 Skill(或从不调) | **57(89%)** | 3(3.5%) |
+| 直接 `Read` 到 `SKILL.md` 本身 | **47 次** | **0 次** |
+
+- triton:入口只能是 Skill 工具(`SKILL.md` 从没被 Read 过,是工具注入的),之后才顺着
+  SKILL.md 指的路径 Read `references/`。CLAUDE.md 里 `skills/` 只出现 1 次,还是**禁令**。
+- ascendc:入口是 Read。CLAUDE.md 有 16 处 `skills/` 路径,**给到文件名级别**——
+  第 68-71 行脚本路径表、第 171-180 行整份「Skill 参考资料」清单、第 234 行还有一条
+  直接从 skill 模板目录 `cp` 的命令。路径给了,Read 就是最短路径,Skill 工具沦为可选。
+
+⇒ **决定断链率的是"给不给 skill 文件路径",不是 CLAUDE.md 的长度或伪代码内联。**
+只搬伪代码、留着第 171-180 行的路径清单 → agent 照样 Read,断链率不变;
+删掉路径清单强制走 Skill 工具 → 断链率立刻回到 triton 水平。
+反过来,想永久规避断链最省事的办法就是继续暴露路径,代价是 skill 的
+progressive disclosure 失效:该按需加载的 900 KB 参考变成 agent 自己翻,
+吃上下文且不保证翻对(实测它连 `ascendc-code-gen/SKILL.md` 都要自己 Read 27 次)。
+
+### 2. abort 空壳 trace 污染统计
+
+`polar_20260725_115157` 的 805 条 trace 里 **244 条(30%)** 是
+`prompt_ids=[] / response_ids=[] / finish_reason="abort"` 的空壳(权重同步 abort)。
+session 已被 dev_09 判 `status="ERROR"` 整体丢弃、不进训练,**但**这些空壳仍会各自成链
+(空 tip 永不匹配任何前缀),把 `chains_total` 顶高,让上面第 1 条的信号更没法用。
+
+**建议**:在 `record_filters.exclude_completion_reason` 里加一条
+`finish_reason == "abort"` → `"aborted_completion"`,在 filter 阶段就剔掉,
+不要让它进分组。session 级的 ERROR 判定(`build()` 里的 `session_had_abort`)读的是
+`session.completions` 原始列表,不受 filter 影响,所以加这条不会削弱现有的丢弃逻辑。
+
+### 3. reward 广播到每条 trace(与第 1 条联动)
+
+`gateway/node.py:1002-1006`:`outcome_reward` 会被**广播**到 trajectory 的每一条 trace
+(实测每条 trace 的 `reward` 与 `outcome_reward` 完全相等)。所以一个 session 断成 N 链
+= N 个带同一 reward 的训练样本。碎片本身是 on-policy 的(prompt 是当时真发出去的、
+response 是真采样的),**不是正确性 bug**;但 N 与"这条轨迹调没调 skill"相关,
+会系统性地给某一类轨迹加权。vime 侧把 traces 展开成几条样本、如何加权,不在本仓库,
+**未核实** —— 要动加权前先确认 bridge 行为。PPO/critic 路线(sao-adapt)上,
+把终局 reward 贴到每个碎片对 value target 是错的,影响比 GRPO 大。
 
 ## 关键路径速查
 
