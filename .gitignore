@@ -122,3 +122,6 @@ docs/
 # Dashboard frontend build artifacts
 web/node_modules/
 web/dist/
+
+# Local python venv (polar runtime, 44M)
+polar/
