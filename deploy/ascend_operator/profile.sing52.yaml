@@ -1,0 +1,74 @@
+# vime+polar profile —— 以 profile.legacy.yaml 为基线(团队实际启动用的那份)。
+# 唯一改动:service 块的推理端点,从 sglang(80.48.5.52:4077)换成 vime 的 vllm。
+# 其余全部与 legacy 逐字保持一致:workflow=legacy、budget 5/2、npu_lease、gateway 16/64/64、
+# operator(timeout 7200 / max_turns 50 / max_output_tokens 12288)、evaluator(triton_eval_pipeline)。
+# 派生方式:diff profile.legacy.yaml profile.vime.yaml 应只在 service 块出现 3 处差异。
+service:
+  bind_host: 0.0.0.0
+  rollout_url: http://80.48.5.52:8080
+  gateway_url: http://80.48.5.52:8100
+  # 【vime 差异 1/3】推理端点。
+  #   ▸ 单引擎:直连 vllm WORKER(:15000)——因 vllm_router_rs(:8001,Rust router)转发丢
+  #     return_token_ids → choice.token_ids/prompt_token_ids 全 null → session 全 ERROR
+  #     (见 docs/design/router_return_token_ids_passthrough.md)。单引擎旁路 router 无损。
+  #   ▸ PD 分离(当前 FEAT_PD_DISAGG=1):切到我们的 Python PD proxy(:8001,**非** Rust router)——
+  #     它对 /v1/*completions 用 StreamingResponse 原样透传 chunk → return_token_ids 不丢,多引擎也 OK。
+  #     proxy 由 vime rollout manager 起、绑 --vllm-router-port(=8001);见 pd_disaggregation_dev_plan.md。
+  #   切回单引擎请改回 :15000(worker 端口见 vime 日志 "Added worker",自动从 15000 起)。
+  sglang_router_url: http://80.48.5.52:8001
+  # 【vime 差异 2/3 + 3/3】vime 后端是 vllm(legacy 是 sglang)。让 gateway:
+  #   (2) 用 VLLMEngine 策略发 return_token_ids + top_logprobs;
+  #   (3) 把 OpenAI 请求的 model 字段改写成 vllm 实际 serve 的名字(gateway 无条件 model=model_served;
+  #        原写死 "" → vllm 校验未知 model 400。sglang 不校验所以 legacy 没事)。model_served = --hf-checkpoint 路径。
+  inference_engine: vllm
+  model_served: /home/docker/Qwen3.6-35B-A3B
+
+paths:
+  output_dir: output/ascend_operator
+  operator_runtime_dir: operator_runtime
+
+operator_runtime:
+  workflow: legacy
+  budget:
+    generation_max: 5
+    optimization_max: 3
+    interval_seconds: 2
+  npu_lease:
+    enabled: true
+    # 【vime 卡位】polar agent 评测算子用前 4 张(0-3);vime 的 rollout+train 用 4-15,互不重叠。
+    #   (legacy 原为 [8..15],那是 slime 的卡位;vime 场景 agent 占前 4,故改为 0-3。)
+    pool: [0, 1, 2, 3]
+    lock_dir: /dev/shm/npu-locks
+
+observer:
+  host: 0.0.0.0
+  port: 18088
+
+gateway:
+  node_id: ascend-node-01
+  max_init_workers: 8
+  max_run_workers: 64
+  max_postrun_workers: 64
+  completion_persistence:
+    enabled: true
+    max_field_bytes: 67108864
+    queue_size: 4096
+
+operator:
+  profile: operator_npu
+  timeout_seconds: 8000.0
+  runtime:
+    image: sandbox:v1
+    network: host
+    workdir: /opt/workspace/agent_workdir
+  agent:
+    model_name: claude-opus-4-5
+    max_turns: 50
+    max_output_tokens: 12288
+    inference_timeout_ms: 14400000
+    disallowed_tools: "AskUserQuestion CronCreate CronDelete CronList EnterPlanMode EnterWorktree ExitPlanMode ExitWorktree NotebookEdit ScheduleWakeup TaskCreate TaskGet TaskList TaskOutput TaskStop TaskUpdate TodoWrite WebFetch WebSearch"
+    append_system_prompt: "Follow ./CLAUDE.md. The user instruction provides the concrete operator name and src/output paths. Do not ask user questions in this non-interactive run."
+  evaluator:
+    judge_command: "bash tools/triton_eval_pipeline.sh --op_name {op_name} --impl output/submission/{op_name}_impl.py --task src/{op_name}.py --out_dir judge_out"
+    submission_path: output/submission/{op_name}_impl.py
+    metrics_path: judge_out/metrics.json
