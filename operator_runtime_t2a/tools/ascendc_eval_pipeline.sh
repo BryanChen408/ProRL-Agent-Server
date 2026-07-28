@@ -445,6 +445,14 @@ if [[ -z "$MSPROF_BIN" ]]; then
   echo "[ascendc-eval] msprof NOT FOUND"; fail_hint; exit 1
 fi
 export PATH="$(dirname "$MSPROF_BIN"):$PATH"
+# warmup 对齐上游:msprof_profile_run.sh:84 固定 WARM_UP=3,不是我们 env.sh 的 WARMUP(=5)。
+# quick 模式下 warmup 跑在独立子进程、不进采集结果,只影响预热充分度,但没理由在这里偏离上游。
+MSPROF_WARMUP="${MSPROF_WARMUP:-3}"
+# --repeats 对齐上游:msprof_profile_run.sh:282 只在显式传了 --repeats= 时才转发,
+# shell 侧 REPEATS 无默认值 ⇒ 上游默认调用不带该参数,py 取自己的默认 1。
+# 我们显式写 1 = 把上游依赖的隐式默认钉死(上游文档:123 明写它可调,而 repeats>1 会让
+# 内部 warmup 变成 repeats-1>0,缓存作弊立刻生效)——防回归,不是分叉。
+#
 # 卡由 run_npu_phase 经 npu_lease_exec.py 注入 ASCEND_RT_VISIBLE_DEVICES=<物理卡>;
 # msprof_perf_summary.py:1284-1285 会从该 env 读设备(source=env),故**不要**传 --device,
 # 否则会与租约打架。
@@ -452,7 +460,7 @@ PERF_JSON="$TASK_DIR/performance.json"   # :1499 固定写 <output-dir>/performa
 rm -f "$PERF_JSON"                        # 防止读到上一轮的陈旧结果
 ( export PYTHONPATH="$SK/$PERF_SKILL/scripts:${PYTHONPATH:-}" \
   && run_npu_phase benchmark "$PY_BIN" "$PERF" --quick --output-dir "$TASK_DIR" \
-       --warmup "$WARMUP" --repeats 1 ) >"$OUT_DIR/perf.log" 2>&1
+       --warmup "$MSPROF_WARMUP" --repeats 1 ) >"$OUT_DIR/perf.log" 2>&1
 # geomean 而非 mean:上游自己的日志把 geomean 标为"主指标"(:1226),且对单个异常 case 不敏感。
 SP=$(python3 -c "import json;d=json.load(open('$PERF_JSON'));print(d.get('geomean_speedup') or d.get('mean_speedup') or '')" 2>/dev/null || echo "")
 # 单位换算:新工具出的是**微秒**(geomean_ref_us / geomean_asc_us),
