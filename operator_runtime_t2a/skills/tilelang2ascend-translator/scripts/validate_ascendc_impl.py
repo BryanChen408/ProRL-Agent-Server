@@ -30,13 +30,29 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
-# 从 validate_triton_impl 导入共享的 tensor 方法白名单（复用，消除重复代码）
-_TRITON_SCRIPTS = (
-    Path(__file__).resolve().parents[5] / "ops" / "triton-op-verifier" / "scripts"
-)
-if str(_TRITON_SCRIPTS) not in sys.path:
-    sys.path.insert(0, str(_TRITON_SCRIPTS))
-from validate_triton_impl import ALLOWED_TENSOR_METHODS
+# tensor 方法白名单：与 ops/triton-op-verifier/scripts/validate_triton_impl.py 同源（逐字）。
+# 上游原本用 parents[5] 反推仓库根去 import 它，那依赖“skill 待在原仓库树里”这个前提；
+# skill 被铺到别处（如 .claude/skills/<name>/scripts/）后层级对不上，import 必然失败。
+# 改为内联，恢复自包含。
+ALLOWED_TENSOR_METHODS = {
+    # 形状 / 元信息
+    "size", "shape", "stride", "numel", "dtype", "device", "dim",
+    "is_contiguous", "data_ptr", "element_size", "storage_offset",
+    # 布局操作（不执行计算）
+    "contiguous", "to", "view", "view_as", "reshape",
+    "permute", "transpose", "expand", "expand_as",
+    "flatten", "unflatten", "unsqueeze", "squeeze",
+    "narrow", "clone", "detach", "t",
+    "type", "float", "half", "bfloat16", "int", "long", "bool", "double",
+    "cpu", "npu", "cuda",
+    "item", "tolist",
+    # 原地标记
+    "requires_grad_", "zero_",
+    # 切片相关（一般通过 __getitem__ 而非方法，但以防万一）
+    "index_select",
+    # 安全方法（不触发计算）
+    "fill_", "copy_",
+}
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 logger = logging.getLogger(__name__)

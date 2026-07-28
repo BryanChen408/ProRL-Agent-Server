@@ -757,8 +757,8 @@ def _serialize_jsonl_inputs(case):
             for tinfo in inp.get("value", []):
                 shape = tinfo.get("shape", [])
                 dtype_str = tinfo.get("dtype", "float16")
-                lines.append(f"_tensors.append({_jsonl_tensor_code(shape, dtype_str)
-                                                .split('inputs.append(')[1].rstrip(')')})")
+                _elem = _jsonl_tensor_code(shape, dtype_str).split("inputs.append(")[1].rstrip(")")
+                lines.append(f"_tensors.append({_elem})")
             lines.append("inputs.append(_tensors)")
         else:
             val = _jsonl_scalar_value(inp)

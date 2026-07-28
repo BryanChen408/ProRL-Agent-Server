@@ -293,9 +293,14 @@ note "日志尾部:"; tail -12 "$W/b2.log" | sed 's/^/     /'
 
 if [[ -f "$J/judge_out/metrics.json" ]]; then
   note ""; note "metrics.json:"; cat "$J/judge_out/metrics.json" | sed 's/^/     /'
+  B2EL="$J/judge_out/metrics_error.log"
+  B2CRASH=0
+  [[ -f "$B2EL" ]] && grep -qE "Traceback|ModuleNotFoundError|ImportError|SyntaxError" "$B2EL" && B2CRASH=1
   for f in ast_check_ok correctness_ok; do
     v=$(python3 -c "import json;print(json.load(open('$J/judge_out/metrics.json')).get('$f'))" 2>/dev/null)
-    [[ "$v" == "True" ]] && rec "B2 $f" "PASS" "-" || rec "B2 $f" "FAIL" "$v"
+    if [[ "$v" == "True" ]]; then rec "B2 $f" "PASS" "-"
+    elif [[ $B2CRASH -eq 1 ]]; then rec "B2 $f" "FAIL" "$v(工具链崩溃,非实现问题)"
+    else rec "B2 $f" "FAIL" "$v"; fi
   done
   SP2=$(python3 -c "import json;d=json.load(open('$J/judge_out/metrics.json'));p=d.get('perf_data') or {};print(p.get('speedup_vs_torch') or '')" 2>/dev/null)
   [[ -n "$SP2" ]] && rec "B2 speedup 落盘" "PASS" "$SP2" || rec "B2 speedup 落盘" "FAIL" "perf_data 无 speedup"
@@ -328,7 +333,24 @@ PY
 ET=$(python3 -c "import json;print(json.load(open('$Q/judge_out/metrics.json')).get('error_type'))" 2>/dev/null)
 note "error_type = $ET"
 tail -6 "$W/b3.log" | sed 's/^/     /'
-[[ "$ET" == "ast_check_failed" ]] && rec "B3 退化闸门" "PASS" "如期拦下" || rec "B3 退化闸门" "FAIL" "error_type=$ET(应为 ast_check_failed)"
+# 判据分两层:光看 error_type 不够 —— 检查器**自己崩掉**时也会报 ast_check_failed。
+# 必须同时确认 metrics_error.log 里没有 Traceback / ModuleNotFoundError,
+# 否则那是"闸门崩了"而不是"闸门拦住了"。
+EL="$Q/judge_out/metrics_error.log"
+CRASH=0
+if [[ -f "$EL" ]] && grep -qE "Traceback|ModuleNotFoundError|ImportError|SyntaxError" "$EL"; then
+  CRASH=1
+  note "⚠️ metrics_error.log 里有异常栈 —— 检查器是崩了,不是拦住了:"
+  grep -mE "Traceback|ModuleNotFoundError|ImportError|SyntaxError" -A 2 "$EL" 2>/dev/null | head -6 | sed "s/^/     /" \
+    || grep -E "Traceback|ModuleNotFoundError|ImportError|SyntaxError" "$EL" | head -3 | sed "s/^/     /"
+fi
+if [[ "$ET" == "ast_check_failed" && $CRASH -eq 0 ]]; then
+  rec "B3 退化闸门" "PASS" "如期拦下(且检查器未崩)"
+elif [[ $CRASH -eq 1 ]]; then
+  rec "B3 退化闸门" "FAIL" "检查器崩溃(非拦截)——见 metrics_error.log"
+else
+  rec "B3 退化闸门" "FAIL" "error_type=$ET(应为 ast_check_failed)"
+fi
 fi
 
 # ===========================================================================
