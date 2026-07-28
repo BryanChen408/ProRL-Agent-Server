@@ -135,6 +135,37 @@ skill-4b(trace-recorder 引用不存在的 scripts)、skill-6(asc-devkit 路径)
 
 ---
 
+## 遗留:自写脚本的注释要极致精简(**兼有信息泄露风险**)
+
+**范围**:`tools/ascendc_eval_pipeline.sh`、`pack_submission.sh`、`detect_stateful_impl.py`、
+`npu_lease_exec.py`、`env.sh` —— 凡是**挂进 agent workdir、agent 能读到**的自写脚本。
+
+**问题有两层:**
+
+1. **信息泄露(主要)** —— 实测 agent 会 `cat tools/ascendc_eval_pipeline.sh`
+   (0725/0727 的 session 里有多次)。而现在的注释把**每一道反作弊闸门防的是什么**
+   写得清清楚楚,等于给模型一份攻击面清单:
+
+   ```
+   # 挡住 tarball 里塞 .claude/skills/.../verification_ascendc.py 接管判分
+   # 缓存实现能拿虚高 speedup(→满分),而对拍(只调一次)和退化检测都拦不住
+   # 纯 torch 实现 + 注释里写一句 torch.ops.npu → 编过 → 对拍必过 → reward 0.75
+   ```
+
+   在 RL 里这不是文档,是**提示词**。梯度只要撞上一次就会强化。
+
+2. **prompt/turn 预算** —— 该文件 470 行、注释占 116 行;agent `cat` 一次全进上下文。
+
+**改法**:把"为什么这么写"的长篇论证**移出脚本**,留到 `SESSION_AUDIT` / `HANDOFF` /
+commit message 里(那些 agent 读不到);脚本里只留必要的机械说明
+(参数含义、单位、调用契约),不写"这条防的是什么攻击"。
+
+**注意别矫枉过正**:`--repeats 1` / `--device` 那类**改了会破坏正确性**的约束,
+必须在脚本里留一行"别改 + 后果",否则后人无声改回。折中:脚本里写
+「别改,理由见 MIGRATION_T2A.md」,把理由本身放到 agent 读不到的地方。
+
+**时机**:阶段 D 之后、阶段 E 冒烟之前 —— 那时闸门都已验证,精简不会丢掉验证依据。
+
 ## 明确不做(v1)
 
 | | 理由 |
