@@ -11,7 +11,7 @@
 #   T0 有目录但退化/残缺      → judge 0.2
 #   T1 真调 torch.ops.npu.<op> → judge 0.3   判据: validate_ascendc_impl.py 退出 0
 #   T2 数值对拍通过            → judge 0.4   判据: --verified 或 {op}/.eval_last.log 含 "Result: pass"
-#   T3 测出 speedup            → judge 0.75+ 判据: --speedup 或 {op}/performance.json 的 overall_speedup
+#   T3 测出 speedup            → judge 0.75+ 判据: --speedup 或 {op}/performance.json 的 geomean_speedup
 # 覆盖规则(只升不降):新档 > 旧档 → 更新 .best;同档且 T3 时 speedup 更高 → 更新;
 #                     同档且 < T3 → 更新(视为修复进展);新档 < 旧档 → **不动 .best**。
 # judge 的 submission_candidates 是 .best 优先,故交出去的必然是历史最好那一版。
@@ -62,8 +62,8 @@ done
 TIER=0
 # T1: AST 退化检测 —— 纯 python、秒级、不占卡,pack 自己跑
 VALIDATOR=""
-for c in "$WORKDIR/.claude/skills/ascendc-translator/scripts/validate_ascendc_impl.py" \
-         "/opt/canonical/skills/ascendc-translator/scripts/validate_ascendc_impl.py"; do
+for c in "$WORKDIR/.claude/skills/tilelang2ascend-translator/scripts/validate_ascendc_impl.py" \
+         "/opt/canonical/skills/tilelang2ascend-translator/scripts/validate_ascendc_impl.py"; do
   [[ -f "$c" ]] && { VALIDATOR="$c"; break; }
 done
 if [[ -n "$VALIDATOR" ]]; then
@@ -79,7 +79,9 @@ fi
 if [[ "$TIER" -ge 2 ]]; then
   if [[ -z "$SPEEDUP" ]]; then
     for pj in "$TASK_DIR/performance.json" "$TASK_DIR/preformance.json"; do
-      [[ -f "$pj" ]] && SPEEDUP=$("$PY_BIN" -c "import json;v=json.load(open('$pj')).get('overall_speedup');print(float(v) if v else '')" 2>/dev/null) && [[ -n "$SPEEDUP" ]] && break
+      # t2a:新工具(ops-profiling msprof)出 geomean_speedup / mean_speedup;
+      # overall_speedup 是 pin 版 performance.py 的字段,保留以兼容旧产物。
+      [[ -f "$pj" ]] && SPEEDUP=$("$PY_BIN" -c "import json;d=json.load(open('$pj'));v=d.get('geomean_speedup') or d.get('mean_speedup') or d.get('overall_speedup');print(float(v) if v else '')" 2>/dev/null) && [[ -n "$SPEEDUP" ]] && break
     done
   fi
   [[ -n "$SPEEDUP" ]] && TIER=3

@@ -7,8 +7,8 @@
 #   Step0 解 tarball → {op}/(model.py + model_new_ascendc.py + kernel/)
 #   Step1 反退化(model_new_ascendc.py 必须真调 torch.ops.npu.<op>)
 #   Step2 编 kernel/(自包含 CMakeLists) + verification_ascendc.py 对拍 model.py
-#   Step3 performance.py 出 overall_speedup
-# 复用 cannbot 的 verification_ascendc.py / performance.py(不重造)。
+#   Step3 ops-profiling msprof --quick 出 geomean_speedup(t2a:上游 Phase 5 已从 performance.py 换成它)
+# 复用上游的 verification_ascendc.py / msprof_perf_summary.py(不重造)。
 #
 # 用法: bash ascendc_eval_pipeline.sh --op_name <op> --impl <{op}.tar.gz> --task <model.py> --out_dir judge_out
 # 环境: ASCENDC_SKILLS_SRC(eval 脚本来源,B2 后=canonical) SOC_VERSION WARMUP REPEATS
@@ -19,15 +19,15 @@ WARMUP="${WARMUP:-5}"
 REPEATS="${REPEATS:-50}"
 export SOC_VERSION="${SOC_VERSION:-ascend910b1}"
 # eval skills 默认从本 canonical 目录自带的 skills/ 取(tools/../skills);
-# 也可用 ASCENDC_SKILLS_SRC 覆盖(须是含 ascendc-translator/ascendc-performance-analyzer 的扁平目录)。
+# 也可用 ASCENDC_SKILLS_SRC 覆盖(须是含 tilelang2ascend-translator/ops-profiling 的扁平目录)。
 _SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # judge 里 canonical 恒挂在 /opt/canonical;优先它,回落脚本同级 ../skills(B1/B2 本地测)。
 if [[ -z "${ASCENDC_SKILLS_SRC:-}" ]]; then
   if [[ -d /opt/canonical/skills ]]; then ASCENDC_SKILLS_SRC=/opt/canonical/skills
   else ASCENDC_SKILLS_SRC="${_SCRIPT_DIR}/../skills"; fi
 fi
-TRANS_SKILL="ascendc-translator"
-PERF_SKILL="ascendc-performance-analyzer"
+TRANS_SKILL="tilelang2ascend-translator"
+PERF_SKILL="ops-profiling"
 
 # 解释器与工具链:沿用 env.sh(AST_CHECK_PYTHON 免 NPU;OPERATOR_PYTHON 上 NPU),
 # 缺省回落 python3,便于无 env.sh 的环境 —— 逐字对齐 triton_eval_pipeline.sh:28-33。
@@ -319,8 +319,8 @@ fi
 # ---- 准备 eval 脚本(.claude/skills 布局,verification/performance 就位)----
 SK="$WORK/.claude/skills"
 rm -rf "$SK"; mkdir -p "$SK"     # 先铲后铺:cp -r 到已存在目录会嵌套而非覆盖(见上面的隔离说明)
-if ! cp -r "$ASCENDC_SKILLS_SRC/$TRANS_SKILL" "$SK/ascendc-translator" \
-   || ! cp -r "$ASCENDC_SKILLS_SRC/$PERF_SKILL" "$SK/ascendc-performance-analyzer"; then
+if ! cp -r "$ASCENDC_SKILLS_SRC/$TRANS_SKILL" "$SK/$TRANS_SKILL" \
+   || ! cp -r "$ASCENDC_SKILLS_SRC/$PERF_SKILL" "$SK/$PERF_SKILL"; then
   # 静默吞掉 cp 失败 = 后面执行的可能是别人的脚本;这属于 judge 环境问题,判 infra 不计分
   write_metrics false false false "" "" "" \
     "judge 环境异常(get_input 之前):无法从 $ASCENDC_SKILLS_SRC 铺设评测脚本"
@@ -336,7 +336,7 @@ fi
 # Type3 forward 里仍有 torch 计算 / Type4 逐元素 for 循环),skill 里本来就带,judge 已经把它
 # cp 进 $SK 却没用 —— 而 agent 侧 selfcheck 用的正是它。judge 比 agent 自检还松是不能接受的。
 echo "[ascendc-eval] Step1 anti-degradation (AST)"
-VALIDATOR="$SK/ascendc-translator/scripts/validate_ascendc_impl.py"
+VALIDATOR="$SK/$TRANS_SKILL/scripts/validate_ascendc_impl.py"
 if [[ -f "$VALIDATOR" ]]; then
   if ! AST_OUT=$("$AST_CHECK_PYTHON" "$VALIDATOR" "$TASK_DIR/model_new_ascendc.py" 2>&1); then
     write_metrics false false false "" "" "" "AST退化检查失败: $AST_OUT"
@@ -391,8 +391,8 @@ fi
 
 # ---- Step2b: 数值对拍(**占卡**,池内抢一张)----
 echo "[ascendc-eval] Step2b verify (NPU lease)"
-VER="$SK/ascendc-translator/scripts/verification_ascendc.py"
-if ! VER_OUT=$(cd "$WORK" && export WORKDIR="$WORK" PYTHONPATH="$SK/ascendc-translator/scripts:${PYTHONPATH:-}" \
+VER="$SK/$TRANS_SKILL/scripts/verification_ascendc.py"
+if ! VER_OUT=$(cd "$WORK" && export WORKDIR="$WORK" PYTHONPATH="$SK/$TRANS_SKILL/scripts:${PYTHONPATH:-}" \
       && run_npu_phase verify "$PY_BIN" "$VER" "$OP_DIR_NAME" 2>&1); then
   printf "%s\n" "$VER_OUT" > "$OUT_DIR/verify.log"
   write_metrics true false false "" "" "" "数值对拍失败(Result: fail;完整对拍输出如下)" "$OUT_DIR/verify.log"
@@ -417,19 +417,50 @@ if [[ -f "$DETECT" ]]; then
 fi
 
 # ---- Step3: 性能(**占卡**,池内再抢一张;与对拍分开租,期间不长占)----
-# A 方案:让 performance.py 在每个 case 内轮换 K 份同 shape 不同数值的输入(见该文件里的说明)。
-export ASCENDC_PERF_INPUT_VARIANTS="${ASCENDC_PERF_INPUT_VARIANTS:-4}"
-echo "[ascendc-eval] Step3 performance (NPU lease)"
-PERF="$SK/ascendc-performance-analyzer/script/performance.py"
-PERF_JSON="$OUT_DIR/preformance.json"
-( export PYTHONPATH="$SK/ascendc-performance-analyzer/script:${PYTHONPATH:-}" \
-  && run_npu_phase benchmark "$PY_BIN" "$PERF" --output_dir "$TASK_DIR" \
-       --warmup "$WARMUP" --repeats "$REPEATS" --output "$PERF_JSON" ) >"$OUT_DIR/perf.log" 2>&1
-SP=$(python3 -c "import json;print(json.load(open('$PERF_JSON')).get('overall_speedup') or '')" 2>/dev/null || echo "")
-FW=$(python3 -c "import json,statistics as s;d=json.load(open('$PERF_JSON'));c=[x['latency_ms'] for x in d.get('reference',{}).get('case_results',[]) if x.get('latency_ms')];print(round(s.mean(c),6) if c else '')" 2>/dev/null || echo "")
-IMPL=$(python3 -c "import json,statistics as s;d=json.load(open('$PERF_JSON'));c=[x['latency_ms'] for x in d.get('ascendc',{}).get('case_results',[]) if x.get('latency_ms')];print(round(s.mean(c),6) if c else '')" 2>/dev/null || echo "")
+# t2a:上游 Phase 5 从 performance.py(wall-clock,56 次取平均)换成了
+# ops-profiling 的 msprof --quick(采 device 侧 kernel 时间)。跟着换,保持与 agent 自检同口径。
+#
+# 【为什么钉死 --quick --repeats 1,且永不用 --compare】——— 这是防测速作弊的关键,别改:
+#   msprof_perf_summary.py:1346-1348  quick 模式用 `repeats - 1` 作为 wrapper 的**内部** warmup;
+#   :926-955  外部 warmup 跑在**独立子进程**里,msprof 只 profile 最后新起的那一个进程。
+#   ⇒ repeats=1 时内部 warmup=0,被 profile 的进程里 `model = cls(...)` 全新构造、只调用一次,
+#     那一次必然是**冷调用** —— Python 对象级的 `self._cache` 跨不过进程边界,缓存作弊无效。
+#   ⇒ 反之 repeats>1(内部 warmup=repeats-1)或 --compare(内部 warmup=args.warmup,默认 3)
+#     都会在同一进程内先把缓存喂饱、再计时那一次,speedup 可以虚高到任意大。
+#   (pin 版 performance.py 是 56 次同输入取平均,所以那边需要 ASCENDC_PERF_INPUT_VARIANTS
+#    轮换输入来堵;换到 quick 之后该补丁不再需要 —— 但 detect_stateful_impl.py 仍要留,
+#    它防的是"输出不跟输入变"这类正确性问题,与计时无关。)
+echo "[ascendc-eval] Step3 performance (msprof --quick, NPU lease)"
+PERF="$SK/$PERF_SKILL/scripts/msprof_perf_summary.py"
+# msprof 必须显式解析:env.sh 恰好把 BISHENGIR_BIN(=$ASCEND_HOME_PATH/bin)加进 PATH,
+# 而 msprof 正好同目录 —— 那是巧合(该变量本意给 bisheng 编译器)。不靠巧合,按优先级定位。
+# msprof_perf_summary.py:948 是裸调 "msprof",所以必须保证它在 PATH 上。
+MSPROF_BIN="${MSPROF_BIN:-}"
+if [[ -z "$MSPROF_BIN" ]]; then
+  if [[ -x "${ASCEND_HOME_PATH}/bin/msprof" ]]; then MSPROF_BIN="${ASCEND_HOME_PATH}/bin/msprof"
+  else MSPROF_BIN="$(command -v msprof 2>/dev/null || true)"; fi
+fi
+if [[ -z "$MSPROF_BIN" ]]; then
+  write_metrics true true false "" "" "" "judge 环境异常:找不到 msprof(ASCEND_HOME_PATH=${ASCEND_HOME_PATH})"
+  echo "[ascendc-eval] msprof NOT FOUND"; fail_hint; exit 1
+fi
+export PATH="$(dirname "$MSPROF_BIN"):$PATH"
+# 卡由 run_npu_phase 经 npu_lease_exec.py 注入 ASCEND_RT_VISIBLE_DEVICES=<物理卡>;
+# msprof_perf_summary.py:1284-1285 会从该 env 读设备(source=env),故**不要**传 --device,
+# 否则会与租约打架。
+PERF_JSON="$TASK_DIR/performance.json"   # :1499 固定写 <output-dir>/performance.json
+rm -f "$PERF_JSON"                        # 防止读到上一轮的陈旧结果
+( export PYTHONPATH="$SK/$PERF_SKILL/scripts:${PYTHONPATH:-}" \
+  && run_npu_phase benchmark "$PY_BIN" "$PERF" --quick --output-dir "$TASK_DIR" \
+       --warmup "$WARMUP" --repeats 1 ) >"$OUT_DIR/perf.log" 2>&1
+# geomean 而非 mean:上游自己的日志把 geomean 标为"主指标"(:1226),且对单个异常 case 不敏感。
+SP=$(python3 -c "import json;d=json.load(open('$PERF_JSON'));print(d.get('geomean_speedup') or d.get('mean_speedup') or '')" 2>/dev/null || echo "")
+# 单位换算:新工具出的是**微秒**(geomean_ref_us / geomean_asc_us),
+# metrics.json 的 framework_latency_ms / impl_latency_ms 是**毫秒**。
+FW=$(python3 -c "import json;d=json.load(open('$PERF_JSON'));v=d.get('geomean_ref_us') or d.get('mean_ref_us');print(round(v/1000.0,6) if v else '')" 2>/dev/null || echo "")
+IMPL=$(python3 -c "import json;d=json.load(open('$PERF_JSON'));v=d.get('geomean_asc_us') or d.get('mean_asc_us');print(round(v/1000.0,6) if v else '')" 2>/dev/null || echo "")
 if [[ -z "$SP" ]]; then
-  write_metrics true true false "" "" "" "性能测试失败(无 overall_speedup;完整日志如下)" "$OUT_DIR/perf.log"
+  write_metrics true true false "" "" "" "性能测试失败(无 geomean_speedup;完整日志如下)" "$OUT_DIR/perf.log"
   echo "[ascendc-eval] benchmark FAILED"; fail_hint; exit 1
 fi
 
