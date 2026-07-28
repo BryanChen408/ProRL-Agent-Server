@@ -253,7 +253,29 @@ if [[ -z "$TASK_DIR" || ! -d "$TASK_DIR/kernel" ]]; then
   write_metrics false false false "" "" "" "submission tarball 缺 {op}/kernel 或 model_new_ascendc.py"
   echo "[ascendc-eval] bad submission layout"; fail_hint; exit 1
 fi
-OP_DIR_NAME="$(basename "$TASK_DIR")"
+# 归一化:tarball 若打成 `tar -C {op} .`(内容直接在包根),解包后 model_new_ascendc.py
+# 落在 $WORK 顶层 → TASK_DIR=$WORK → basename 得到 "work" 这种工作目录名,而不是算子名。
+# 后果有二:① verification_ascendc.py 收到 op="work" 直接 FileNotFoundError;
+#          ② 下面隔离闸的 _TOP_REL 会等于 "."，整段被跳过。
+# --op_name 是命令行传进来的真值,以它为准:把内容挪进 $WORK/$OP_NAME/ 再继续。
+if [[ "$(realpath "$TASK_DIR")" == "$(realpath "$WORK")" ]]; then
+  _NORM="$WORK/.__norm__/$OP_NAME"
+  mkdir -p "$_NORM"
+  find "$WORK" -mindepth 1 -maxdepth 1 ! -name '.__norm__' -exec mv {} "$_NORM/" \; 2>/dev/null || true
+  mv "$_NORM" "$WORK/$OP_NAME" && rmdir "$WORK/.__norm__" 2>/dev/null
+  TASK_DIR="$WORK/$OP_NAME"
+  if [[ ! -d "$TASK_DIR/kernel" ]]; then
+    write_metrics false false false "" "" "" "submission tarball 布局异常:归一化后仍缺 $OP_NAME/kernel"
+    echo "[ascendc-eval] bad submission layout after normalize"; fail_hint; exit 1
+  fi
+  echo "[ascendc-eval] normalized flat tarball -> $OP_NAME/"
+fi
+OP_DIR_NAME="$OP_NAME"
+if [[ "$(basename "$TASK_DIR")" != "$OP_NAME" ]]; then
+  write_metrics false false false "" "" "" \
+    "submission tarball 顶层目录名 $(basename "$TASK_DIR") 与 --op_name $OP_NAME 不一致"
+  echo "[ascendc-eval] op dir name mismatch"; fail_hint; exit 1
+fi
 
 # ---- 隔离:tarball 里除了 {op}/ 这棵树,其它一律删掉 ----
 # 【为什么】$WORK 是**完全由 agent 控制**的解包目录,而下面 SK="$WORK/.claude/skills"
