@@ -70,7 +70,13 @@ def _instruction(op_name: str, model_rel: str) -> str:
     )
 
 
-def build(benchmark_dir: Path, level: int, out_path: Path, arch: str = "ascend910b1") -> int:
+def build(
+    benchmark_dir: Path,
+    level: int,
+    out_path: Path,
+    arch: str = "ascend910b1",
+    only: set[str] | None = None,
+) -> int:
     level_dir = benchmark_dir / f"level{level}"
     if not level_dir.is_dir():
         raise SystemExit(f"level 目录不存在: {level_dir}")
@@ -82,6 +88,8 @@ def build(benchmark_dir: Path, level: int, out_path: Path, arch: str = "ascend91
             if not m:
                 continue
             op_name = py.stem  # e.g. 1_GELU
+            if only and op_name not in only:
+                continue
             name = m.group(2)
             payload = {
                 "prompt": [{"role": "user", "content": _instruction(op_name, f"input/{op_name}.py")}],
@@ -113,8 +121,17 @@ def main() -> int:
     ap.add_argument("--level", type=int, default=1)
     ap.add_argument("--out", required=True, type=Path)
     ap.add_argument("--arch", default="ascend910b1")
+    ap.add_argument(
+        "--ops",
+        default="",
+        help="逗号分隔的算子名白名单(如 3_Add),只生成这些 —— 单算子冒烟用:"
+             "把结果指给 vime 的 OPERATOR_TASK_JSONL,OPERATOR_TASKS_DIR 保持不变即可,零代码改动。",
+    )
     args = ap.parse_args()
-    build(args.benchmark_dir, args.level, args.out, args.arch)
+    only = {o.strip() for o in args.ops.split(",") if o.strip()} or None
+    n = build(args.benchmark_dir, args.level, args.out, args.arch, only)
+    if only and n != len(only):
+        raise SystemExit(f"[gen-ascendc] --ops 指定 {sorted(only)} 但只生成了 {n} 行,检查算子名")
     return 0
 
 
