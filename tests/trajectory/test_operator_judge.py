@@ -91,7 +91,7 @@ if _DEPS:
 
 def test_success_speedup_reward():
     res, _agent, judge = _run({"success": True, "perf_data": {"speedup_vs_torch": 2.0}})
-    assert res.outcome_reward == 1.0
+    assert res.outcome_reward == 0.9   # 0.75+0.25*(s^2-1)/(s^2+1), s=2 -> 0.9
     assert res.metadata["success"] is True and res.metadata["error_type"] is None
     assert len(judge.uploaded) == 1 and len(judge.execs) == 1  # impl crossed + judge ran
 
@@ -206,7 +206,7 @@ def test_workdir_resolves_relative_submission_to_absolute():
             runtime=agent, fresh_eval_runtime=judge, refresh_runtime=True,
             artifacts_dir=d, env={}, timeout_seconds=None, session_id="s", task_id="t",
         ))
-    assert res.metadata["error_type"] is None and res.outcome_reward == 1.0   # found + scored, NOT missing
+    assert res.metadata["error_type"] is None and res.outcome_reward == 0.9   # found + scored, NOT missing
     assert res.metadata["submission_used"] == SUB[:-3] + ".best.py"           # logical (relative) label kept
     assert judge.uploaded and judge.uploaded[0][1] == f"{wd}/{SUB}"           # uploaded to the ABSOLUTE dest
 
@@ -249,7 +249,7 @@ def test_host_submission_artifact_skips_agent_download():
             submission_host_path=str(host_impl),
             submission_used=SUB,
         ))
-    assert res.outcome_reward == 1.0
+    assert res.outcome_reward == 0.9   # 0.75+0.25*(s^2-1)/(s^2+1), s=2 -> 0.9
     assert res.metadata["submission_used"] == SUB
     assert judge.uploaded and judge.uploaded[0][1] == SUB
     assert agent.files == {}
@@ -314,7 +314,7 @@ def test_cannbot_judge_runs_native_verify_benchmark_without_budget_env():
             task_id="t",
         ))
 
-    assert res.outcome_reward == 1.0
+    assert res.outcome_reward == 0.9   # 0.75+0.25*(s^2-1)/(s^2+1), s=2 -> 0.9
     assert res.metadata["submission_used"] == "output/optimized_code.py"
     assert len(judge.execs) == 3
     assert "stage_verifier_inputs.py" in judge.execs[0]
@@ -364,7 +364,7 @@ def test_cannbot_judge_prefers_phase5_final_artifact():
         ))
 
     assert res.metadata["submission_used"] == f"{OP}_generated.py"
-    assert res.outcome_reward == 1.0
+    assert res.outcome_reward == 0.9   # 0.75+0.25*(s^2-1)/(s^2+1), s=2 -> 0.9
 
 
 def test_cannbot_judge_verify_failure_does_not_run_benchmark():
