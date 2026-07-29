@@ -27,6 +27,11 @@ INFRA_ERROR_TYPES = frozenset({
     "judge_metrics_unreadable",  # judge ran but metrics.json corrupt
     "judge_no_metrics",          # judge produced no metrics.json
     "npu_runtime_unavailable",   # Ascend runtime/device visibility failed before operator code ran
+    "submission_fetch_failed",   # the artifact existed but transport failed (source container gone,
+                                 # connection/timeout) -> can't distinguish from a good run being
+                                 # cut off; retry instead of scoring the agent 0.2 for our plumbing.
+                                 # NOTE: plain "submission_missing" (file genuinely absent) stays
+                                 # the AGENT's fault and keeps its real 0.2 signal.
 })
 
 

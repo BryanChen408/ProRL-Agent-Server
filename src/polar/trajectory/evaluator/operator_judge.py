@@ -206,18 +206,35 @@ class OperatorJudgeEvaluator(BaseTrajectoryEvaluator):
         else:
             assert isinstance(source, BaseRuntime)
             picked = None
+            # Keep每个候选的真实失败原因。原实现是 `except Exception: continue`,把
+            # "文件不存在"(agent 没交 → 记 0.2 合理)和"源容器已销毁 / 传输失败"
+            # (infra 故障 → 应 retry 不计分)塌缩成同一条 submission_missing,
+            # 事后无从区分 —— 实测有 session 打包成功 10 次仍报 missing 而查不下去。
+            attempts: list[str] = []
             for cand in self.submission_candidates:
                 try:
                     await source.download_file(self._abs(cand), str(local_impl))
                     picked = cand  # report the logical (relative) path; _abs is a transfer detail
                     break
-                except Exception:  # noqa: BLE001 — try the next candidate (best -> final)
+                except Exception as exc:  # noqa: BLE001 — try the next candidate (best -> final)
+                    attempts.append(f"{cand}: {type(exc).__name__}: {exc}")
                     continue
             if picked is None:
+                detail = "; ".join(attempts) if attempts else "no candidates configured"
+                # 传输层故障(容器没了/连不上/超时)与"文件确实不存在"要分开:前者是 infra,
+                # 后者才是 agent 的锅。判据用异常类型名,不看文案(文案随 runtime 实现变)。
+                transport = any(
+                    kind in a
+                    for a in attempts
+                    for kind in (
+                        "ConnectionError", "TimeoutError", "asyncio.TimeoutError",
+                        "ContainerNotFound", "RuntimeNotAvailable", "OSError",
+                    )
+                )
                 return self._scored(
                     {"success": False, "ast_check_ok": False, "correctness_ok": False,
-                     "error_type": "submission_missing",
-                     "error": f"no submission in candidates: {self.submission_candidates}"},
+                     "error_type": "submission_fetch_failed" if transport else "submission_missing",
+                     "error": f"no submission in candidates: {self.submission_candidates} | {detail}"},
                     artifacts_dir, submission_used=None,
                 )
 
