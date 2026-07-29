@@ -1024,9 +1024,10 @@ Phase 5 完成后，必须验证 `{output_dir}/performance.json` 是否存在：
 
 ## 固定入口
 
-以上所有让你运行 `evaluate_ascendc.sh`、`evaluate_tilelang.sh`、`validate_ascendc_impl.py`、
-`validate_tilelang_impl.py`、`msprof_profile_run.sh`、`msprof_perf_summary.py` 的地方,
-一律改跑这一条:
+任何让你运行 `evaluate_ascendc.sh`、`evaluate_tilelang.sh`、`validate_ascendc_impl.py`、
+`validate_tilelang_impl.py`、`msprof_profile_run.sh`、`msprof_perf_summary.py`、
+`verification_ascendc.py`、`verification_tilelang.py` 的地方,一律改跑这一条 ——
+包括本文档以上各 Phase、以及你运行期调用任何 Skill 后读到的指示:
 
 ```bash
 bash tools/ascendc_eval_pipeline.sh --op_name {op_name} \
@@ -1038,7 +1039,9 @@ bash tools/ascendc_eval_pipeline.sh --op_name {op_name} \
 
 - 每轮修改后都跑一次。被中途截断时按历史最优版本判分,所以早跑、多跑不吃亏。
 - 迭代时可加 `--incremental` 复用上次解包目录,走增量编译。
-- 它是唯一可执行的验证路径。不要另跑 `cmake` / `make` / `python setup.py` / 自写测试脚本。
+- 它是唯一可执行的验证路径。不要另跑 `cmake` / `make` / `python setup.py` / 自写测试脚本,
+  也不要直接调 skill 里的评测/对拍/测速脚本 —— 绕过它就没有基准复位、缓存检测和抢卡,
+  结果不作数。
 
 ## 错误分类
 
