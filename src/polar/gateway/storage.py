@@ -266,6 +266,30 @@ class SessionStore:
             )
         return record.completion_id
 
+    def record_upstream_failure(self, session_id: str, kind: str) -> None:
+        """Stamp an upstream (inference engine) failure onto the session.
+
+        A 5xx from the engine never becomes a CompletionRecord — the request raised before
+        ``should_save``, so the trajectory keeps no trace of it and the session looks like a
+        normal, merely shorter one.  It is then scored as if the agent had produced that
+        (truncated) work, which turns an engine outage into a real training signal.
+
+        Observed: 56/64 sessions across three ascendc runs ended on
+        ``API Error: 502 Upstream request failed`` yet were stored COMPLETED with reward 0.2.
+
+        Counting here (not raising) keeps the request path unchanged; the trajectory builder
+        decides what to do with it, mirroring the dev_09 abort discipline.
+        """
+        with self._lock:
+            state = self._sessions.get(session_id)
+            if state is None:
+                return
+            failures = state.metadata.get("upstream_failures")
+            if not isinstance(failures, dict):
+                failures = {}
+            failures[kind] = int(failures.get(kind) or 0) + 1
+            state.metadata["upstream_failures"] = failures
+
     def mark_session_closed(self, session_id: str, *, reason: str | None = None) -> None:
         """Remember that a session is final so late upstream completions are ignored."""
         if not session_id:

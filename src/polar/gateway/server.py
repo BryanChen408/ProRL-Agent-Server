@@ -25,6 +25,7 @@ from polar.gateway.proxy import (
     UpstreamError,
     UpstreamHTTPError,
     UpstreamTimeoutError,
+    UpstreamTransportError,
 )
 from polar.gateway.session import (
     InvalidSessionIdError,
@@ -274,6 +275,17 @@ def _build_error_body(
         return {"error": {"message": message, "status": status}}
 
     return {"error": {"message": message, "type": error_type}}
+
+
+def _upstream_error_kind(exc: Exception) -> str:
+    """Coarse bucket for an upstream failure, by exception type (not message text)."""
+    if isinstance(exc, UpstreamHTTPError):
+        return f"http_{getattr(exc, 'status_code', 'unknown')}"
+    if isinstance(exc, UpstreamTimeoutError):
+        return "timeout"
+    if isinstance(exc, UpstreamTransportError):
+        return "transport"
+    return "upstream_error"
 
 
 def _upstream_error_response(api_type: APIType, exc: Exception) -> JSONResponse:
@@ -812,6 +824,7 @@ async def _handle_non_streaming(
         )
     except UpstreamError as exc:
         logger.warning("Non-streaming upstream error for session %s: %s", session_id, exc)
+        state.storage.record_upstream_failure(session_id, _upstream_error_kind(exc))
         return _upstream_error_response(api_type, exc)
     response = generation.response
 
@@ -865,6 +878,7 @@ async def _handle_streaming(
         )
     except UpstreamError as exc:
         logger.warning("Upstream error for streaming session %s: %s", session_id, exc)
+        state.storage.record_upstream_failure(session_id, _upstream_error_kind(exc))
         return _upstream_error_response(api_type, exc)
     response = generation.response
 

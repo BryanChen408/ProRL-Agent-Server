@@ -78,6 +78,33 @@ def _completion_policy_version(completion: CompletionRecord) -> int | None:
         return None
 
 
+def _session_upstream_failures(metadata: dict[str, Any]) -> dict[str, int]:
+    """Upstream (inference engine) failures stamped on the session by the gateway.
+
+    A 5xx from the engine raises before the completion is saved, so it leaves NO
+    CompletionRecord — the session merely looks shorter and gets scored as if the agent
+    had produced that truncated work.  Measured: 56/64 sessions across three ascendc runs
+    ended on ``API Error: 502 Upstream request failed`` yet were stored COMPLETED with
+    reward 0.2, i.e. an engine outage became a real training signal.
+
+    ``SessionStore.record_upstream_failure`` counts them into session metadata; here they
+    get the same treatment as a weight-update abort (dev_09): the whole session is
+    non-trainable, status="ERROR", and oversampling backfills a clean one.
+    """
+    raw = metadata.get("upstream_failures")
+    if not isinstance(raw, dict):
+        return {}
+    out: dict[str, int] = {}
+    for key, value in raw.items():
+        try:
+            count = int(value)
+        except (TypeError, ValueError):
+            continue
+        if count > 0:
+            out[str(key)] = count
+    return out
+
+
 def _session_policy_versions(completions: list[CompletionRecord]) -> set[int]:
     """Distinct policy_versions across a session's raw completions (>1 == mixed-weight)."""
     return {v for c in completions if (v := _completion_policy_version(c)) is not None}
@@ -205,9 +232,12 @@ class PrefixMergingBuilder(BaseTrajectoryBuilder):
         # mid-interaction (mixed-weight).  Precise -- only true spans, no false kills.
         session_versions = _session_policy_versions(session.completions)
         session_spanned = len(session_versions) > 1
-        _non_trainable = session_had_abort or session_spanned
-        if session_had_abort:
-            _span_error: str | None = "aborted generation (weight-update cutoff)"
+        upstream_failures = _session_upstream_failures(dict(session.metadata))
+        _non_trainable = session_had_abort or session_spanned or bool(upstream_failures)
+        if upstream_failures:
+            _span_error: str | None = f"upstream engine failure: {upstream_failures}"
+        elif session_had_abort:
+            _span_error = "aborted generation (weight-update cutoff)"
         elif session_spanned:
             _span_error = f"policy_version span (mixed-weight): {sorted(session_versions)}"
         else:
@@ -227,6 +257,7 @@ class PrefixMergingBuilder(BaseTrajectoryBuilder):
                 "trace_count": len(final_traces),
                 "reconstruction_stats": stats,
                 "completion_filter": filter_result.metadata,
+                "upstream_failures": upstream_failures or None,
                 **_top_level_scheduler_metadata(session.metadata),
             },
             traces=final_traces,
