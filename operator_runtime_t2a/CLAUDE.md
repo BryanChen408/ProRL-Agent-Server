@@ -129,7 +129,7 @@ Phase 7: Trace 记录            (tilelang2ascend-trace-recorder)
 |------|------|------|
 | API 文档 | `asc-devkit/docs/api/` | 确认 API 签名、dtype 支持矩阵 |
 | 官方示例 | `asc-devkit/examples/` | 确认正确的编程模式和用法 |
-| 历史成功任务 | `workflows/templates/archive_tasks/` | 确认 host/kernel 的正确传参模式 |
+| 历史成功任务 | `.claude/workflows/templates/archive_tasks/` | 确认 host/kernel 的正确传参模式 |
 
 > asc-devkit 的代码生成时查阅职责已下沉到 `tilelang2ascend-translator` skill 内部。agent 无需在调用 skill 前自行查阅。
 
@@ -419,7 +419,7 @@ mkdir -p {output_dir}/kernel/op_host
 mkdir -p {output_dir}/kernel/op_kernel
 mkdir -p {output_dir}/kernel/utils
 # 从模板复制固定工具文件（不生成，内容固定）
-cp plugins-community/tilelang2ascendc-ops-generator/skills/tilelang2ascend-operator-project-init/templates/ascend-kernel/csrc/utils/torch_kernel_helper.h {output_dir}/kernel/utils/
+cp .claude/skills/tilelang2ascend-operator-project-init/templates/ascend-kernel/csrc/utils/torch_kernel_helper.h {output_dir}/kernel/utils/
 ```
 
 kernel 目录结构（后续 Phase 4 由 Developer / translator skill 填充）：

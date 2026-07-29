@@ -221,6 +221,42 @@ commit message 里(那些 agent 读不到)。脚本里只留必要的机械说�
 
 **时机**:阶段 D 之后、阶段 E 冒烟之前 —— 那时闸门都已验证,精简不会丢掉验证依据。
 
+## primary agent 层:不引入,但有两条真空缺(待评估)
+
+上游是两层:`CLAUDE.md`(= `AGENTS.md`,primary 调度壳)+ `.claude/agents/<name>.md`(subagent,
+真正干活的)。我们**把 subagent 那份直接当 CLAUDE.md 用,不铺 `.claude/agents/`**。
+
+⚠️ 早先写的「primary 的职责在 RL 里全不适用」**措辞不准**。逐条对照后的准确说法是:
+**它的硬约束我们已经用代码实现了(而且更硬),但有两条是真空缺。**
+
+| primary 职责 | 我们的处理 |
+|---|---|
+| 需求接收 / 算子分类 / 调度 subagent / 争议仲裁 | task prompt 替代;分类规则 subagent 自己也有;单层 agent;无人可仲裁 |
+| **判断「代码问题 vs 环境问题」** | judge/reward 层的 `INFRA_ERROR_TYPES` + `classify_infra_error_text` —— **确定性代码,不靠模型自觉** |
+| 迭代上限(A 类 5 / D 类 12 / REVIEW 3 轮) | pipeline budget(`generation_max`),粒度不同但覆盖 |
+| 禁止修改 `{output_dir}/` 之外的文件 | 隔离闸(铲掉 `{op}/` 之外一切)—— 同样更硬 |
+| **进度监控**(读文件判断当前 Phase) | **无 —— 空缺①** |
+| **D 类修复重入:重新调用 Subagent** | **无 —— 空缺②** |
+
+**空缺① 进度监控**:session 内没有任何东西观察 agent 走到哪一 Phase,只能事后翻 transcript。
+影响有限(judge 只看最终产物),但可观测性上是缺的。
+
+**空缺② 上下文重置 —— 这条是架构差异,不只是功能缺失。**
+primary 的做法是:subagent 返回精度失败 → **重新调用 subagent**,给一个**全新上下文**、
+只带回失败结论,并明令禁止 primary 自己改 kernel。我们是同一个 agent 在一条越来越长的
+session 里自己迭代,区别:
+
+- **上下文污染** —— 失败尝试全堆在上下文里(实测有 session 跑到 263 轮、response 106k token)
+- **无法重置** —— 走进死胡同就一路错到底,没有「换个思路重来」的机制
+- **与断链/预算叠加** —— 上下文越长越容易撞 `MAX_TOKENS_PER_GPU` 的丢弃闸
+
+这在 RL 里不是纯负面:**长 session 的自我修正正是我们想训的能力**。但「外层重启」是一种
+我们完全没有的探索模式。**记为待评估:是否给一次「清空上下文重来」的机会。**
+
+**v1 结论不变:不引入 primary 层。**它的硬约束已由代码承担,用模型执行调度只会多一层
+不确定性;而且 `.claude/agents/` 铺进去会让 claude-code 把同一份 md 注册成可调 subagent,
+模型可能真去调,平白多一层嵌套。
+
 ## 明确不做(v1)
 
 | | 理由 |
