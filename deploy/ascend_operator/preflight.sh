@@ -28,8 +28,10 @@ bash -n "$0"
 bash -n "${ROOT}/check_polar_runtime_image.sh"
 bash -n "${POLAR_ROOT}/scripts/patch/patch_sglang.sh"
 
-log "operator assets"
-python3 - "$SKILLS_DIR" "$TASKS_DIR" "$TASK_JSONL" <<'PY'
+# canonical 树按自带的评测入口判型:ascendc 树没有 triton 资产,反之亦然。
+if [[ -f "${SKILLS_DIR}/tools/ascendc_eval_pipeline.sh" ]]; then FLAVOR=ascendc; else FLAVOR=triton; fi
+log "operator assets (flavor=${FLAVOR})"
+python3 - "$SKILLS_DIR" "$TASKS_DIR" "$TASK_JSONL" "$FLAVOR" <<'PY'
 import json
 import re
 import sys
@@ -38,15 +40,25 @@ from pathlib import Path
 skills = Path(sys.argv[1])
 tasks = Path(sys.argv[2])
 jsonl = Path(sys.argv[3])
+flavor = sys.argv[4]
 required = [
     skills / "CLAUDE.md",
-    skills / "tools" / "triton_eval_pipeline.sh",
     skills / "tools" / "npu_lease_exec.py",
     skills / "runtime" / "prepare_operator_workdir.py",
-    skills / ".agents" / "skills" / "triton-op-verifier" / "scripts" / "verify.py",
-    skills / ".agents" / "skills" / "triton-op-verifier" / "scripts" / "benchmark.py",
-    skills / "skills" / "triton-op-verifier" / "SKILL.md",
 ]
+if flavor == "ascendc":
+    required += [
+        skills / "tools" / "ascendc_eval_pipeline.sh",
+        skills / "skills" / "tilelang2ascend-translator" / "SKILL.md",
+        skills / "workflows" / "templates" / "archive_tasks",
+    ]
+else:
+    required += [
+        skills / "tools" / "triton_eval_pipeline.sh",
+        skills / ".agents" / "skills" / "triton-op-verifier" / "scripts" / "verify.py",
+        skills / ".agents" / "skills" / "triton-op-verifier" / "scripts" / "benchmark.py",
+        skills / "skills" / "triton-op-verifier" / "SKILL.md",
+    ]
 missing = [str(path) for path in required if not path.exists()]
 if missing:
     raise SystemExit("missing canonical asset(s): " + ", ".join(missing))
@@ -78,37 +90,50 @@ for path in (
         py_compile.compile(str(path), cfile=tmp.name, doraise=True)
 PY
 
+if [[ "$FLAVOR" == ascendc ]]; then
 log "skill reference list up to date"
 # CLAUDE.md 的「Skill 参考资料」块由 gen_skill_reference_list.py 从目录树生成。
 # 上游那份是手写的、粒度不一(有的带 scripts/、多数只给裸文件名),而裸文件名配合
 # 标题里的 .../skills/<name>/ 前缀会被读成"在 skill 根目录" —— 实测 agent 至少 10 次
 # 因此解析错路径。生成 + 校验,把这类漂移挡在起 run 之前。
 python3 "${ROOT}/gen_skill_reference_list.py" --canonical "$SKILLS_DIR" --check
+fi
 
-log "cross-skill import resolution"
-# skill 脚本之间用 parents[N] 反推兄弟 skill 的位置,N 是按上游仓库树数出来的,
-# 换成 install 布局(.claude/skills/<name>/scripts/)就指向不存在的目录 —— 模块级裸 import
-# 直接 ImportError。已修三处(verification_ascendc / verification_tilelang /
-# validate_tilelang_impl),这里挡住回归。
-python3 - "$SKILLS_DIR" <<'IMPORTPATHS'
+if [[ "$FLAVOR" == ascendc ]]; then
+log "self-containment(拷贝后仍可解析)"
+# 适配不变量:上游 init.sh 把 .claude/skills/<name> 建成软链指回 clone,脚本 .resolve()
+# 落在仓库树里,可以按层数反推仓库根;我们是实拷进每个 session 的 workdir,那个前提不成立。
+# 所以 canonical 树里任何东西都不许依赖"我还在 clone 里"。三条机械校验:
+#   ① 硬编码 parents[N] 定位兄弟 skill  ② 残留软链(拷贝后必悬空)
+# md 之间的相对引用不进闸门:大量是省略 .md 后缀的互链和占位名,误报盖过信号;
+# 已知悬空的 6 条散文引用记在 MIGRATION_T2A.md。
+python3 - "$SKILLS_DIR" <<'SELFCONTAINED'
 import re
 import sys
 from pathlib import Path
 
-skills = Path(sys.argv[1]) / "skills"
+root = Path(sys.argv[1])
+skills = root / "skills"
 names = {p.name for p in skills.iterdir() if p.is_dir()}
 bad = []
+
 for script in skills.rglob("*.py"):
     if "evals" in script.parts:
         continue
-    text = script.read_text(encoding="utf-8", errors="replace")
-    for m in re.finditer(r"parents\[\d+\][^\n]*", text):
+    for m in re.finditer(r"parents\[\d+\][^\n]*", script.read_text(encoding="utf-8", errors="replace")):
         if any(f'"{n}"' in m.group(0) or f"'{n}'" in m.group(0) for n in names):
-            bad.append(f"{script.relative_to(skills)}: {m.group(0).strip()}")
-if bad:
-    sys.exit("skill 脚本用硬编码 parents[N] 定位兄弟 skill,换布局即断:\n  " + "\n  ".join(bad))
-IMPORTPATHS
+            bad.append(f"[parents] {script.relative_to(root)}: {m.group(0).strip()}")
 
+for link in root.rglob("*"):
+    if link.is_symlink():
+        bad.append(f"[symlink] {link.relative_to(root)} -> {link.readlink()}")
+
+if bad:
+    sys.exit("canonical 树依赖了拷贝后不存在的东西:\n  " + "\n  ".join(bad))
+SELFCONTAINED
+fi
+
+if [[ "$FLAVOR" == ascendc ]]; then
 log "msprof invocation contract"
 # 阶段 B 定下的两条约束,靠机械校验保住(不靠注释劝阻):--repeats 必须是 1、不得出现 --compare。
 # 依据:msprof_perf_summary.py 用 repeats-1 作 wrapper 的**内部** warmup,外部 warmup 跑在
@@ -137,12 +162,13 @@ if "--repeats 1" not in code:
     sys.exit("ascendc_eval_pipeline.sh must pass --repeats 1 explicitly "
              "(relying on the upstream default lets it drift silently)")
 MSPROFCONTRACT
+fi
 
 log "readonly operator tools"
 python3 "${ROOT}/prepare_readonly_tools.py" \
   --source "${SKILLS_DIR}/tools" \
   --dest "${READONLY_TOOLS_DIR}"
-bash -n "${READONLY_TOOLS_DIR}/triton_eval_pipeline.sh"
+bash -n "${READONLY_TOOLS_DIR}/$([[ "$FLAVOR" == ascendc ]] && echo ascendc_eval_pipeline.sh || echo triton_eval_pipeline.sh)"
 python3 - "${READONLY_TOOLS_DIR}" <<'PY'
 import sys
 from pathlib import Path
