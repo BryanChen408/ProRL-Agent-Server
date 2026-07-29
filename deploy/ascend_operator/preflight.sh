@@ -85,6 +85,30 @@ log "skill reference list up to date"
 # 因此解析错路径。生成 + 校验,把这类漂移挡在起 run 之前。
 python3 "${ROOT}/gen_skill_reference_list.py" --canonical "$SKILLS_DIR" --check
 
+log "cross-skill import resolution"
+# skill 脚本之间用 parents[N] 反推兄弟 skill 的位置,N 是按上游仓库树数出来的,
+# 换成 install 布局(.claude/skills/<name>/scripts/)就指向不存在的目录 —— 模块级裸 import
+# 直接 ImportError。已修三处(verification_ascendc / verification_tilelang /
+# validate_tilelang_impl),这里挡住回归。
+python3 - "$SKILLS_DIR" <<'IMPORTPATHS'
+import re
+import sys
+from pathlib import Path
+
+skills = Path(sys.argv[1]) / "skills"
+names = {p.name for p in skills.iterdir() if p.is_dir()}
+bad = []
+for script in skills.rglob("*.py"):
+    if "evals" in script.parts:
+        continue
+    text = script.read_text(encoding="utf-8", errors="replace")
+    for m in re.finditer(r"parents\[\d+\][^\n]*", text):
+        if any(f'"{n}"' in m.group(0) or f"'{n}'" in m.group(0) for n in names):
+            bad.append(f"{script.relative_to(skills)}: {m.group(0).strip()}")
+if bad:
+    sys.exit("skill 脚本用硬编码 parents[N] 定位兄弟 skill,换布局即断:\n  " + "\n  ".join(bad))
+IMPORTPATHS
+
 log "msprof invocation contract"
 # 阶段 B 定下的两条约束,靠机械校验保住(不靠注释劝阻):--repeats 必须是 1、不得出现 --compare。
 # 依据:msprof_perf_summary.py 用 repeats-1 作 wrapper 的**内部** warmup,外部 warmup 跑在

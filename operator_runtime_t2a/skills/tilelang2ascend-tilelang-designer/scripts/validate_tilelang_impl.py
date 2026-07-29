@@ -35,9 +35,16 @@ logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 logger = logging.getLogger(__name__)
 
 # 从 validate_ascendc_impl 导入共享常量、AST 工具和检查函数
-_ASCENDC_SCRIPTS = (
-    Path(__file__).resolve().parents[1] / "tilelang2ascend-translator" / "scripts"
-)
+def _skill_scripts(name):
+    here = Path(__file__).resolve()
+    for base in here.parents:
+        cand = base / name / "scripts"
+        if cand.is_dir():
+            return cand
+    return here.parent
+
+
+_ASCENDC_SCRIPTS = _skill_scripts("tilelang2ascend-translator")
 if str(_ASCENDC_SCRIPTS) not in sys.path:
     sys.path.insert(0, str(_ASCENDC_SCRIPTS))
 from validate_ascendc_impl import (

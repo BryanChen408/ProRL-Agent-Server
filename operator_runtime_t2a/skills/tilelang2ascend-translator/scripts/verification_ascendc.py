@@ -34,9 +34,16 @@ WORKDIR = SCRIPT_DIR.parent
 
 # Import shared utility functions from ops-profiling.
 # Canonical source: ops/ops-profiling/scripts/msprof_perf_summary.py
-_PERF_SCRIPTS = (
-    Path(__file__).resolve().parents[5] / "ops" / "ops-profiling" / "scripts"
-)
+def _skill_scripts(name):
+    here = Path(__file__).resolve()
+    for base in here.parents:
+        cand = base / name / "scripts"
+        if cand.is_dir():
+            return cand
+    return here.parent
+
+
+_PERF_SCRIPTS = _skill_scripts("ops-profiling")
 if str(_PERF_SCRIPTS) not in sys.path:
     sys.path.insert(0, str(_PERF_SCRIPTS))
 
