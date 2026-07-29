@@ -1,9 +1,5 @@
 #!/usr/bin/env python3
-"""Run one command under a host-level Ascend NPU flock lease.
-
-The lock file naming intentionally matches Polar's DockerRuntime acquire_card():
-`${lock_dir}/npu{card}.lock`.
-"""
+"""Run one command under a host-level Ascend NPU flock lease."""
 
 from __future__ import annotations
 

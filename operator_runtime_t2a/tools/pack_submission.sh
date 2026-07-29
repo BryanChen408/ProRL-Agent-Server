@@ -1,23 +1,4 @@
 #!/usr/bin/env bash
-# =============================================================================
-# pack_submission.sh — AscendC 提交物打包(agent 侧固定入口的一部分)
-#
-# 为什么需要它:AscendC 的提交物是一整个工程目录(15+ 文件),而 polar 跨 fresh-judge
-# 边界只传**一个文件**(node.py 的 download_file 单文件语义)→ 必须打成 tarball。
-# triton 的提交物天生是单个 .py,agent 直接编辑它 = 自始至终"已交卷";AscendC 这边
-# 若只在收尾打包,session 被权重同步 abort(实测 66%)就全归零。
-#
-# 档位 = reward 阶梯的镜像(operator_reward.py:67-85):
-#   T0 有目录但退化/残缺      → judge 0.2
-#   T1 真调 torch.ops.npu.<op> → judge 0.3   判据: validate_ascendc_impl.py 退出 0
-#   T2 数值对拍通过            → judge 0.4   判据: --verified 或 {op}/.eval_last.log 含 "Result: pass"
-#   T3 测出 speedup            → judge 0.75+ 判据: --speedup 或 {op}/performance.json 的 geomean_speedup
-# 覆盖规则(只升不降):新档 > 旧档 → 更新 .best;同档且 T3 时 speedup 更高 → 更新;
-#                     同档且 < T3 → 更新(视为修复进展);新档 < 旧档 → **不动 .best**。
-# judge 的 submission_candidates 是 .best 优先,故交出去的必然是历史最好那一版。
-#
-# 用法: bash tools/pack_submission.sh <op_name> [--verified] [--speedup <float>]
-# =============================================================================
 set -uo pipefail
 
 OP_NAME="" VERIFIED="" SPEEDUP=""
@@ -37,12 +18,10 @@ SUB_DIR="$WORKDIR/output/submission"
 TARBALL="$SUB_DIR/${OP_NAME}_impl.tar.gz"
 BEST_TARBALL="$SUB_DIR/${OP_NAME}_impl.best.tar.gz"
 BEST_META="$SUB_DIR/.${OP_NAME}_impl.best.meta.json"
-# 打包全程不碰 NPU:AST 检查用免卡解释器(env.sh 里 AST_CHECK_PYTHON 可指向不装 torch_npu 的 python)
 _TOOLS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 [[ -f "$_TOOLS_DIR/env.sh" ]] && source "$_TOOLS_DIR/env.sh"
 PY_BIN="${PY_BIN:-${AST_CHECK_PYTHON:-python3}}"
 
-# ---- 必需件自检:缺了就明确说缺什么,不产出半残包 ----
 if [[ ! -d "$TASK_DIR" ]]; then
   echo "[pack] FAILED: 工程目录不存在: $TASK_DIR(应为 {workdir}/{op_name}/)" >&2; exit 1
 fi
@@ -58,9 +37,7 @@ for want in kernel/CMakeLists.txt kernel/op_host kernel/op_kernel; do
   [[ -e "$TASK_DIR/$want" ]] || echo "[pack] WARN: 建议补齐 $want(judge 侧要从源码重编)"
 done
 
-# ---- 档位评级(客观证据优先,不采信自述)----
 TIER=0
-# T1: AST 退化检测 —— 纯 python、秒级、不占卡,pack 自己跑
 VALIDATOR=""
 for c in "$WORKDIR/.claude/skills/tilelang2ascend-translator/scripts/validate_ascendc_impl.py" \
          "/opt/canonical/skills/tilelang2ascend-translator/scripts/validate_ascendc_impl.py"; do
@@ -71,23 +48,18 @@ if [[ -n "$VALIDATOR" ]]; then
 elif grep -q "torch.ops.npu" "$TASK_DIR/model_new_ascendc.py" 2>/dev/null; then
   TIER=1   # 找不到检测脚本时的保守回退(与 judge Step1 同判据)
 fi
-# T2: 对拍通过
 if [[ "$TIER" -ge 1 ]]; then
   if [[ -n "$VERIFIED" ]] || grep -qE "Result: *pass" "$TASK_DIR/.eval_last.log" 2>/dev/null; then TIER=2; fi
 fi
-# T3: 测出 speedup
 if [[ "$TIER" -ge 2 ]]; then
   if [[ -z "$SPEEDUP" ]]; then
     for pj in "$TASK_DIR/performance.json" "$TASK_DIR/preformance.json"; do
-      # t2a:新工具(ops-profiling msprof)出 geomean_speedup / mean_speedup;
-      # overall_speedup 是 pin 版 performance.py 的字段,保留以兼容旧产物。
       [[ -f "$pj" ]] && SPEEDUP=$("$PY_BIN" -c "import json;d=json.load(open('$pj'));v=d.get('geomean_speedup') or d.get('mean_speedup') or d.get('overall_speedup');print(float(v) if v else '')" 2>/dev/null) && [[ -n "$SPEEDUP" ]] && break
     done
   fi
   [[ -n "$SPEEDUP" ]] && TIER=3
 fi
 
-# ---- 打当前版本(总是覆盖);排除二进制:judge 一律从源码重编,带上去毫无用处还撑大包 ----
 mkdir -p "$SUB_DIR"
 if ! (cd "$WORKDIR" && tar czf "$TARBALL" \
         --exclude='build' --exclude='dist' --exclude='*.so' --exclude='*.a' \
@@ -99,7 +71,6 @@ fi
 SIZE=$(du -h "$TARBALL" 2>/dev/null | cut -f1)
 NFILES=$(tar tzf "$TARBALL" 2>/dev/null | grep -vc '/$')
 
-# ---- 与历史最优比较,只升不降 ----
 UPDATED=$(TIER="$TIER" SP="${SPEEDUP:-}" META="$BEST_META" "$PY_BIN" - <<'PY'
 import json, os, time
 from pathlib import Path
@@ -118,8 +89,8 @@ try: psp = float(prev.get("speedup"))
 except (TypeError, ValueError): psp = float("nan")
 if tier > ptier:                       update = True
 elif tier < ptier:                     update = False
-elif tier >= 3 and sp == sp:           update = (psp != psp) or (sp > psp)   # 同为 T3,比 speedup
-else:                                  update = True                        # 同档 <T3,取最新(视为修复进展)
+elif tier >= 3 and sp == sp:           update = (psp != psp) or (sp > psp)
+else:                                  update = True
 if update:
     meta_path.parent.mkdir(parents=True, exist_ok=True)
     meta_path.write_text(json.dumps(
@@ -129,11 +100,6 @@ print("1" if update else "0")
 PY
 )
 TIER_DESC=("T0 残缺/退化(judge 0.2)" "T1 真调 torch.ops.npu(judge 0.3)" "T2 对拍通过(judge 0.4)" "T3 有 speedup(judge 0.75+)")
-# 镜像一份到 bind-mount 的 session 目录:该目录直通宿主机,polar 不经容器传输即可取件。
-# 解决两件事:① agent 用 `rm -rf output/submission/*.tar.gz` 会把 .best 一起带走
-# (通配符,非恶意也可达),而取件发生在 agent 跑完之后,删了就真没了;
-# ② 容器异常退出时容器内的产物取不出来。写在这里而不是让 polar 早取,是因为
-# 只有本脚本知道"哪一版是 best"。目录不存在(triton / 本地测)时静默跳过,行为不变。
 _mirror_best() {
   local sdir="${POLAR_RUNTIME_SESSION_DIR:-/polar/session}"
   [[ -d "$sdir" ]] || return 0

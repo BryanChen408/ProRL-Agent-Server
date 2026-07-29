@@ -1,26 +1,5 @@
 #!/usr/bin/env python3
-"""C 方案:探测 ModelNew 是否"不真算" —— 缓存/常量输出/有状态实现。
-
-【为什么需要】performance.py 的测速是:对**同一组输入**连调 1+warmup+repeats(默认 56)次取平均。
-它隐含假设"每次调用都真的算一遍" —— 对真人写的代码永远成立,但被测对象是一个正在被 reward
-优化的模型时不成立。只要写成:
-
-    def forward(self, x, dim):
-        if self._cache is None:
-            self._cache = torch.ops.npu.xxx(x, dim)   # 只有第 1 次真算
-        return self._cache                             # 后面 55 次直接返回
-
-对拍(只调一次)照过、退化检测(确实调了 torch.ops.npu)照过,而平均延迟趋近 0 →
-speedup 可达几百 → reward 0.75+0.25*tanh(ln speedup) ≈ 1.0(满分)。
-写一个真正快 2 倍的 kernel 才 0.90 —— 于是 GRPO 会收敛到"写个能编过的 kernel + 缓存结果"。
-
-【判据】喂两组**不同**输入,输出必须跟着变。
-  - 先用 golden Model 验证这两组输入本该产生不同输出(否则该算子对这两组恰好同结果,跳过);
-  - 再看 ModelNew:两组输入 → 输出相同 = 不真算 → FAIL。
-  射程覆盖 self._cache / 全局缓存 / lru_cache / 返回常量 / 忽略输入。
-
-用法: python3 detect_stateful_impl.py <task_dir>     退出码 0=通过 1=判定不真算 2=无法判定(跳过)
-"""
+"""用法: detect_stateful_impl.py <task_dir>   退出码 0=通过 1=不通过 2=跳过"""
 from __future__ import annotations
 
 import importlib.util
@@ -115,9 +94,8 @@ def main(argv=None) -> int:
 
     if _same(c0, c1):
         print(
-            "[stateful-detect] FAIL: ModelNew 对两组不同输入返回了**完全相同**的输出,"
-            "而 golden 的输出是不同的 —— 说明实现没有真正随输入计算"
-            "(缓存 / 返回常量 / 忽略输入)。性能测量对同一输入连调数十次,这类实现会测出虚高 speedup。"
+            "[stateful-detect] FAIL: ModelNew 对两组不同输入返回了完全相同的输出,"
+            "而 golden 的输出不同 —— 实现没有随输入计算。"
         )
         return 1
     print("[stateful-detect] PASS: 输出随输入变化")

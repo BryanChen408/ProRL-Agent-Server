@@ -5,8 +5,8 @@
 # 派生方式:diff profile.legacy.yaml profile.vime.yaml 应只在 service 块出现 3 处差异。
 service:
   bind_host: 0.0.0.0
-  rollout_url: http://80.48.5.88:8080
-  gateway_url: http://80.48.5.88:8100
+  rollout_url: http://80.48.5.52:8080
+  gateway_url: http://80.48.5.52:8100
   # 【vime 差异 1/3】推理端点。
   #   ▸ 单引擎:直连 vllm WORKER(:15000)——因 vllm_router_rs(:8001,Rust router)转发丢
   #     return_token_ids → choice.token_ids/prompt_token_ids 全 null → session 全 ERROR
@@ -15,7 +15,7 @@ service:
   #     它对 /v1/*completions 用 StreamingResponse 原样透传 chunk → return_token_ids 不丢,多引擎也 OK。
   #     proxy 由 vime rollout manager 起、绑 --vllm-router-port(=8001);见 pd_disaggregation_dev_plan.md。
   #   切回单引擎请改回 :15000(worker 端口见 vime 日志 "Added worker",自动从 15000 起)。
-  sglang_router_url: http://80.48.5.88:8001
+  sglang_router_url: http://80.48.5.52:8001
   # 【vime 差异 2/3 + 3/3】vime 后端是 vllm(legacy 是 sglang)。让 gateway:
   #   (2) 用 VLLMEngine 策略发 return_token_ids + top_logprobs;
   #   (3) 把 OpenAI 请求的 model 字段改写成 vllm 实际 serve 的名字(gateway 无条件 model=model_served;
