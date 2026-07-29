@@ -236,8 +236,14 @@ def _prepare_ascendc_workdir(args) -> int:
     if not (canonical / "skills").is_dir():
         raise FileNotFoundError(f"required directory missing: {canonical / 'skills'}")
     _copy_tree(canonical / "skills", workdir / ".claude" / "skills")
-    if (canonical / "workflows").is_dir():
-        _copy_tree(canonical / "workflows", workdir / ".claude" / "workflows")
+    # 与 install 产物同构:.claude/{agents,skills,workflows}。
+    # agents/ 放的是 ops-direct-invoke 那 4 个(architect / design-reviewer / developer /
+    # reviewer),简单算子路径靠它们产出 DESIGN/PLAN/WALKTHROUGH/REVIEW。
+    # **不放我们自己那份** —— CLAUDE.md 已经是它,再注册一遍会被 claude-code 当成可调
+    # subagent,平白多一层嵌套。
+    for sub in ("agents", "workflows"):
+        if (canonical / sub).is_dir():
+            _copy_tree(canonical / sub, workdir / ".claude" / sub)
     _assert_upstream_paths(workdir)
     _copy_file(canonical / "CLAUDE.md", workdir / "CLAUDE.md")
     off_names = _non_project_skills(canonical) if args.only_project_skills else []

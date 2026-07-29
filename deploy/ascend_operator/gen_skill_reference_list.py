@@ -62,11 +62,13 @@ def build_block(canonical: Path) -> str:
             continue
         shown = files[:MAX_PER_SKILL]
         suffix = f" …(另有 {len(files) - len(shown)} 项)" if len(files) > len(shown) else ""
-        lines.append(f"- `{skill.name}/`")
+        # 每行给**完整可解析路径**(相对 .claude/skills/)。不要拆成"目录行 + 半截路径行" ——
+        # 那正是上游原清单的毛病(裸文件名配 skills/<name>/ 前缀,读者得自己拼),实测 agent
+        # 至少 10 次因此解析错路径;拆成两半只是把拼接难度降低,没有消除拼接这一步。
         for rel in shown:
-            lines.append(f"    - {rel}")
+            lines.append(f"- `{skill.name}/{rel}`")
         if suffix:
-            lines.append(f"    -{suffix}")
+            lines.append(f"- `{skill.name}/`{suffix}")
     lines.append("")
     lines.append(END)
     return "\n".join(lines)
