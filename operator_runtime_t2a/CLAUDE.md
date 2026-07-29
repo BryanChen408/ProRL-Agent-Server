@@ -55,48 +55,6 @@ Phase 6: 全量用例验证
 Phase 7: Trace 记录            (tilelang2ascend-trace-recorder)
 ```
 
-## Hook 机制说明
-
-本项目的 `.claude/settings.json` 已配置 **toolUse hook**，用于拦截 agent 对 skill 相关脚本的 Bash 调用。
-
-### 被拦截的脚本
-
-| 类别 | 脚本 | 说明 |
-|------|------|------|
-| 退化检测 | `validate_tilelang_impl.py` | TileLang AST 退化检测 |
-| 退化检测 | `validate_ascendc_impl.py` | AscendC AST 退化检测 |
-| 评测脚本 | `evaluate_tilelang.sh` | TileLang 功能验证 |
-| 评测脚本 | `evaluate_ascendc.sh` | AscendC 功能验证 |
-| 构建脚本 | `.claude/skills/tilelang2ascend-translator/scripts/build_ascendc.py` | AscendC kernel 编译 |
-| 验证脚本 | `.claude/skills/tilelang2ascend-translator/scripts/verification_ascendc.py` | AscendC 正确性验证 |
-| 验证脚本 | `.claude/skills/tilelang2ascend-tilelang-designer/scripts/verification_tilelang.py` | TileLang 正确性验证 |
-| 性能测试 | `msprof_profile_run.sh --quick` | 性能对比测试（--quick 模式） |
-| 批处理 | `msprof_profile_run.sh --batch` | 批量性能测试 |
-
-### Hook 行为
-
-1. **拦截**: 当 agent 通过 Bash tool 调用上述脚本时，hook 自动拦截
-2. **替换执行**: 由 `.claude/hooks/skill_script_hook.py` 接管执行
-3. **等待完成**: hook 等待脚本实际执行完毕（同步阻塞）
-4. **返回结果**: 将 exit code、stdout、stderr 以 JSON 格式返回给 agent
-5. **Agent 继续**: agent 收到结果后才继续下一步
-
-### 配置位置
-
-- Hook 脚本: `.claude/hooks/skill_script_hook.py`
-- Hook 配置: `.claude/settings.json`
-
-> **注意**: 非拦截命令（如普通 `ls`、`cp`、`python` 调用其他脚本）会透传执行，不受影响。
-
-### 退化检测脚本
-
-| 阶段 | 脚本路径 | 说明 |
-|------|---------|------|
-| Phase 3 | `.claude/skills/tilelang2ascend-tilelang-designer/scripts/validate_tilelang_impl.py` | TileLang 实现退化检测 |
-| Phase 4 | `.claude/skills/tilelang2ascend-translator/scripts/validate_ascendc_impl.py` | AscendC 实现退化检测 |
-
----
-
 ## 算子分类路由规则
 
 在 Phase 0 解析算子后，根据以下规则自动判定路径：
@@ -461,8 +419,7 @@ Phase 7: Trace 记录            (tilelang2ascend-trace-recorder)
   提交物打包只认工作目录顶层的 `{op_name}/`
 - 设置环境变量 `ASCEND_HOME=${ASCEND_HOME_PATH}`（`ASCEND_HOME_PATH` 由 shell profile 设置；
   `ASCEND_HOME` 是 cmake/make 独立构建步骤的必要变量，需显式导出）
-- ⚠️ **不要设置 `ASCEND_RT_VISIBLE_DEVICES`**：本环境 NPU 是多容器共享的卡池，
-  由固定入口内部的抢卡器统一分配；自行设置会抢占别人正在用的卡。
+- 不要设置 `ASCEND_RT_VISIBLE_DEVICES`。
 
 ### 硬件信息查询（必须执行）
 
@@ -919,7 +876,7 @@ bash .claude/skills/tilelang2ascend-translator/scripts/evaluate_ascendc.sh {outp
 
 #### 4.4 错误分类（必须执行）
 
-🔴 **强制步骤：读取 Hook 分类结果。** evaluate_ascendc.sh 由 `skill_script_hook.py` 拦截执行，Hook 会在输出中显式标注分类结果：
+🔴 **强制步骤：读取分类结果。** 固定入口执行后，固定入口会在输出中显式标注分类结果：
 
 ```
 错误分类: A类-代码/编译错误
@@ -927,7 +884,7 @@ bash .claude/skills/tilelang2ascend-translator/scripts/evaluate_ascendc.sh {outp
 错误分类: 通过
 ```
 
-**Agent 必须从 Hook 输出的 `错误分类:` 行提取分类结果，以 Hook 的分类为准，禁止自行判定。** 如果 Hook 输出中未出现 `错误分类:` 行（例如 Hook 执行异常），则回退到下表判定：
+**Agent 必须从固定入口输出的 `错误分类:` 行提取分类结果，以它为准，禁止自行判定。** 如果未出现该行，则回退到下表判定：
 
 | 类别 | 判定条件 |
 |------|---------|
@@ -953,7 +910,7 @@ D 类 → 进入 4.5D (D 类精度修复清单, 最多 12 次)
 |--------|------|
 | ❌ 把 segfault/crash 当 D 类 | evaluate 输出中有 `Segmentation fault`、`core dumped`、`vector core exception` → **必然是 A 类**，禁止标记为 D 类迭代 |
 | ❌ 把编译错误当 D 类 | evaluate 输出中有 `error:`、`undefined reference`、`CMake Error` → **必然是 A 类**，禁止标记为 D 类迭代 |
-| ❌ 在 Hook 说 A 类时坚持用 D 类流程 | Hook 输出 `错误分类: A类` 时，Agent **必须走 4.5A 流程**，禁止自行判定为 D 类并用 [D1-1] 流程 |
+| ❌ 在 分类为 A 类时坚持用 D 类流程 | 固定入口输出 `错误分类: A类` 时，Agent **必须走 4.5A 流程**，禁止自行判定为 D 类并用 [D1-1] 流程 |
 | ❌ 把 D 类计数器 d_retry 用在 A 类修复上 | A 类修复消耗 `a_retry`，D 类修复消耗 `d_retry`，两者计数器**不可混用** |
 
 ---
@@ -990,7 +947,7 @@ D 类 → 进入 4.5D (D 类精度修复清单, 最多 12 次)
 
 #### 🔴 D 类强制入口规则（不可跳过、不可绕过）
 
-当 evaluate_ascendc.sh 的 Hook 输出包含 `错误分类: D类-精度不匹配` 时，以下规则**无条件生效**：
+当 固定入口的输出包含 `错误分类: D类-精度不匹配` 时，以下规则**无条件生效**：
 
 | # | 规则 | 说明 |
 |---|------|------|
@@ -1014,14 +971,14 @@ D 类 → 进入 4.5D (D 类精度修复清单, 最多 12 次)
 | 1 | kernel **编译通过** | evaluate_ascendc.sh 输出无 `error:` / `CMake Error` |
 | 2 | kernel **正常运行完成**（无 crash） | evaluate_ascendc.sh 输出无 `Segmentation fault` / `core dumped` / `vector core exception` / `trap` |
 | 3 | **输出 shape 正确** | evaluate_ascendc.sh 输出无 `shape mismatch` / `AssertionError` 关于 shape |
-| 4 | Hook 分类为 **D 类** | evaluate_ascendc.sh 的 Hook 输出明确标注 `错误分类: D类-精度不匹配` |
+| 4 | 分类为 **D 类** | 固定入口的输出明确标注 `错误分类: D类-精度不匹配` |
 | 5 | 存在数值差异输出 | evaluate_ascendc.sh 输出含 `max_abs_diff` / `mismatch_ratio` / `MERE` |
 
 **如果条件 1-3 任一不满足 → 这是 A 类，回到 4.5A。**
-**如果条件 4 不满足（Hook 说 A 类）→ 回到 4.5A，Agent 自行分类无效。**
-**如果条件 5 不满足但 Hook 说 D 类 → Hook 分类为权威，以 Hook 为准。**
+**如果条件 4 不满足（分类为 A 类）→ 回到 4.5A，Agent 自行分类无效。**
+**如果条件 5 不满足但分类为 D 类 → 以分类为准。**
 
-**计数器**: `d_retry`，从 0 开始，**仅在 Hook 分类为 D 类时才能 +1**。A 类修复消耗 `a_retry`，D 类修复消耗 `d_retry`。两个计数器互不干扰，但不可混用——即使用 A 类修复后 evaluate 仍为 D 类，该次修复消耗的是 `a_retry` 而非 `d_retry`。
+**计数器**: `d_retry`，从 0 开始，**仅在 分类为 D 类时才能 +1**。A 类修复消耗 `a_retry`，D 类修复消耗 `d_retry`。两个计数器互不干扰，但不可混用——即使用 A 类修复后 evaluate 仍为 D 类，该次修复消耗的是 `a_retry` 而非 `d_retry`。
 
 
 ```
@@ -1199,10 +1156,10 @@ Phase 5 完成后，必须验证 `{output_dir}/performance.json` 是否存在：
 | Phase 4-S 审查评分 | 100 分制，PASS ≥ 80 / PASS WITH NOTES 70-79 / FAIL < 70 |
 | Phase 4-C A 类最大迭代 | 5 次，禁止超出 |
 | Phase 4 D 类最大迭代 | D-1 (precision-debug) 7 次 → D-2 (precision-tuning) 5 次，合计 12 次 |
-| 🛑 A 类修复硬约束 | 每次 A 类修复必须先查阅 asc-devkit 文档（[A1]），再调用 Skill 获取修复方案（[A2]），禁止跳过这两步直接改代码 |
+| A 类修复硬约束 | 每次 A 类修复必须先读 `judge_out/metrics_error.log`，再调用 Skill 获取修复方案（[A2]），禁止跳过直接改代码 |
 | 🛑 D 类修复硬约束 | 每次 D 类修复必须先调用 precision-debug/precision-tuning Skill，禁止跳过 Skill 直接改代码 |
-| 🛑 D 类入口前置校验 | 进入 D 类流程前必须确认 Hook 输出 `错误分类: D类`，且 kernel 无 crash/编译错误/shape 错误。segfault/crash/编译错误都是 A 类，禁止用 D 类计数器 |
-| 🛑 分类权威来源 | 错误分类以 Hook 输出的 `错误分类:` 行为准，Agent 自行分类无效。Hook 说 A 类就必须走 A 类流程，禁止自行判定为 D 类 |
+| D 类入口前置校验 | 进入 D 类流程前必须确认固定入口输出 `错误分类: D类`，且 kernel 无 crash/编译错误/shape 错误。segfault/crash/编译错误都是 A 类，禁止用 D 类计数器 |
+| 分类权威来源 | 以固定入口输出的 `错误分类:` 行为准，Agent 自行分类无效 |
 | 禁止 PyTorch 退化 | model_new_*.py 中禁止 torch.* 计算操作 |
 | 退化检测前置 | 每次生成/修改 model_new_*.py 后，先通过退化检测，再执行功能验证 |
 | A 类连续上限 | 同一退化子类型连续 ≥ 5 次 → 自动终止 |
@@ -1210,7 +1167,7 @@ Phase 5 完成后，必须验证 `{output_dir}/performance.json` 是否存在：
 | 文件操作范围 | 限制在 `{output_dir}/` 目录内 |
 | kernel 结构 | op_host/ + op_kernel/ 分层，通过 register.cpp 注册到 torch.ops.npu.* |
 | 编译方式 | 独立编译，产出 whl 包 |
-| NPU 设备 | 多容器共享卡池，由固定入口内部的抢卡器统一分配；**不要自行设置 `ASCEND_RT_VISIBLE_DEVICES`** |
+| NPU 设备 | 由固定入口内部分配；不要自行设置 `ASCEND_RT_VISIBLE_DEVICES` |
 | 语言 | 思考、分析、日志使用中文；代码、路径使用英文 |
 
 ---
@@ -1220,3 +1177,68 @@ Phase 5 完成后，必须验证 `{output_dir}/performance.json` 是否存在：
 - 专业、技术、简洁
 - 每完成一个 Phase 提供一行状态更新
 - 错误时清晰描述 + 建议操作
+
+---
+
+# 本环境覆盖(优先级高于以上全部内容)
+
+以上内容与本节冲突时,一律以本节为准。
+
+## 固定入口
+
+以上所有让你运行 `evaluate_ascendc.sh`、`evaluate_tilelang.sh`、`validate_ascendc_impl.py`、
+`validate_tilelang_impl.py`、`msprof_profile_run.sh`、`msprof_perf_summary.py` 的地方,
+一律改跑这一条:
+
+```bash
+bash tools/ascendc_eval_pipeline.sh --op_name {op_name} \
+     --impl output/submission/{op_name}_impl.tar.gz --out_dir judge_out
+```
+
+它一次完成:退化检测 → 编译 → 对拍 → 测速 → 写 `judge_out/metrics.json`,
+并自动把 `{op_name}/` 打包成提交物、保留历史最优版本。
+
+- 每轮修改后都跑一次。被中途截断时按历史最优版本判分,所以早跑、多跑不吃亏。
+- 迭代时可加 `--incremental` 复用上次解包目录,走增量编译。
+- 它是唯一可执行的验证路径。不要另跑 `cmake` / `make` / `python setup.py` / 自写测试脚本。
+
+## 错误分类
+
+固定入口输出末尾的 `错误分类:` 行是分类的权威来源:
+
+| 分类 | 处理 |
+|---|---|
+| `通过` | 进入下一 Phase |
+| `A类-代码/编译错误` | 走 4.5A 迭代 |
+| `D类-精度不匹配` | 走 4.5D 迭代 |
+| `INFRA-环境故障` | **不要迭代修复**,直接停止并说明 |
+
+[A1] 那条"先查 asc-devkit 文档"跳过(本环境无 asc-devkit),直接从 [A2] 调 Skill 开始。
+完整错误在 `judge_out/metrics_error.log`,先读它再动手。
+
+## 跳过的 Phase
+
+- **Phase 2(测试用例精简)**:跳过。数据集每算子固定 5 个 case。
+- **Phase 6(全量用例恢复验证)**:跳过。判分恒用数据集原版全量用例。
+
+## 提交物
+
+- 唯一提交物:`output/submission/{op_name}_impl.tar.gz`,由固定入口自动打包。
+- 工程目录必须是工作目录顶层的 `{op_name}/`,不要另建别名或带时间戳的目录。
+- `{op_name}/model.py` 与 `{op_name}/{op_name}.json` 判分时会被数据集原版覆盖,改它们无效。
+- 不要删除或移动 `output/submission/` 下的任何文件。
+
+## 不可用
+
+- `asc-devkit`(及其 `docs/` `examples/`)
+- `workflows/templates/design-template.md`
+- `tilelang2ascend-precision-tuning` 的深度审计路径(依赖 `dsl-lowering`、`ascendc-evaluation`)。
+  D 类修复只用 `ascendc-precision-debug`。
+
+## 禁止
+
+- 自行设置 `ASCEND_RT_VISIBLE_DEVICES`。
+- 运行 `npu-smi` 或任何探测 NPU 的命令。`SOC_VERSION` 已在环境变量里。
+- 读取、修改或删除 `tools/` 与 `.claude/skills/*/scripts/` 下的脚本。
+- 修改评测参数(SOC_VERSION / warmup / repeats / 精度阈值)。
+- 向用户提问。这是非交互运行,没有人会回答。
