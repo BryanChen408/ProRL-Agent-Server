@@ -135,6 +135,56 @@ skill-4b(trace-recorder 引用不存在的 scripts)、skill-6(asc-devkit 路径)
 
 ---
 
+## 闸门 B 结果(2026-07-28/29,容器内实测)
+
+脚本 `tools/t2a_gate_b.sh`,拆成三项独立检查。
+
+| | 结果 | 说明 |
+|---|---|---|
+| **B1 msprof 路径** | ✅ **PASS** | `geomean_speedup=1.0317`(平凡 torch 实现,预期≈1),`n_cases_valid=5/5`;我们的提取逻辑算出 `SP=1.0317 / FW=0.005659ms / IMPL=0.005485ms`,单位换算正确 |
+| **B3 退化闸门** | ✅ **PASS** | 纯 torch 实现如期被判 `ast_check_failed`,且 `metrics_error.log` 无异常栈(=真拦截,不是崩溃) |
+| **B2 全链路** | ⚠️ **未通过,但归因于测试脚本** | 卡在编译。原因是**我在测试脚本里拷错了文件**(见下),非 pipeline 问题 |
+
+**⇒ 判定:闸门 B 的核心目标达成 —— 我们这次改动的部分(msprof 接线、字段名、
+us→ms 换算、不传 `--device` 让租约生效)全部验证通过。**
+
+**已知缺口(不假装全过)**:pipeline 的「编译 → 对拍」两步**未直接验证**。
+风险评估为低:这两步的代码本次几乎未改(只换了 skill 名),
+且 pin 版历史上跑通过(`polar_20260727_151247` 的 jn5za7tz 编译成功并走到对拍)。
+**该缺口在阶段 E 冒烟时由模型自己产出的提交物自然覆盖。**
+
+### B2 失败的归因(别再误判)
+
+```bash
+# t2a_gate_b.sh:150 —— 我写错的一句
+cp "$TPL/csrc/CMakeLists.txt"  "$P/$OP/kernel/CMakeLists.txt"
+```
+
+`csrc/CMakeLists.txt` 是**子目录**用的:开头即 `set(... ${PROJECT_SOURCE_DIR}/...)`,
+还引用 `${PROJECT_OP_SRC_BASE}` —— 这些变量由上层 CMakeLists 定义并传下;
+单独当顶层用则变量为空,且缺 `project()`。**是测试素材的问题,pipeline 正确地报了错。**
+
+### 顺带发现的上游第三处疏漏(严重度低,记录备查)
+
+```cmake
+# templates/ascend-kernel/CMakeLists.txt:48-49
+include(cmake/config_envs.cmake)
+include(cmake/config_ascend.cmake)
+```
+
+模板里**没有 `cmake/` 目录**(实际只有 `build.sh CMakeLists.txt csrc python tests third_party`),
+官方仓全仓也搜不到这两个文件。
+
+**但危害为零** —— Phase 1.2 只让 agent 从模板拷一个
+`csrc/utils/torch_kernel_helper.h`;`CMakeLists.txt` / `setup.py` / `ops.h` / `register.cpp`
+都标着"后续 Phase 4 由 skill 填充",**agent 必须自己写自包含的那份,不碰模板顶层**。
+所以这两句是**没人执行的死代码**,与前两处(msprof 语法错堵死 Phase 5、
+退化检测跨 skill import 打崩)不是一个量级。
+
+⚠️ **更正 skill-7 里的一条**:先前把"agent 读 `templates/ascend-kernel/cmake/config_ascend.cmake`
+失败"归类为"agent 猜错层级" —— 错了。agent 是顺着顶层 CMakeLists 的 include 去找的,
+**文件真的不存在**,它是被上游死引用带偏的,不是自己乱猜。
+
 ## 遗留:自写脚本的注释要极致精简(**兼有信息泄露风险**)
 
 **范围**:`tools/ascendc_eval_pipeline.sh`、`pack_submission.sh`、`detect_stateful_impl.py`、
