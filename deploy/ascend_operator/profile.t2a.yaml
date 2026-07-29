@@ -28,6 +28,13 @@ operator_runtime:
   # ← delta 6:算子同名 .json(NPUKernelBench 用例规格,get_input_groups() 要读)随 prepare 上传到 input/。
   #   {op}.py 走 vime task_source 内容寻址,.json 没有该通道 → 从数据集目录直传。triton 侧无此字段=不产生该动作。
   task_assets_dir: /home/docker/datasets/op_tasks/npukernelbench_level1_ascendc/op_tasks
+  # ← delta 11:asc-devkit(上游 init.sh Step 4 会 clone 的算子开发资料仓)。
+  #   $ASC_DEVKIT_DIR 在 21 个 skill 文档里被引用 46 次,是出现最多的环境变量;
+  #   ascendc-docs-search 整个 skill 就是查它。只读挂到 /opt/asc-devkit,不进 workdir 拷贝。
+  #   钉 9.0.0 分支而非 init.sh 默认的 master:实测 API 名对本机 CANN 9.0.0 头文件的命中率
+  #   9.0.0=95% / master=82%,master 独有的 548 个里 53% 本机没有,照着写会引入新的编译错误。
+  #   路径映射:skill 写死 docs/zh/api,9.0.0 布局是 docs/api/context,已在仓内建相对软链。
+  asc_devkit_dir: /home/docker/asc-devkit-9.0.0
   budget:
     generation_max: 5
     optimization_max: 3
@@ -66,6 +73,7 @@ operator:
       #   落空到优先级 2。注入后永远命中第 1 级,降级路径不会被走到。
       SOC_VERSION: "ascend910b1"
       ASCENDC_SOC_VERSION: "ascend910b1"
+      ASC_DEVKIT_DIR: "/opt/asc-devkit"
 
   agent:
     model_name: claude-opus-4-5

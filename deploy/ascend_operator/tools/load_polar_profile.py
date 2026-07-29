@@ -46,11 +46,16 @@ def _repo_path(repo: Path, value: object) -> str:
     return str(path if path.is_absolute() else (repo / path).resolve())
 
 
-def _runtime_volumes(operator_runtime_dir: Path, workflow: str) -> list[str]:
+def _runtime_volumes(operator_runtime_dir: Path, workflow: str,
+                     asc_devkit_dir: str | None = None) -> list[str]:
     volumes = [f"{operator_runtime_dir}:/opt/canonical:ro"]
     tools_dir = operator_runtime_dir / "tools"
     if workflow == "legacy" or tools_dir.is_dir():
         volumes.append(f"{tools_dir}:/opt/workspace/agent_workdir/tools:ro")
+    # asc-devkit:上游 init.sh Step 4 会 clone 的算子开发资料仓($ASC_DEVKIT_DIR)。
+    # 只读挂载而非拷进 workdir —— 97M,每 session 拷一份不划算,上游那边也是一份 clone 挂着。
+    if asc_devkit_dir:
+        volumes.append(f"{asc_devkit_dir}:/opt/asc-devkit:ro")
     return volumes
 
 
@@ -243,7 +248,11 @@ def main() -> int:
                 "POLAR_NPU_LOCK_DIR": npu_lock_dir,
             }
         )
-    volumes = _runtime_volumes(operator_runtime_dir, workflow)
+    # asc-devkit 宿主机路径(profile 不配=不挂载,行为一字不变)
+    asc_devkit_dir = str(operator_runtime.get("asc_devkit_dir") or "").strip() or None
+    if asc_devkit_dir:
+        asc_devkit_dir = _repo_path(repo, asc_devkit_dir)
+    volumes = _runtime_volumes(operator_runtime_dir, workflow, asc_devkit_dir)
     upload_source = str(op_assets_dir / "op_tasks" / "{op_name}.py")
     workdir = str(runtime.get("workdir", "/opt/workspace/agent_workdir"))
     # ascendc 专用:算子同名 .json(用例规格)所在的数据集目录;triton 侧不配=不产生该动作

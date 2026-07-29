@@ -1038,8 +1038,7 @@ bash tools/ascendc_eval_pipeline.sh --op_name {op_name} \
 | `D类-精度不匹配` | 走 4.5D 迭代 |
 | `INFRA-环境故障` | **不要迭代修复**,直接停止并说明 |
 
-[A1] 那条"先查 asc-devkit 文档"跳过(本环境无 asc-devkit),直接从 [A2] 调 Skill 开始。
-完整错误在 `judge_out/metrics_error.log`,先读它再动手。
+[A1] 照做:asc-devkit 就在 `$ASC_DEVKIT_DIR`。完整错误在 `judge_out/metrics_error.log`,先读它。
 
 ## 跳过的 Phase
 
@@ -1053,9 +1052,20 @@ bash tools/ascendc_eval_pipeline.sh --op_name {op_name} \
 - `{op_name}/model.py` 与 `{op_name}/{op_name}.json` 判分时会被数据集原版覆盖,改它们无效。
 - 不要删除或移动 `output/submission/` 下的任何文件。
 
+## 环境事实
+
+- `asc-devkit` 挂在 `$ASC_DEVKIT_DIR`(= `/opt/asc-devkit`),与本机 CANN 同版本。
+  API 文档在 `$ASC_DEVKIT_DIR/docs/zh/api/`,示例在 `$ASC_DEVKIT_DIR/examples/`,
+  实现代码在 `$ASC_DEVKIT_DIR/impl/`。写 kernel 前用 `ascendc-docs-search` 查 API 签名与
+  命名空间,不要凭记忆写。
+- 文档里凡写 `asc-devkit/...` 的地方,一律读作 `$ASC_DEVKIT_DIR/...`。
+- skill 文档里 `$ASC_DEVKIT_DIR/examples/00_introduction/...` 这类路径是旧版布局,
+  本版实际是 `examples/{01_simd_cpp_api,02_simd_c_api,03_simt_api}/`,用 find 定位。
+- 编译报 `no template named 'TQue'` / `did you mean 'AscendC::...'` 这类,是命名空间或签名
+  记错,查 `$ASC_DEVKIT_DIR/docs/zh/api/` 核实,不要靠猜改。
+
 ## 不可用
 
-- `asc-devkit`(及其 `docs/` `examples/`)
 - `tilelang2ascend-precision-tuning`(无 `scripts/`,`precision_forensics.py` 上游未发布)
 
 ## 禁止
