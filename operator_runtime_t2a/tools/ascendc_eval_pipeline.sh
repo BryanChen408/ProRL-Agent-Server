@@ -158,6 +158,34 @@ PY
 
 fail_hint() {
   python3 -c "import json;d=json.load(open('$OUT_DIR/metrics.json'));p=d.get('perf_data') or {};print('[ascendc-eval] verdict — success=%s ast_check_ok=%s correctness_ok=%s error_type=%s speedup_vs_torch=%s'%(d.get('success'),d.get('ast_check_ok'),d.get('correctness_ok'),d.get('error_type'),p.get('speedup_vs_torch')))" 2>/dev/null || true
+  # CLAUDE.md 的 Phase 4 按「错误分类: A类/D类」分流到 4.5A / 4.5D 两套迭代纪律。
+  # 上游由 skill_script_hook 正则扒 evaluate_ascendc.sh 的 stdout 猜出该标签;我们不接 hook
+  # (它会代为执行被拦脚本,绕开抢卡/预算/基准注入/退化检测),改为直接从 error_type 映射 ——
+  # 那是各 Step 退出状态的结构化结论,比扒文本准,且多出 infra 一档(hook 会把环境故障
+  # 误判成 A 类,让 agent 白白迭代 5 次去"修"一个不是它造成的问题)。
+  python3 - "$OUT_DIR/metrics.json" <<'CLASSIFY' 2>/dev/null || true
+import json, sys
+try:
+    d = json.load(open(sys.argv[1]))
+except Exception:
+    sys.exit(0)
+if d.get("success"):
+    print("[ascendc-eval] 错误分类: 通过"); sys.exit(0)
+et = str(d.get("error_type") or "")
+INFRA = {"npu_runtime_unavailable", "input_load_failed", "judge_container_failed",
+         "judge_metrics_unreadable", "judge_no_metrics", "task_missing",
+         "submission_fetch_failed"}
+if et in INFRA:
+    label = "INFRA-环境故障(不是你的代码问题,不要迭代修复)"
+elif et == "correctness_failed":
+    label = "D类-精度不匹配"
+elif et in ("ascendc_compile_failed", "ast_check_failed", "submission_missing",
+            "benchmark_failed"):
+    label = "A类-代码/编译错误"
+else:
+    label = "A类-代码/编译错误"
+print(f"[ascendc-eval] 错误分类: {label}")
+CLASSIFY
   echo "  ↳ 完整错误在 $OUT_DIR/metrics_error.log;只改 {op}/ 下实现、重打 tarball、重跑本固定入口。"
 }
 
