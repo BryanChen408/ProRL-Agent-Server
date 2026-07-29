@@ -153,6 +153,68 @@ us→ms 换算、不传 `--device` 让租约生效)全部验证通过。**
 且 pin 版历史上跑通过(`polar_20260727_151247` 的 jn5za7tz 编译成功并走到对拍)。
 **该缺口在阶段 E 冒烟时由模型自己产出的提交物自然覆盖。**
 
+## 与上游的对齐清单(2026-07-29 全量核对)
+
+按 quickstart.md 的官方装法与 clean clone 逐字对照。
+
+### 装法
+
+| 官方 | 我们 | 差异 |
+|---|---|---|
+| 首选 `/plugin install tilelang2ascendc-ops-generator@cannbot` | 自写脚本按 marketplace.json 依赖图铺 | skills 结果等价(21/22,差的 `ascendc-direct-invoke-template` 是随简单算子路径一并删的) |
+| 备选 `bash init.sh project claude` | 未用 | init.sh **Step 4 会 clone asc-devkit**,这是两条官方装法的唯一实质差别 |
+
+**`/plugin install` 也不拉 asc-devkit** —— 该 plugin 的 `plugin.json` 无 postinstall,
+目录下只有 `init.sh` 里有 `git clone asc-devkit.git`。所以缺 devkit 不是我们独有,
+是上游两条装法之间本身不一致;但上游的健康检查把它列为告警项。
+
+### skills 内容:7 处改动,全部有意
+
+| 文件 | 改动 | 原因 |
+|---|---|---|
+| `ops-profiling/scripts/msprof_perf_summary.py` | f-string 断行 | Python 3.11 下无法解析 |
+| `tilelang2ascend-translator/scripts/validate_ascendc_impl.py` | 内联白名单 | 原 `parents[5]` 跨 skill import |
+| `.../verification_ascendc.py` | 改向上搜同级 skill | 同上 |
+| `tilelang2ascend-tilelang-designer/scripts/verification_tilelang.py` | 同上 | `parents[1]` 差一层,上游自身也错 |
+| `.../validate_tilelang_impl.py` | 同上 | 同上 |
+| `ascendc-precision-debug/references/tools-reference.md` | 去掉 `./env_setup.sh` 包装 | 该脚本上游未发布,我们本就在容器内 |
+| `tilelang2ascend-trace-recorder/SKILL.md` | `@scripts/` → 完整路径 | 路径笔误,agent 解析不到 |
+
+**上游有而我们缺的文件:0;我们私自新增进 skills/ 的:0。**
+
+### 有意偏离(非缺陷)
+
+- 双路径 → 统一 TileLang(简单算子路径产出的工程判分侧编不了)
+- 迭代上限 3 轮 → A 类 5 / D 类 7(RL 需要更多迭代)
+- 不接 hooks(`skill_script_hook` 会代跑被拦脚本,绕开抢卡/预算/基准注入;
+  `doc_gate` 依赖 `asc-devkit/docs/guide/`,这版 CANN 与 master 分支都没有该目录,接了会永久封禁写操作)
+- Phase 5 用 `--quick` 而非 quickstart 的 `--compare`(见下)
+
+### 已知未对齐(待办)
+
+- **asc-devkit 未拉**:`$ASC_DEVKIT_DIR` 在 21 个 skill 文档里被引用 46 次,是出现最多的
+  环境变量(超过 `$ASCEND_HOME_PATH` 的 16 次),5 个 skill 直接依赖。
+  init.sh 的 clone 不带 `--branch` ⇒ 默认分支 `master`。实测 master 下
+  25 个被引用子路径可解析 10(含核心的 `docs/zh/api`、`impl/adv_api/tiling`、
+  `include/adv_api/hccl`),不可解析 15(全是 8.5 时代的 `examples/00_introduction/...` 深路径,
+  上游用户装完同样对不上)。体量 97M(docs 25M / examples 14M / impl 24M)。
+  **若拉,应只读挂载而非进 `_copy_tree`** —— 后者每 session 拷一份。
+
+## msprof 测速契约的更正(2026-07-29)
+
+早先禁 `--compare` 的理由(「内部 warmup 会喂饱缓存 → speedup 虚高」)**是错的**,
+那是从 pin 版 wall-clock `performance.py` 推过来的,换成 msprof 后没有重新验证前提。
+
+实测代码:quick 模式测 device 侧核函数时间(`task_time_*.csv` 里 `kernel_type ∈
+{AI_VECTOR_CORE, AI_CORE, MIX_AIV, MIX}` 累加)。纯缓存实现**不发 kernel**,
+`compute_rows` 为空 → `"no compute rows found"` → 判 benchmark 失败,**不会虚高**。
+
+真正的风险是 `--repeats N` 的除法:wrapper 在同进程内跑 N-1 次预热再计时,总时间 ÷ N;
+按输入 memo 的实现(输出随输入变,`detect_stateful_impl.py` 正常放行)在同一输入上只发一次
+kernel → 报出的单次耗时是真实值的 1/N。故 **`--repeats 1` 保留**,理由改写;
+**`--compare` 不再禁**(standard 模式,不做 ÷repeats,与缓存无关;不用它只因指标用不上、
+采集慢 8 倍)。preflight 的校验与注释已同步。
+
 ## 闸门 D 结果(2026-07-29,容器内实测)
 
 脚本 `/home/docker/t2a_gate_d.sh`,三道防 reward hacking 的拦截各造反例。

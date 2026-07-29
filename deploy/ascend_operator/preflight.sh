@@ -135,11 +135,12 @@ fi
 
 if [[ "$FLAVOR" == ascendc ]]; then
 log "msprof invocation contract"
-# 阶段 B 定下的两条约束,靠机械校验保住(不靠注释劝阻):--repeats 必须是 1、不得出现 --compare。
-# 依据:msprof_perf_summary.py 用 repeats-1 作 wrapper 的**内部** warmup,外部 warmup 跑在
-# 独立子进程、msprof 只 profile 最后新起的那个。repeats=1 时内部 warmup=0,被 profile 的进程里
-# model 全新构造只调一次 = 冷调用,Python 对象级缓存跨不过进程边界,作弊无效;
-# repeats>1 或 --compare(内部 warmup=3)会在同一进程内先喂饱缓存再计时,speedup 可虚高到任意大。
+# 钉死 --repeats 1。msprof_perf_summary.py quick 模式:wrapper 在同一进程内先跑 repeats-1 次
+# 预热再计时,采集到的总 kernel 时间除以 repeats。按输入做 memo 的实现(输出随输入变化,
+# detect_stateful_impl.py 会正常放行)在同一输入上只发一次 kernel,却被除以 N → speedup 虚高 N 倍。
+# repeats=1 时内部预热=0、除数=1,该放大不存在。这是 detect 覆盖不到、只有本约束挡得住的一类。
+# --compare 不禁:它是 standard 模式(8 轮采 7 个 aic-metrics),不做 ÷repeats,与缓存无关;
+# 我们只是用不上那些指标、且采集慢 8 倍,所以不用,但没有正确性理由去禁。
 python3 - "$SKILLS_DIR" <<'MSPROFCONTRACT'
 import re
 import sys
@@ -152,9 +153,6 @@ code = "\n".join(
     line for line in pipeline.read_text(encoding="utf-8").splitlines()
     if not line.lstrip().startswith("#")
 )
-if "--compare" in code:
-    sys.exit("ascendc_eval_pipeline.sh must not use msprof --compare "
-             "(its in-process warmup lets a cached impl fake an unbounded speedup)")
 bad = [m for m in re.findall(r"--repeats\s+(\S+)", code) if m != "1"]
 if bad:
     sys.exit(f"ascendc_eval_pipeline.sh must pin --repeats 1, found: {bad}")

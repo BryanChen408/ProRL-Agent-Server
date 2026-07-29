@@ -83,31 +83,37 @@ cp 进 `$SK` 却没用 —— judge 比 agent 自检还松是不能接受的。
 
 编译**不套 `run_npu_phase`** —— AscendC 编译要数分钟,占着卡编译会堵死整个卡池。
 
-## 七、测速契约:`--quick --repeats 1`,永不用 `--compare`
+## 七、测速契约:钉死 `--repeats 1`
 
-这是防测速作弊的关键,由 `preflight.sh` 的 msprof 契约检查机械保证。
+由 `preflight.sh` 机械保证。
 
-- `msprof_perf_summary.py:1346-1348` quick 模式用 `repeats - 1` 作 wrapper 的**内部** warmup;
-- `:926-955` 外部 warmup 跑在**独立子进程**,msprof 只 profile 最后新起的那一个。
+`msprof_perf_summary.py` quick 模式测的是 **device 侧核函数时间** —— 从 `task_time_*.csv` 里把
+`kernel_type ∈ {AI_VECTOR_CORE, AI_CORE, MIX_AIV, MIX}` 的行累加。它的调用形态:
 
-⇒ `repeats=1` 时内部 warmup=0,被 profile 的进程里 `model = cls(...)` 全新构造、只调一次,
-必然是**冷调用**;Python 对象级的 `self._cache` 跨不过进程边界,缓存作弊无效。
+```python
+wrapper = _generate_wrapper_script(..., repeats - 1, ...)   # 同进程内先跑 repeats-1 次预热
+duration = duration / repeats                                # 采到的总 kernel 时间 ÷ repeats
+```
 
-⇒ 反之 `repeats>1`(内部 warmup=repeats-1)或 `--compare`(内部 warmup=args.warmup,默认 3)
-都会在同一进程内先把缓存喂饱再计时,speedup 可虚高到任意大。
+**风险来自那个除法,不是来自 warmup。**按输入做 memo 的实现(`{input_key: result}`)输出随输入
+变化,`detect_stateful_impl.py` 会正常放行;而测速在同一输入上连调 N 次,只有第一次发 kernel,
+总时间却被除以 N ⇒ speedup 虚高 N 倍。`repeats=1` 时内部预热=0、除数=1,该放大不存在。
+这是缓存探测覆盖不到、只有本约束挡得住的一类(闸门 D3 实测:cache/ok = 1.088)。
+
+**纯缓存实现(输出不随输入变)不会虚高,而是测不出来** —— 它根本不发 kernel,
+`compute_rows` 为空,解析返回 `"no compute rows found"`,判 benchmark 失败。
+
+**`--compare` 不禁**:它是 standard 模式(8 轮采集 7 个 aic-metrics + sample),不做 `÷repeats`,
+与缓存无关。我们不用它只是因为那些指标用不上、且采集慢 8 倍 —— 没有正确性理由去禁。
+(上游 quickstart 的 Phase 5 用的就是 `--compare`;这是场景差异,不是分叉。)
 
 其它对齐点:`--warmup 3` 对齐 `msprof_profile_run.sh:84`(不是 env.sh 的 WARMUP=5);
-不传 `--device`,让它从 `run_npu_phase` 注入的 `ASCEND_RT_VISIBLE_DEVICES` 读
-(`:1284-1285`),否则与租约打架;取 `geomean_speedup` 而非 mean(上游自己把 geomean 标为
-主指标 `:1226`,且对单个异常 case 不敏感);新工具出的是**微秒**,`metrics.json` 的
-`framework_latency_ms` 是**毫秒**,要换算。
+quick 模式的 warmup 跑在 msprof **之外**的独立进程里,预热的是 NPU/驱动,与进程内状态无关;
+不传 `--device`,让它从 `run_npu_phase` 注入的 `ASCEND_RT_VISIBLE_DEVICES` 读,否则与租约打架;
+取 `geomean_speedup` 而非 mean;新工具出的是**微秒**,`metrics.json` 是**毫秒**,要换算。
 
-`msprof` 必须显式解析路径:env.sh 恰好把 `BISHENGIR_BIN`(=`$ASCEND_HOME_PATH/bin`)加进
-PATH 而 msprof 正好同目录 —— 那是巧合(该变量本意给 bisheng 编译器)。
-`msprof_perf_summary.py:948` 是裸调 `"msprof"`,所以必须保证它在 PATH 上。
-
-pin 版 `performance.py` 是 56 次同输入取平均,那边才需要输入轮换补丁;换到 quick 之后不需要。
-但 `detect_stateful_impl.py` 仍要留 —— 它防的是"输出不跟输入变",与计时无关。
+`msprof` 必须显式解析路径:`msprof_perf_summary.py:948` 是裸调 `"msprof"`,靠 env.sh 把
+`BISHENGIR_BIN` 加进 PATH 是巧合,不能依赖。
 
 ## 八、Step2c 缓存/常量输出探测
 
