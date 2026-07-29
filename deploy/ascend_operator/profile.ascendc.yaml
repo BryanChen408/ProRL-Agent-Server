@@ -53,6 +53,14 @@ operator:
     image: ascendc-sandbox:v1                          # ← delta 2
     network: host
     workdir: /opt/workspace/agent_workdir
+    env:
+      # ← delta 10:SOC_VERSION 注入容器 env。CLAUDE.md 的 Phase 0「硬件信息查询」按
+      #   优先级 1(读 $SOC_VERSION)→ 2(npu-smi)→ 3(CANN 安装信息)降级,而本环境
+      #   禁止 npu-smi 这类 NPU 探针(多容器共享卡池,探测会干扰别人)。
+      #   env.sh 只被固定入口 source,agent 自己的 shell 读不到 —— 不注入这里就必然
+      #   落空到优先级 2。注入后永远命中第 1 级,降级路径不会被走到。
+      SOC_VERSION: "ascend910b1"
+      ASCENDC_SOC_VERSION: "ascend910b1"
 
   agent:
     model_name: claude-opus-4-5

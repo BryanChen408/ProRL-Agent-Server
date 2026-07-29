@@ -321,24 +321,23 @@ Phase 7: Trace 记录            (tilelang2ascend-trace-recorder)
 
 ### 解析用户输入
 
-从用户输入中提取以下参数：
+本环境的参数是**固定的**，不从自由文本里解析：
 
-| 参数 | 说明 | 默认值 |
+| 参数 | 取值 | 说明 |
 |------|------|--------|
-| `npu` | NPU 设备 ID | 0 |
-| `op_file` | 算子描述文件路径（算子的 model.py） | 必填 |
-| `output_dir` | 结果输出目录路径 | 必填 |
-
-**输入格式示例**：
-```
-生成ascendC算子，npu=6，算子描述文件为 /path/to/31_ELU.py，输出到 /path/to/output/31_ELU/
-```
+| `op_name` | 任务给定的算子名（如 `3_Add`） | 下文所有 `{op_name}` 均指它 |
+| `op_file` | `input/{op_name}.py` | 参考实现（含 `Model` 与 `get_input_groups`），已预置 |
+| `output_dir` | **`{op_name}/`**（工作目录顶层，相对路径） | 下文所有 `{output_dir}` 一律指它 |
+| `npu` | —— | **无此参数**，见下 |
 
 **参数校验**：
-- 检查 `op_file` 是否存在且可读
-- 检查 `output_dir` 是否存在，不存在则创建
-- 设置环境变量 `ASCEND_RT_VISIBLE_DEVICES=${npu}`
-- 设置环境变量 `ASCEND_HOME=${ASCEND_HOME_PATH}`（`ASCEND_HOME_PATH` 由 shell profile 设置；`ASCEND_HOME` 是 cmake/make 独立构建步骤的必要变量，需显式导出）
+- 检查 `op_file` 存在且可读
+- `{output_dir}` 不存在则创建；**不要另建带时间戳或别的名字的目录**，
+  提交物打包只认工作目录顶层的 `{op_name}/`
+- 设置环境变量 `ASCEND_HOME=${ASCEND_HOME_PATH}`（`ASCEND_HOME_PATH` 由 shell profile 设置；
+  `ASCEND_HOME` 是 cmake/make 独立构建步骤的必要变量，需显式导出）
+- ⚠️ **不要设置 `ASCEND_RT_VISIBLE_DEVICES`**：本环境 NPU 是多容器共享的卡池，
+  由固定入口内部的抢卡器统一分配；自行设置会抢占别人正在用的卡。
 
 ### 硬件信息查询（必须执行）
 
@@ -356,9 +355,13 @@ Phase 7: Trace 记录            (tilelang2ascend-trace-recorder)
    ```
 4. **禁止覆盖**：若环境变量已有效设置，无需再执行 `npu-smi` 或读取 CANN 安装信息，避免检测结果被错误改写
 
-#### 优先级 2：`npu-smi info -t board -i ${npu}`
+#### 优先级 2：`npu-smi info`
 
-仅当优先级 1 未获取到有效 `SOC_VERSION` 时执行：
+⚠️ **本环境不适用**：`SOC_VERSION` 由固定入口在优先级 1 就注入,永远命中第 1 级;
+且 `npu-smi` 属于禁止的 NPU 探针(多容器共享卡池,探测会干扰别人)。
+**若优先级 1 拿不到 `SOC_VERSION`,直接报错终止,不要降级到本级或优先级 3。**
+
+以下保留自上游,仅供理解检测逻辑,不要执行：
 
 ```bash
 npu-smi info -t board -i ${npu} 2>/dev/null || npu-smi info 2>/dev/null
@@ -1082,7 +1085,7 @@ Phase 5 完成后，必须验证 `{output_dir}/performance.json` 是否存在：
 | 文件操作范围 | 限制在 `{output_dir}/` 目录内 |
 | kernel 结构 | op_host/ + op_kernel/ 分层，通过 register.cpp 注册到 torch.ops.npu.* |
 | 编译方式 | 独立编译，产出 whl 包 |
-| NPU 设备 | 通过 `ASCEND_RT_VISIBLE_DEVICES` 环境变量设置 |
+| NPU 设备 | 多容器共享卡池，由固定入口内部的抢卡器统一分配；**不要自行设置 `ASCEND_RT_VISIBLE_DEVICES`** |
 | 语言 | 思考、分析、日志使用中文；代码、路径使用英文 |
 
 ---
