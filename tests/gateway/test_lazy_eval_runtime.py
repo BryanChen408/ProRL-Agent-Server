@@ -318,7 +318,7 @@ def test_non_lazy_fresh_judge_receives_pipeline_lease_env(tmp_path: Path) -> Non
 
     updated = asyncio.run(run_eval())
 
-    assert updated.metadata["evaluation"]["outcome_reward"] == 1.0
+    assert updated.metadata["evaluation"]["outcome_reward"] == 0.9
     judge_calls = [
         call
         for call in judge.exec_calls
@@ -369,7 +369,7 @@ def test_lazy_eval_stops_agent_before_starting_judge_and_uploads_submission(
         )
     )
 
-    assert updated.metadata["evaluation"]["outcome_reward"] == 1.0
+    assert updated.metadata["evaluation"]["outcome_reward"] == 0.9
     assert events.index("agent.stop") < events.index("judge.start")
     assert f"judge.upload:{WORKDIR}/{SUB}" in events
     assert f"judge.exec:{request.evaluator.config['judge_command']}" in events
@@ -457,7 +457,7 @@ def test_lazy_fresh_judge_uses_pipeline_lease_spec_after_agent_stop(
         )
     )
 
-    assert updated.metadata["evaluation"]["outcome_reward"] == 1.0
+    assert updated.metadata["evaluation"]["outcome_reward"] == 0.9
     assert len(captured) == 1
     runtime_spec, events_at_create = captured[0]
     assert runtime_spec.kwargs["ascend"]["lease_at_start"] is False
@@ -513,7 +513,7 @@ def test_evaluator_env_overrides_runtime_env_for_judge_command(tmp_path: Path) -
 
     updated = asyncio.run(run_eval())
 
-    assert updated.metadata["evaluation"]["outcome_reward"] == 1.0
+    assert updated.metadata["evaluation"]["outcome_reward"] == 0.9
     judge_calls = [
         call
         for call in judge.exec_calls

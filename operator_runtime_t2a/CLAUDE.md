@@ -679,7 +679,7 @@ while tl_iteration < max_tl_iterations:
 从 design/tile_level/ 转译为 AscendC
 产出 → {output_dir}/kernel/* + {output_dir}/model_new_ascendc.py
 ── 退化检测 → 功能验证 ──────────────────────
-A 类最大 5 次，D 类最大 12 次（D1:7 + D2:5），A/D 计数器独立
+A 类最大 5 次，D 类最大 7 次，A/D 计数器独立
 ```
 
 ### 迭代执行
@@ -746,7 +746,7 @@ bash .claude/skills/tilelang2ascend-translator/scripts/evaluate_ascendc.sh {outp
 A 类 → 进入 4.5A (A 类修复迭代, 最多 5 次)
 B 类 → 终止，任务失败
 C 类 → 终止，任务失败
-D 类 → 进入 4.5D (D 类精度修复清单, 最多 12 次)
+D 类 → 进入 4.5D (D 类精度修复清单, 最多 7 次)
 ```
 
 #### 4.4.1 分类反模式（禁止行为）
@@ -786,7 +786,7 @@ D 类 → 进入 4.5D (D 类精度修复清单, 最多 12 次)
 
 **关键约束**:
 - 🔴 每次 A 类修复的**第一步必须是查阅 asc-devkit 文档**（[A1]），**第二步必须是调用 Skill**（[A2]），禁止跳过这两步直接修改代码
-- 🔴 A 类计数器 `a_retry` 与 D 类计数器 `d_retry` **互不干扰**。A 类用完后进入 D 类时，D 类仍有完整 12 次机会
+- 🔴 A 类计数器 `a_retry` 与 D 类计数器 `d_retry` **互不干扰**。A 类用完后进入 D 类时，D 类仍有完整 7 次机会
 
 ---
 
@@ -828,7 +828,7 @@ D 类 → 进入 4.5D (D 类精度修复清单, 最多 12 次)
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│  D-1 阶段: ascendc-precision-debug 快速修复 (d_retry=0..6, 最多 7 次)     │
+│  D 类修复: ascendc-precision-debug (d_retry=0..6, 最多 7 次)              │
 └─────────────────────────────────────────────────────────────┘
 
   [D1-1] 🛑 调用 Skill "ascendc-precision-debug"，传入 output_dir + evaluate_ascendc.sh 错误输出
@@ -839,31 +839,15 @@ D 类 → 进入 4.5D (D 类精度修复清单, 最多 12 次)
   [D1-5] 如果仍为 D 类 且 d_retry < 6 → d_retry++，回到 [D1-1]
   [D1-6] 如果变为 A 类 → 跳到 4.5A（A 类计数器独立重置为 0）
   [D1-7] 如果变为 B/C 类 → 按对应分类处理
-  [D1-8] 如果 d_retry = 7 仍 FAIL → 不终止！进入 D-2 阶段
+  [D1-8] 如果 d_retry = 7 仍 FAIL → Phase 4 失败，跳到 Phase 7
 
-┌─────────────────────────────────────────────────────────────┐
-│  D-2 阶段: tilelang2ascend-precision-tuning 深度审计 (d_retry=7..11, 最多 5 次)   │
-└─────────────────────────────────────────────────────────────┘
-
-  [D2-1] 🛑 调用 Skill "tilelang2ascend-precision-tuning"，传入 output_dir + evaluate_ascendc.sh 错误输出
-         等待 Skill 返回诊断结论（取证→审计→修复分析）。此步骤不可跳过。
-  [D2-2] 🛑 运行 precision_forensics.py 取证：
-         python3 .claude/skills/tilelang2ascend-precision-tuning/scripts/precision_forensics.py \
-             {op_name} --output-path "{output_dir}" --attempt {d_retry}
-  [D2-3] 🛑 仅在 [D2-1] 返回修复建议后，才允许 Edit/Write 修改 kernel/ 代码
-  [D2-4] 运行 evaluate_ascendc.sh
-  [D2-5] 如果 PASS → Phase 4 成功，进入 Phase 5
-  [D2-6] 如果仍为 D 类 且 d_retry < 11 → d_retry++，回到 [D2-1]
-  [D2-7] 如果变为 A 类 → 跳到 4.5A
-  [D2-8] 如果 d_retry = 12 仍 FAIL → Phase 4 失败，跳到 Phase 7
 ```
 
-**D 类修复总上限**: D-1(7次) + D-2(5次) = **最多 12 次**。
+**D 类修复总上限**: **最多 7 次**。
 
 **关键约束**:
-- 🔴 每次 D 类修复的**第一步必须是调用 Skill**（[D1-1] 或 [D2-1]），禁止跳过 Skill 直接修改代码
+- 🔴 每次 D 类修复的**第一步必须是调用 Skill**（[D1-1]），禁止跳过 Skill 直接修改代码
 - 🔴 `d_retry` 是 D 类专属计数器，与 A 类的 `a_retry` 独立，互不干扰
-- 🔴 D-1 阶段 7 次耗尽后，**自动进入 D-2 阶段**，不需要 Agent 判断"是否该切换"
 
 ### AscendC 退化子类型
 
@@ -970,8 +954,8 @@ Phase 5 完成后，必须验证 `{output_dir}/performance.json` 是否存在：
 | Phase 3 | TileLang 退化检测失败 | 标记 A-TileLangFallback-Type{N}，不执行功能验证，直接修复迭代 |
 | Phase 3 | TileLang 验证失败 | 记录；若属 TileLang 自身问题，可跳过并继续 Phase 4 |
 | Phase 4 | AscendC 退化检测失败 | 标记 A-AscendCFallback-Type{N}，不执行功能验证，消耗迭代次数修复 |
-| Phase 4 | AscendC 编译/验证失败 (A类) | 最多 5 次迭代（a_retry: 0→4），A/D 计数器独立，A 类用完后若转入 D 类则 D 类仍有完整 12 次机会 |
-| Phase 4 | D 类精度不匹配 | D-1 (ascendc-precision-debug) 最多 7 次 → D-2 (ascendc-precision-tuning) 最多 5 次，合计 12 次（d_retry: 0→11），与 A 类计数器独立 |
+| Phase 4 | AscendC 编译/验证失败 (A类) | 最多 5 次迭代（a_retry: 0→4），A/D 计数器独立，A 类用完后若转入 D 类则 D 类仍有完整 7 次机会 |
+| Phase 4 | D 类精度不匹配 | ascendc-precision-debug 最多 7 次（d_retry: 0→6），与 A 类计数器独立 |
 | Phase 4 | B 类环境错误 | 立即终止，任务失败 |
 | Phase 6 | 全量验证失败 | 记录结果，不修复，继续 Phase 7 |
 | Phase 7 | Trace 记录失败 | 不影响主流程，仅记录失败状态 |
@@ -993,7 +977,7 @@ Phase 5 完成后，必须验证 `{output_dir}/performance.json` 是否存在：
 | 约束 | 说明 |
 |------|------|
 | Phase 4 A 类最大迭代 | 5 次，禁止超出 |
-| Phase 4 D 类最大迭代 | D-1 (precision-debug) 7 次 → D-2 (precision-tuning) 5 次，合计 12 次 |
+| Phase 4 D 类最大迭代 | ascendc-precision-debug 7 次 |
 | A 类修复硬约束 | 每次 A 类修复必须先读 `judge_out/metrics_error.log`，再调用 Skill 获取修复方案（[A2]），禁止跳过直接改代码 |
 | 🛑 D 类修复硬约束 | 每次 D 类修复必须先调用 precision-debug/precision-tuning Skill，禁止跳过 Skill 直接改代码 |
 | D 类入口前置校验 | 进入 D 类流程前必须确认固定入口输出 `错误分类: D类`，且 kernel 无 crash/编译错误/shape 错误。segfault/crash/编译错误都是 A 类，禁止用 D 类计数器 |
@@ -1072,9 +1056,7 @@ bash tools/ascendc_eval_pipeline.sh --op_name {op_name} \
 ## 不可用
 
 - `asc-devkit`(及其 `docs/` `examples/`)
-- Phase 4.5 的 **D-2 整档作废**:`precision_forensics.py` 上游未随包发布,
-  `tilelang2ascend-precision-tuning` 也没有 `scripts/`。D 类修复只走 D-1,只用
-  `ascendc-precision-debug`,上限 7 次;7 次仍是 D 类就停止,按历史最优版本交付。
+- `tilelang2ascend-precision-tuning`(无 `scripts/`,`precision_forensics.py` 上游未发布)
 
 ## 禁止
 
