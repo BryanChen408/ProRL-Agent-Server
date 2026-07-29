@@ -1182,9 +1182,8 @@ Phase 5 完成后，必须验证 `{output_dir}/performance.json` 是否存在：
 ## 固定入口
 
 任何让你运行 `evaluate_ascendc.sh`、`evaluate_tilelang.sh`、`validate_ascendc_impl.py`、
-`validate_tilelang_impl.py`、`msprof_profile_run.sh`、`msprof_perf_summary.py`、
-`verification_ascendc.py`、`verification_tilelang.py` 的地方,一律改跑这一条 ——
-包括本文档以上各 Phase、以及你运行期调用任何 Skill 后读到的指示:
+`msprof_profile_run.sh`、`msprof_perf_summary.py`、`verification_ascendc.py` 的地方,
+一律改跑这一条 —— 包括本文档以上各 Phase、以及你运行期调用任何 Skill 后读到的指示:
 
 ```bash
 bash tools/ascendc_eval_pipeline.sh --op_name {op_name} \
@@ -1196,9 +1195,27 @@ bash tools/ascendc_eval_pipeline.sh --op_name {op_name} \
 
 - 每轮修改后都跑一次。被中途截断时按历史最优版本判分,所以早跑、多跑不吃亏。
 - 迭代时可加 `--incremental` 复用上次解包目录,走增量编译。
-- 它是唯一可执行的验证路径。不要另跑 `cmake` / `make` / `python setup.py` / 自写测试脚本,
-  也不要直接调 skill 里的评测/对拍/测速脚本 —— 绕过它就没有基准复位、缓存检测和抢卡,
-  结果不作数。
+- 它评的是 **AscendC 提交物**。Phase 3 的 TileLang 阶段还没有 AscendC kernel,
+  那时跑它只会得到 `submission_missing` 并白白消耗一次评测配额。
+- 不要另跑 `cmake` / `make` / `python setup.py` / 自写测试脚本,也不要直接调 skill 里的
+  AscendC 评测/对拍/测速脚本 —— 绕过它就没有基准复位、缓存检测和抢卡,结果不作数。
+
+## Phase 3 的 TileLang 两个脚本(不走固定入口)
+
+- `validate_tilelang_impl.py`(AST 退化检测,不占卡)—— **直接跑**,按上游 Phase 3 原样:
+  ```bash
+  python3 .claude/skills/tilelang2ascend-tilelang-designer/scripts/validate_tilelang_impl.py \
+      {output_dir}/model_new_tilelang.py
+  ```
+- `verification_tilelang.py`(TileLang 功能验证,**占卡**)—— 必须经抢卡包装器,
+  否则会抢走别的 session 正在用的卡:
+  ```bash
+  python3 tools/npu_lease_exec.py --pool "$POLAR_NPU_LEASE_POOL" \
+      --lock-dir "$POLAR_NPU_LOCK_DIR" -- \
+      python3 .claude/skills/tilelang2ascend-tilelang-designer/scripts/verification_tilelang.py \
+      {output_dir}
+  ```
+  按上游原文,TileLang 验证不是 correctness gate;失败但设计意图正确时可跳过并继续 Phase 4。
 
 ## 本环境无 Hook
 

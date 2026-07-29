@@ -36,7 +36,10 @@ operator_runtime:
   #   路径映射:skill 写死 docs/zh/api,9.0.0 布局是 docs/api/context,已在仓内建相对软链。
   asc_devkit_dir: /home/docker/asc-devkit-9.0.0
   budget:
-    generation_max: 5
+    # ← delta 12:上游 Phase 4 的迭代上限是 A 类 5 次 + D 类 12 次(D-1 7 + D-2 5)= 17 次评测,
+    #   见 agent 定义的 4.5A / 4.5D 两节。原值 5 是照搬 triton 侧默认,等于把上游的 17 砍成 5 ——
+    #   实测两轮都有 session 打满 5/5 且仍在 A 类阶段(编译失败),配额没走完就被掐断。
+    generation_max: 17
     optimization_max: 3
     interval_seconds: 2
   npu_lease:
@@ -60,7 +63,9 @@ gateway:
 
 operator:
   profile: operator_npu
-  timeout_seconds: 8000.0
+  # ← delta 13:17 次评测,每次含编译(数分钟)+ 对拍 + 测速,约 60-90 min;加 Phase 0-3 探索,
+  #   8000s(133 min)会顶到上限。放到 4h。
+  timeout_seconds: 14400.0
   runtime:
     image: ascendc-sandbox:v1                          # ← delta 2
     network: host
@@ -77,7 +82,9 @@ operator:
 
   agent:
     model_name: claude-opus-4-5
-    max_turns: 100
+    # ← delta 14:17 次评测 × 每次至少「读日志→调 Skill→改代码→跑评测」4 轮 = 68 轮,
+    #   加实测 30-40 轮的 Phase 0-3 探索,100 不够。
+    max_turns: 250
     # ← delta 8:规则 —— 只保留本项目(canonical/skills)提供的 skill,CLI 自带的一律关掉
     #   (每个 session 白占 4,327 字符 prompt,还可能被误调白烧 turn)。
     #   prepare 按 canonical/skills 的实际内容取补集,写 .claude/settings.json 的
