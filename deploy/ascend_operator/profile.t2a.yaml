@@ -1,9 +1,14 @@
 # AscendC profile —— 逐字派生自 profile.vime.yaml(triton 那份一字不动)。
 # 【仅 4 处 delta,其余与 profile.vime.yaml 完全一致】:
-#   1. paths.operator_runtime_dir  : operator_runtime → operator_runtime_ascendc(canonical:skills/CLAUDE/tools/ascendc_eval_pipeline)
+#   1. paths.operator_runtime_dir  : operator_runtime → operator_runtime_t2a(canonical:skills/CLAUDE/tools/ascendc_eval_pipeline)
 #   2. operator.runtime.image      : sandbox:v1 → ascendc-sandbox:v1(cmake<4 + AscendC 工具链)
 #   3. operator.evaluator.judge_command : triton_eval_pipeline.sh → ascendc_eval_pipeline.sh(解 tarball→编 kernel→对拍→测速→metrics)
 #   4. operator.evaluator.submission_* : 单 .py → tarball(多文件 AscendC 工程跨 fresh-judge 边界)
+# 本文件 = profile.ascendc.yaml 的 t2a 版:唯一差异是 operator_runtime_dir 指向新基座。
+# 起 run 时用 POLAR_PROFILE 选:
+#   POLAR_PROFILE=.../profile.t2a.yaml      新基座(21 skills,TileLang 单路径)
+#   POLAR_PROFILE=.../profile.ascendc.yaml  旧基座(11 skills,已实跑验证)
+# 改公共项时两份都要改(loader 不支持继承,与其余 6 个 profile 同样是整份复制)。
 # workflow=legacy(judge_command 驱动)、budget、npu_lease(0-3)、gateway、operator(timeout/max_turns)全部照 vime 不变。
 service:
   bind_host: 0.0.0.0
@@ -15,7 +20,7 @@ service:
 
 paths:
   output_dir: output/ascend_operator
-  operator_runtime_dir: operator_runtime_ascendc      # ← delta 1
+  operator_runtime_dir: operator_runtime_t2a      # ← delta 1
 
 operator_runtime:
   workflow: legacy
