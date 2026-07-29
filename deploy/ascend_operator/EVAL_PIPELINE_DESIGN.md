@@ -69,17 +69,26 @@ cp 进 `$SK` 却没用 —— judge 比 agent 自检还松是不能接受的。
 **退化必须排在编译之前**:AST 检查器的输出常带"编译/compile"字眼(修复建议),排在后面
 会被 compile 规则抢先命中而误分类。
 
-## 六、Step2 编译必须 bdist_wheel + install
+## 六、Step2 走上游统一构建器 `build_ascendc.py`
 
-逐字对应上游 `evaluate_ascendc.sh:110-126`:`rm -rf build` → `cmake` → `make -j` →
-`setup.py bdist_wheel` → `pip install dist/*.whl --force-reinstall`。**改这段要同步那份。**
+```bash
+build_ascendc.py <task_dir> -v $SOC_VERSION --build-type $BUILD_TYPE [--clean]
+```
 
-打包+安装不是可选优化:AscendC 算子靠 `.so` 被 import 时执行 `TORCH_LIBRARY_IMPL` 才注册出
-`torch.ops.npu.<op>`,只 make 不装 = 对拍时算子不存在(曾因此把写对的 18_Index 误判成
-`correctness_failed`)。
+- **Mode A**:`kernel/CMakeLists.txt` 存在 → 用它。cmake 参数与我们原先逐字相同
+  (`-DSOC_VERSION` / `-DASCEND_CANN_PACKAGE_PATH` / `-DCMAKE_BUILD_TYPE`),只是改用 `-S/-B`。
+- **Mode B**:没有 CMakeLists → 按 `register.cpp`(或 `pybind11.cpp`)+ `op_host/` + `op_kernel/`
+  自动生成一份。生成的模板自己探测 CANN 位置、`include(ascendc.cmake)`、问 torch 路径。
+- 产物落在 `kernel/build/`,`verification_ascendc.py` 的 `_setup_paths()` 会把该目录插进
+  `sys.path` → **不需要 whl**。`setup.py` 存在时仍会打包安装,但失败只告警不阻断。
 
-与上游两处有意 delta:① 连 `dist/` 一起清,保证装的是本次编出来的 whl 而不是 tarball 里的
-旧 whl;② 用 `$PY_BIN -m pip`(镜像里 python/pip 不一定在 PATH 上)。
+**为什么换掉原先的 `cmake+make+setup.py bdist_wheel+pip install`**:那是逐字派生
+上游 `evaluate_ascendc.sh`,而上游文档(`AscendCVerification.md`)和它自己的 hook 拦截表
+都写明正规流程走 `build_ascendc.py`——`evaluate_ascendc.sh` 是没跟上文档的旧实现。
+抄它的代价实测:模型必须自己写 `CMakeLists.txt` 和 `setup.py`,而树里三份样例没有一份
+可直接复用(模板是整工程形态、archive 的 setup.py 依赖树外文件)。结果是 15/16 的 session
+去读一份形状用不上的模板,并有 session 把 5 次评测预算之一烧在打包命名冲突上。
+构建脚本不是算子能力的考点,不该由模型承担。
 
 编译**不套 `run_npu_phase`** —— AscendC 编译要数分钟,占着卡编译会堵死整个卡池。
 

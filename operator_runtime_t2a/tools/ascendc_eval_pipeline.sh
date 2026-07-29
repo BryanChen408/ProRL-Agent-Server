@@ -299,24 +299,23 @@ else
 fi
 
 # Step2
-echo "[ascendc-eval] Step2 compile + install (no NPU)"
+echo "[ascendc-eval] Step2 compile (no NPU)"
 KERNEL_DIR="$TASK_DIR/kernel"
+BUILDER="$SK/$TRANS_SKILL/scripts/build_ascendc.py"
+_CLEAN=(--clean); [[ "$INCREMENTAL" == "1" ]] && _CLEAN=()
 if ! (
   set -e
-  cd "$KERNEL_DIR"
-  [[ "$INCREMENTAL" == "1" ]] || rm -rf build
-  rm -rf dist
-  mkdir -p build && cd build
-  cmake "$KERNEL_DIR" \
-    -DSOC_VERSION="$SOC_VERSION" \
-    -DASCEND_CANN_PACKAGE_PATH="$ASCEND_HOME_PATH" \
-    -DCMAKE_BUILD_TYPE="$BUILD_TYPE"
-  make -j"$(nproc)"
-  cd "$KERNEL_DIR"
-  "$PY_BIN" setup.py bdist_wheel
-  "$PY_BIN" -m pip install dist/*.whl --force-reinstall
+  cd "$WORK"
+  rm -rf "$KERNEL_DIR/dist"
+  WORKDIR="$WORK" ASCEND_HOME_PATH="$ASCEND_HOME_PATH" \
+    "$PY_BIN" "$BUILDER" "$TASK_DIR" -v "$SOC_VERSION" --build-type "$BUILD_TYPE" "${_CLEAN[@]}"
+  if [[ -f "$KERNEL_DIR/setup.py" ]]; then
+    cd "$KERNEL_DIR"
+    "$PY_BIN" setup.py bdist_wheel && "$PY_BIN" -m pip install dist/*.whl --force-reinstall \
+      || echo "[ascendc-eval] wheel 安装失败,已忽略(对拍从 kernel/build/ 直接 import)"
+  fi
 ) >"$OUT_DIR/compile.log" 2>&1; then
-  write_metrics true false false "" "" "" "AscendC 编译/安装失败(完整 cmake/make/pip 日志如下)" "$OUT_DIR/compile.log"
+  write_metrics true false false "" "" "" "AscendC 编译失败(完整构建日志如下)" "$OUT_DIR/compile.log"
   echo "[ascendc-eval] compile FAILED"; fail_hint; exit 1
 fi
 

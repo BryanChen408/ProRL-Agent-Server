@@ -1048,6 +1048,10 @@ bash tools/ascendc_eval_pipeline.sh --op_name {op_name} \
 ## 提交物
 
 - 唯一提交物:`output/submission/{op_name}_impl.tar.gz`,由固定入口自动打包。
+- **`kernel/CMakeLists.txt` 与 `kernel/setup.py` 不是必需的**:固定入口用
+  `tilelang2ascend-translator/scripts/build_ascendc.py` 构建 —— 有 `CMakeLists.txt` 就用你的,
+  没有就按 `register.cpp` + `op_host/` + `op_kernel/` 自动生成一份。编出的扩展从
+  `kernel/build/` 直接被对拍导入,不需要打 whl。写不写由你,别为了凑齐它们浪费轮次。
 - 工程目录必须是工作目录顶层的 `{op_name}/`,不要另建别名或带时间戳的目录。
 - `{op_name}/model.py` 与 `{op_name}/{op_name}.json` 判分时会被数据集原版覆盖,改它们无效。
 - 不要删除或移动 `output/submission/` 下的任何文件。
