@@ -17,7 +17,7 @@
 
 | | triton | ascendc |
 |---|---|---|
-| polar `POLAR_PROFILE` | `profile.sing52.yaml` ⚠️**本机 .52 用这份**,`profile.vime.yaml` 指向 80.48.5.88 另一台机 | `profile.ascendc.yaml` |
+| polar `POLAR_PROFILE` | `profile.sing52.yaml` ⚠️**本机 .52 用这份**,`profile.vime.yaml` 指向 80.48.5.88 另一台机 | `profile.t2a.yaml`(新基座)/ `profile.ascendc.yaml`(旧基座,已实跑验证) |
 | vime `OPERATOR_DATA_ROOT` | cuda-llm filtered189 | `/home/docker/datasets/op_tasks/npukernelbench_level1_ascendc` |
 
 启动:polar `POLAR_PROFILE=... POLAR_RUN_ID=... bash deploy/ascend_operator/restart_polar_host.sh`;
@@ -98,8 +98,10 @@ prompt + 旧 topology 上:341 个 session,335 个 `submission_missing`(reward 0.
 | topology(judge_command / submission_candidates / prepare 动作 / env) | **polar 重启时烤死** |
 | canonical(`CLAUDE.md`、`tools/*.sh`、skills) | **实时挂载,新 session 立刻生效** |
 
-**重开步骤**:①`pkill` 清上一个 run 的 ray 残留;②`POLAR_PROFILE=profile.ascendc.yaml
+**重开步骤**:①`pkill` 清上一个 run 的 ray 残留;②`POLAR_PROFILE=profile.t2a.yaml
 restart_polar_host.sh`;③`bash /workspace/vime/scripts/start.sh`。
+两个基座靠 profile 切,互不影响:`profile.t2a.yaml` = 新基座(21 skills、TileLang 单路径、
+护栏已修);`profile.ascendc.yaml` = 旧基座(11 skills,一字未动,出问题随时切回)。
 **建议先缩成小冒烟**(降 `NUM_ROLLOUT` / `POLAR_MAX_ACTIVE_SESSIONS`),只验
 "agent 调固定入口 → 自动打包 → judge 出真 metrics"这条链,再放大。
 
