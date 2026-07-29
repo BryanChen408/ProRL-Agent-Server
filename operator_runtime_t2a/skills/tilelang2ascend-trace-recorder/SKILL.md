@@ -22,7 +22,7 @@ argument-hint: >
 
 回顾本次会话中的以下信息：
 - 各阶段的执行结果（成功/失败）
-- 评测脚本的输出（`@scripts/evaluate_tilelang.sh`、`@scripts/evaluate_ascendc.sh` 的返回）
+- 评测脚本的输出（`tilelang2ascend-tilelang-designer/scripts/evaluate_tilelang.sh`、`tilelang2ascend-translator/scripts/evaluate_ascendc.sh` 的返回）
 - ops-profiling（msprof 模式）的性能测试结果
 - Agent 的迭代过程（尝试了什么、失败了几次、最终如何解决）
 - 遇到的错误信息

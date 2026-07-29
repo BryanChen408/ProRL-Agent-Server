@@ -145,14 +145,14 @@ printf("Half: %.6f\n", static_cast<float>(h));
 ### 基本测试运行
 
 ```bash
-# 进入 Docker 容器运行
-./env_setup.sh "cd ops/my_operator/build && ./my_operator"
+# (本环境已在容器内,直接执行)
+cd ops/my_operator/build && ./my_operator
 
 # 带参数运行
-./env_setup.sh "cd ops/my_operator/build && ./my_operator 16 16 8 fp32"
+cd ops/my_operator/build && ./my_operator 16 16 8 fp32
 
 # FP16 测试
-./env_setup.sh "cd ops/my_operator/build && ./my_operator 16 16 8 fp16"
+cd ops/my_operator/build && ./my_operator 16 16 8 fp16
 ```
 
 ### 批量测试脚本
@@ -170,7 +170,7 @@ for shape in "${shapes[@]}"; do
         IFS=':' read -r M N K <<< "$shape"
         echo "Testing: M=$M, N=$N, K=$K, dtype=$dtype"
 
-        ./env_setup.sh "cd ops/my_operator/build && ./my_operator $M $N $K $dtype"
+        cd ops/my_operator/build && ./my_operator $M $N $K $dtype
 
         if [ $? -eq 0 ]; then
             echo "  PASS"

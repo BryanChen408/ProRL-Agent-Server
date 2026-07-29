@@ -78,6 +78,13 @@ for path in (
         py_compile.compile(str(path), cfile=tmp.name, doraise=True)
 PY
 
+log "skill reference list up to date"
+# CLAUDE.md 的「Skill 参考资料」块由 gen_skill_reference_list.py 从目录树生成。
+# 上游那份是手写的、粒度不一(有的带 scripts/、多数只给裸文件名),而裸文件名配合
+# 标题里的 .../skills/<name>/ 前缀会被读成"在 skill 根目录" —— 实测 agent 至少 10 次
+# 因此解析错路径。生成 + 校验,把这类漂移挡在起 run 之前。
+python3 "${ROOT}/gen_skill_reference_list.py" --canonical "$SKILLS_DIR" --check
+
 log "msprof invocation contract"
 # 阶段 B 定下的两条约束,靠机械校验保住(不靠注释劝阻):--repeats 必须是 1、不得出现 --compare。
 # 依据:msprof_perf_summary.py 用 repeats-1 作 wrapper 的**内部** warmup,外部 warmup 跑在
