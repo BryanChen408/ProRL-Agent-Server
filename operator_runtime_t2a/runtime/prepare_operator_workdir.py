@@ -32,6 +32,17 @@ _PLUGIN_NAME = "tilelang2ascendc-ops-generator"
 _PROJECT_INIT_SKILL = "tilelang2ascend-operator-project-init"
 
 
+def _relink(link: Path, target: Path) -> None:
+    """(Re)create a relative symlink, idempotently — prepare may run more than once."""
+    link.parent.mkdir(parents=True, exist_ok=True)
+    if link.is_symlink() or link.exists():
+        if link.is_symlink() or link.is_file():
+            link.unlink()
+        else:
+            shutil.rmtree(link)
+    link.symlink_to(target, target_is_directory=True)
+
+
 def _link_upstream_skills_path(workdir: Path) -> None:
     """在 workdir 里补一条上游文档所用 skill 路径的 symlink。
 
@@ -55,29 +66,45 @@ def _link_upstream_skills_path(workdir: Path) -> None:
     workdir 整体被搬运/重挂也不会断。不新增可写面:`.claude/skills` 本来就是 `_copy_tree`
     复制进来的可写目录,symlink 只是多一条通往同一处的路径。
     """
-    link = workdir / "plugins-community" / _PLUGIN_NAME / "skills"
-    link.parent.mkdir(parents=True, exist_ok=True)
-    if link.is_symlink() or link.exists():        # prepare 可能重复执行 → 幂等
-        if link.is_symlink() or link.is_file():
-            link.unlink()
-        else:
-            shutil.rmtree(link)
-    link.symlink_to(Path("../../.claude/skills"), target_is_directory=True)
+    plugin_root = workdir / "plugins-community" / _PLUGIN_NAME
+    plugin_root.mkdir(parents=True, exist_ok=True)
+    _relink(plugin_root / "skills", Path("../../.claude/skills"))
+
+    # workflows/(archive_tasks 在里面)被三种写法引用,三条都要成立:
+    #   CLAUDE.md          workflows/templates/archive_tasks/            → <workdir>/workflows
+    #   skill references   ../../../workflows/templates/archive_tasks    → 从 <X>/skills/<s>/references/
+    #                      上跳三层;经 .claude/skills 落到 <workdir>/.claude/workflows,
+    #                      经 plugins-community/<p>/skills 落到 <p>/workflows
+    # 上游之所以成立,是因为那边 skills 与 workflows 在 plugin 根下同级。实体放 .claude/workflows
+    # (由 _copy_tree 铺入),另两处做 symlink 指过去。
+    if (workdir / ".claude" / "workflows").is_dir():
+        _relink(plugin_root / "workflows", Path("../../.claude/workflows"))
+        _relink(workdir / "workflows", Path(".claude/workflows"))
 
     # ---- 对账断言 ----
     # 根因里最要紧的一条是"仓库里没有任何东西会对账文档写的路径和容器里真实的文件",
     # 所以光建链接只治当前这一处;上游哪天再改布局,照样要等 rollout 撞出来才知道。
     # 探针选 Phase 1.2 那条固定动作要 cp 的文件 —— 它过了就等于 Phase 1.2 走得通。
     # 与本文件已有的做法一致(缺 {op}.json 在 prepare 就 fail fast,不等 judge 才炸)。
-    probe = link / (f"{_PROJECT_INIT_SKILL}/templates/ascend-kernel"
-                    "/csrc/utils/torch_kernel_helper.h")
-    if not probe.is_file():
-        raise FileNotFoundError(
-            f"upstream skill path contract broken: {probe} 不可读。"
-            f"CLAUDE.md 用 plugins-community/{_PLUGIN_NAME}/skills/<name>/ 引用 skill,"
-            f"本环境靠该 symlink → .claude/skills 兑现;"
-            f"探针失败说明 canonical/skills 的布局变了或链接没建起来。"
-        )
+    probes = [
+        # Phase 1.2 的固定动作要 cp 的文件 —— 它过了就等于 Phase 1.2 走得通
+        plugin_root / "skills" / _PROJECT_INIT_SKILL
+        / "templates/ascend-kernel/csrc/utils/torch_kernel_helper.h",
+    ]
+    if (workdir / ".claude" / "workflows").is_dir():
+        # skill references 用 ../../../workflows/... 引 archive_tasks,两条链路都要通
+        probes += [
+            plugin_root / "workflows/templates/archive_tasks",
+            workdir / "workflows/templates/archive_tasks",
+        ]
+    for probe in probes:
+        if not probe.exists():
+            raise FileNotFoundError(
+                f"upstream path contract broken: {probe} 不可读。"
+                f"CLAUDE.md 与 skill references 用 plugins-community/{_PLUGIN_NAME}/ 下的相对路径"
+                f"引用 skills/ 与 workflows/,本环境靠 symlink → .claude/ 兑现;"
+                f"探针失败说明 canonical 布局变了或链接没建起来。"
+            )
 
 
 def _copy_file(src: Path, dst: Path) -> None:
@@ -264,6 +291,8 @@ def _prepare_ascendc_workdir(args) -> int:
     if not (canonical / "skills").is_dir():
         raise FileNotFoundError(f"required directory missing: {canonical / 'skills'}")
     _copy_tree(canonical / "skills", workdir / ".claude" / "skills")
+    if (canonical / "workflows").is_dir():
+        _copy_tree(canonical / "workflows", workdir / ".claude" / "workflows")
     _link_upstream_skills_path(workdir)   # plugins-community/<plugin>/skills → .claude/skills
     _copy_file(canonical / "CLAUDE.md", workdir / "CLAUDE.md")
     off_names = _non_project_skills(canonical) if args.only_project_skills else []
