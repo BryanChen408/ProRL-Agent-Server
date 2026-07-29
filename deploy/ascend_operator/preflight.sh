@@ -91,6 +91,12 @@ for path in (
 PY
 
 if [[ "$FLAVOR" == ascendc ]]; then
+log "CLAUDE.md 与上游一致(生成物比对)"
+# CLAUDE.md = 上游 agent md + build_claude_md.py 里的声明式 delta + claude_override.md。
+# 它是我们自己的文件,任何 skills diff 都覆盖不到 —— 一个月里 210 行上游原话就是这么静默消失的
+# (双路径、4.5D 阶梯、解析用户输入…),直到人工读轨迹才发现。改动只能走 DELTA 或覆盖区。
+python3 "${ROOT}/build_claude_md.py" --canonical "$SKILLS_DIR" --check
+
 log "skill reference list up to date"
 # CLAUDE.md 的「Skill 参考资料」块由 gen_skill_reference_list.py 从目录树生成。
 # 上游那份是手写的、粒度不一(有的带 scripts/、多数只给裸文件名),而裸文件名配合
