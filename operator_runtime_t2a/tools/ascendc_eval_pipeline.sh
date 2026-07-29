@@ -72,7 +72,7 @@ ef = Path(os.environ.get("ERR_FILE","")); full = ef.read_text(errors="replace") 
 def classify(t):
     if not t: return None
     l = t.lower(); c = l.replace(" ","")
-    if "submission" in l and "missing" in l: return "submission_missing"
+    if "submission" in l and ("missing" in l or "untar" in l or "缺" in t or "布局" in t): return "submission_missing"
     if "判分基准" in t or "get_input" in l or ("filenotfounderror" in l and ".json" in l):
         return "input_load_failed"
     if "aclinit" in c and ("invaliddeviceid" in c or "getdevicecntfailed" in c) or "invalid device id" in l: return "npu_runtime_unavailable"
