@@ -78,6 +78,35 @@ for path in (
         py_compile.compile(str(path), cfile=tmp.name, doraise=True)
 PY
 
+log "msprof invocation contract"
+# 阶段 B 定下的两条约束,靠机械校验保住(不靠注释劝阻):--repeats 必须是 1、不得出现 --compare。
+# 依据:msprof_perf_summary.py 用 repeats-1 作 wrapper 的**内部** warmup,外部 warmup 跑在
+# 独立子进程、msprof 只 profile 最后新起的那个。repeats=1 时内部 warmup=0,被 profile 的进程里
+# model 全新构造只调一次 = 冷调用,Python 对象级缓存跨不过进程边界,作弊无效;
+# repeats>1 或 --compare(内部 warmup=3)会在同一进程内先喂饱缓存再计时,speedup 可虚高到任意大。
+python3 - "$SKILLS_DIR" <<'MSPROFCONTRACT'
+import re
+import sys
+from pathlib import Path
+
+pipeline = Path(sys.argv[1]) / "tools" / "ascendc_eval_pipeline.sh"
+if not pipeline.is_file():
+    sys.exit(f"missing {pipeline}")
+code = "\n".join(
+    line for line in pipeline.read_text(encoding="utf-8").splitlines()
+    if not line.lstrip().startswith("#")
+)
+if "--compare" in code:
+    sys.exit("ascendc_eval_pipeline.sh must not use msprof --compare "
+             "(its in-process warmup lets a cached impl fake an unbounded speedup)")
+bad = [m for m in re.findall(r"--repeats\s+(\S+)", code) if m != "1"]
+if bad:
+    sys.exit(f"ascendc_eval_pipeline.sh must pin --repeats 1, found: {bad}")
+if "--repeats 1" not in code:
+    sys.exit("ascendc_eval_pipeline.sh must pass --repeats 1 explicitly "
+             "(relying on the upstream default lets it drift silently)")
+MSPROFCONTRACT
+
 log "readonly operator tools"
 python3 "${ROOT}/prepare_readonly_tools.py" \
   --source "${SKILLS_DIR}/tools" \
