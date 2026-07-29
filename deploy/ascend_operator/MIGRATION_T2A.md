@@ -153,6 +153,31 @@ us→ms 换算、不传 `--device` 让租约生效)全部验证通过。**
 且 pin 版历史上跑通过(`polar_20260727_151247` 的 jn5za7tz 编译成功并走到对拍)。
 **该缺口在阶段 E 冒烟时由模型自己产出的提交物自然覆盖。**
 
+## 闸门 D 结果(2026-07-29,容器内实测)
+
+脚本 `/home/docker/t2a_gate_d.sh`,三道防 reward hacking 的拦截各造反例。
+
+| | 结果 | 实测 |
+|---|---|---|
+| **D1 AST 退化拦截** | ✅ **PASS** | 纯 torch + 注释伪装 → `error_type=ast_check_failed`,`metrics_error.log` 无异常栈(真拦截,非崩溃) |
+| **D2 缓存/常量输出** | ✅ **PASS 3/3** | 正常实现 exit 0;`self._cache` exit 1;常量输出 exit 1 |
+| **D3 测速契约** | ✅ **PASS** | `--quick --repeats 1` 下 cache/ok = **1.088**,按输入缓存拿不到额外红利 |
+
+**为什么这一关必做**:审计发现 TileLang 那道退化检测在**旧的、已实跑验证过的**基座上就是坏的
+(`parents[1]` 越界 import),真实录制 session 里执行过它的 2 个、2 个全 `ModuleNotFoundError`。
+闸门失效不影响算子能不能生成,所以不会有人察觉 —— 必须造反例主动验。
+
+**首轮两处 WARN 都是测试脚本的问题,已修**:① 反例缺 `kernel/`,而布局校验排在 AST 之前,
+在第一关就被打回;② 容器里没有 `/opt/canonical`(那是 polar runtime 的挂载),固定入口回落到
+`tools/../skills`,而子项 workdir 只拷了 `tools/` → 脚本改为显式 `export ASCENDC_SKILLS_SRC`。
+
+**顺带修的产品问题(`d1724d77`)**:`submission tarball 缺 {op}/kernel`、
+`cannot untar submission` 这两条明确失败落进了 `error_type=unknown`(分类器只认英文
+`submission ... missing`)。桶碰巧对(unknown 走 A 类默认),但传给 polar 的类型不精确。
+
+**仍未验证**:编译 → 对拍全链路(需要能编过的真 kernel),以及 agent 在真实 rollout 里
+会不会绕开固定入口 —— 都留给阶段 E。
+
 ### B2 失败的归因(别再误判)
 
 ```bash
