@@ -1072,8 +1072,9 @@ bash tools/ascendc_eval_pipeline.sh --op_name {op_name} \
 ## 不可用
 
 - `asc-devkit`(及其 `docs/` `examples/`)
-- `tilelang2ascend-precision-tuning` 的深度审计路径(依赖 `dsl-lowering`、`ascendc-evaluation`)。
-  D 类修复只用 `ascendc-precision-debug`。
+- Phase 4.5 的 **D-2 整档作废**:`precision_forensics.py` 上游未随包发布,
+  `tilelang2ascend-precision-tuning` 也没有 `scripts/`。D 类修复只走 D-1,只用
+  `ascendc-precision-debug`,上限 7 次;7 次仍是 D 类就停止,按历史最优版本交付。
 
 ## 禁止
 
