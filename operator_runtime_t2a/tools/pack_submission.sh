@@ -129,8 +129,22 @@ print("1" if update else "0")
 PY
 )
 TIER_DESC=("T0 残缺/退化(judge 0.2)" "T1 真调 torch.ops.npu(judge 0.3)" "T2 对拍通过(judge 0.4)" "T3 有 speedup(judge 0.75+)")
+# 镜像一份到 bind-mount 的 session 目录:该目录直通宿主机,polar 不经容器传输即可取件。
+# 解决两件事:① agent 用 `rm -rf output/submission/*.tar.gz` 会把 .best 一起带走
+# (通配符,非恶意也可达),而取件发生在 agent 跑完之后,删了就真没了;
+# ② 容器异常退出时容器内的产物取不出来。写在这里而不是让 polar 早取,是因为
+# 只有本脚本知道"哪一版是 best"。目录不存在(triton / 本地测)时静默跳过,行为不变。
+_mirror_best() {
+  local sdir="${POLAR_RUNTIME_SESSION_DIR:-/polar/session}"
+  [[ -d "$sdir" ]] || return 0
+  mkdir -p "$sdir/submission" 2>/dev/null || return 0
+  cp -f "$BEST_TARBALL" "$sdir/submission/${OP_NAME}_impl.best.tar.gz" 2>/dev/null \
+    && echo "[pack] best 已镜像到 session 目录(宿主机可直读)"
+}
+
 if [[ "$UPDATED" == "1" ]]; then
   cp -f "$TARBALL" "$BEST_TARBALL"
+  _mirror_best
   echo "[pack] ${TARBALL##*/} + best 已更新 — ${TIER_DESC[$TIER]}${SPEEDUP:+ speedup=$SPEEDUP} | ${NFILES} 文件 ${SIZE}"
 else
   echo "[pack] ${TARBALL##*/} 已更新;best 保持不变(本次 ${TIER_DESC[$TIER]} 未超过历史最优)| ${NFILES} 文件 ${SIZE}"

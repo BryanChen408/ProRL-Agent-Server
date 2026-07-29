@@ -920,6 +920,23 @@ class GatewayNodeManager:
         if local_impl.exists():
             local_impl.unlink()
 
+        # 先看 bind-mount 的 session 目录 —— pack_submission.sh 每次更新 best 都往那儿镜像一份。
+        # 该目录直通宿主机,所以这条路径:① 不经容器传输(容器已死也能取);
+        # ② 不受 agent 事后 `rm -rf output/submission/*.tar.gz` 影响 —— 取件发生在 agent
+        # 跑完之后,删了就真没了(实测有 session 这么干过,通配符把 .best 一起带走)。
+        mirror_dir = managed.session_dir / "submission"
+        for mirrored in sorted(mirror_dir.glob("*_impl.best.tar.gz")):
+            if mirrored.is_file() and mirrored.stat().st_size > 0:
+                logger.info(
+                    "operator_judge: using session-dir mirror for session %s: %s",
+                    managed.request.session_id,
+                    mirrored.name,
+                )
+                return {
+                    "submission_host_path": str(mirrored),
+                    "submission_used": f"session_mirror/{mirrored.name}",
+                }
+
         for logical_path, runtime_path in candidates:
             try:
                 await runtime.download_file(runtime_path, str(local_impl))
