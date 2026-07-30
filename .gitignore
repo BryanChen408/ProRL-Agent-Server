@@ -109,6 +109,10 @@ train-logs/
 tmp/
 **/rollout_data/
 **/buffer_stats/
+# skills 参考模板里的 output/ 是上游随包发的空占位目录,被上面的 output/ 规则吞掉后
+# fresh clone 会缺这个目录,agent 按模板写产物时路径不存在。父目录先反选才能捞回 .keep。
+!operator_runtime*/skills/**/references/**/output/
+!operator_runtime*/skills/**/references/**/output/.keep
 
 # Local third-party source checkouts
 slime/
