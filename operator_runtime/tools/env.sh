@@ -3,9 +3,14 @@
 # Agent 禁止手动改/ source;由固定入口自动加载。路径默认值按部署环境填,均可用容器 -e 覆盖。
 
 # --- Python(单一解释器)---
-: "${OPERATOR_PYTHON:=/usr/local/bin/python}"   # 跑 verify.py / benchmark.py(需 torch_npu / 上 NPU)
-: "${AST_CHECK_PYTHON:=/usr/local/bin/python}"  # validate_triton_impl.py 纯 AST,任意 python 即可
+# 优先 /usr/local/bin/python;该 symlink 不存在时兜底到 PATH 上的 python3
+# (镜像常缺此 symlink → 评测第一步找不到解释器,被误记为 ast_check_failed)。仍可用容器 -e 覆盖。
+_default_python="/usr/local/bin/python"
+[ -x "${_default_python}" ] || _default_python="$(command -v python3 || command -v python)"
+: "${OPERATOR_PYTHON:=${_default_python}}"   # 跑 verify.py / benchmark.py(需 torch_npu / 上 NPU)
+: "${AST_CHECK_PYTHON:=${_default_python}}"  # validate_triton_impl.py 纯 AST,任意 python 即可
 export OPERATOR_PYTHON AST_CHECK_PYTHON
+unset _default_python
 
 # --- Workspace ---
 : "${WORKSPACE_BASE:=/opt/workspace}"

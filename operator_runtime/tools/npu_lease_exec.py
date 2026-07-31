@@ -107,12 +107,15 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("--poll-interval must be positive")
 
     lock_dir = Path(args.lock_dir)
+    requested_at = time.time()
     status_base: dict[str, Any] = {
-        "schema_version": 1,
+        "schema_version": 2,
         "pool": pool,
         "lock_dir": str(lock_dir),
         "pid": os.getpid(),
         "command": command,
+        # requested_at → lease_wait(4 卡验证池饱和)+ exec_seconds(上卡时长)
+        "requested_at_unix": requested_at,
     }
     _write_status(args.status_file, {**status_base, "state": "waiting"})
 
@@ -126,6 +129,7 @@ def main(argv: list[str] | None = None) -> int:
             "device_id": lease.device_id,
             "lock_path": str(lease.lock_path),
             "started_at_unix": started_at,
+            "wait_seconds": round(started_at - requested_at, 4),
         },
     )
 
@@ -151,6 +155,8 @@ def main(argv: list[str] | None = None) -> int:
                 "lock_path": str(lease.lock_path),
                 "started_at_unix": started_at,
                 "ended_at_unix": ended_at,
+                "wait_seconds": round(started_at - requested_at, 4),
+                "exec_seconds": round(ended_at - started_at, 4),
                 "return_code": return_code,
                 "error": error,
             },
