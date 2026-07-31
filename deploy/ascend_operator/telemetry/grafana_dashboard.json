@@ -1,0 +1,55 @@
+{
+  "__comment": "Agentic-RL 推理侧负载盘。导入 Grafana(Prometheus 数据源)。指标来自 npu_smi_exporter + vllm /metrics。",
+  "title": "Agentic-RL Inference Load (12 infer + 4 verify)",
+  "schemaVersion": 39,
+  "editable": true,
+  "time": {"from": "now-1h", "to": "now"},
+  "refresh": "10s",
+  "templating": {"list": [
+    {"name": "engine", "type": "query", "datasource": "Prometheus",
+     "query": "label_values(npu_aicore_util_pct, engine_id)", "includeAll": true, "multi": true}
+  ]},
+  "panels": [
+    {"id": 1, "title": "NPU AICore 利用率 — 按池(inference vs verify)", "type": "timeseries",
+     "gridPos": {"h": 8, "w": 12, "x": 0, "y": 0},
+     "fieldConfig": {"defaults": {"unit": "percent", "max": 100}},
+     "targets": [{"expr": "avg by (pool) (npu_aicore_util_pct)", "legendFormat": "{{pool}}"}]},
+
+    {"id": 2, "title": "NPU AICore 利用率 — 每 engine(看不均)", "type": "timeseries",
+     "gridPos": {"h": 8, "w": 12, "x": 12, "y": 0},
+     "fieldConfig": {"defaults": {"unit": "percent", "max": 100}},
+     "targets": [{"expr": "avg by (engine_id) (npu_aicore_util_pct{engine_id=~\"$engine\"})", "legendFormat": "{{engine_id}}"}]},
+
+    {"id": 3, "title": "HBM 显存利用率 — 每卡", "type": "timeseries",
+     "gridPos": {"h": 8, "w": 12, "x": 0, "y": 8},
+     "fieldConfig": {"defaults": {"unit": "percent", "max": 100}},
+     "targets": [{"expr": "npu_hbm_util_pct", "legendFormat": "{{engine_id}}/card{{card_id}}"}]},
+
+    {"id": 4, "title": "vLLM KV cache 占用 — 每 engine", "type": "timeseries",
+     "gridPos": {"h": 8, "w": 12, "x": 12, "y": 8},
+     "fieldConfig": {"defaults": {"unit": "percentunit", "max": 1}},
+     "targets": [{"expr": "vllm:gpu_cache_usage_perc", "legendFormat": "{{engine_id}}"}]},
+
+    {"id": 5, "title": "vLLM 运行/排队队列 — 每 engine", "type": "timeseries",
+     "gridPos": {"h": 8, "w": 12, "x": 0, "y": 16},
+     "targets": [
+       {"expr": "vllm:num_requests_running", "legendFormat": "running {{engine_id}}"},
+       {"expr": "vllm:num_requests_waiting", "legendFormat": "waiting {{engine_id}}"}]},
+
+    {"id": 6, "title": "Prefix cache 命中率(prefill 杠杆)", "type": "timeseries",
+     "gridPos": {"h": 8, "w": 12, "x": 12, "y": 16},
+     "fieldConfig": {"defaults": {"unit": "percentunit", "max": 1}},
+     "targets": [{"expr": "rate(vllm:prefix_cache_hits_total[5m]) / clamp_min(rate(vllm:prefix_cache_queries_total[5m]),1)", "legendFormat": "{{engine_id}}"}]},
+
+    {"id": 7, "title": "验证池(4 卡)利用率", "type": "timeseries",
+     "gridPos": {"h": 8, "w": 12, "x": 0, "y": 24},
+     "fieldConfig": {"defaults": {"unit": "percent", "max": 100}},
+     "targets": [{"expr": "npu_aicore_util_pct{pool=\"verify\"}", "legendFormat": "verify card{{card_id}}"}]},
+
+    {"id": 8, "title": "NPU 功耗/温度", "type": "timeseries",
+     "gridPos": {"h": 8, "w": 12, "x": 12, "y": 24},
+     "targets": [
+       {"expr": "npu_power_watts", "legendFormat": "W {{engine_id}}/card{{card_id}}"},
+       {"expr": "npu_temp_celsius", "legendFormat": "C {{engine_id}}/card{{card_id}}"}]}
+  ]
+}

@@ -1,0 +1,36 @@
+# NPU 卡 → 池/engine 拓扑映射(采集用)。
+# 布局:16 卡 = 12 推理(3 engine × 4, TP4)+ 4 验证。
+# card_id 用 npu-smi 的 NPU ID(-i);多数 910B 部署 chip_id=0。
+# 若你的物理卡号与下面不同,改这里即可——exporter 只认这张表。
+#
+# 校准方法:`npu-smi info` 看实际 NPU ID;推理进程/engine 与卡的对应关系
+# 可从 gateway.log 的 "physical card N" 或各 engine 启动时的 ASCEND_RT_VISIBLE_DEVICES 反查。
+
+pool_inference:
+  # 3 个推理 engine,各 4 卡(TP4)。engine_id 用于看 engine 间不均。
+  - {card_id: 0,  chip_id: 0, engine_id: infer-0, tp_rank: 0}
+  - {card_id: 1,  chip_id: 0, engine_id: infer-0, tp_rank: 1}
+  - {card_id: 2,  chip_id: 0, engine_id: infer-0, tp_rank: 2}
+  - {card_id: 3,  chip_id: 0, engine_id: infer-0, tp_rank: 3}
+  - {card_id: 4,  chip_id: 0, engine_id: infer-1, tp_rank: 0}
+  - {card_id: 5,  chip_id: 0, engine_id: infer-1, tp_rank: 1}
+  - {card_id: 6,  chip_id: 0, engine_id: infer-1, tp_rank: 2}
+  - {card_id: 7,  chip_id: 0, engine_id: infer-1, tp_rank: 3}
+  - {card_id: 8,  chip_id: 0, engine_id: infer-2, tp_rank: 0}
+  - {card_id: 9,  chip_id: 0, engine_id: infer-2, tp_rank: 1}
+  - {card_id: 10, chip_id: 0, engine_id: infer-2, tp_rank: 2}
+  - {card_id: 11, chip_id: 0, engine_id: infer-2, tp_rank: 3}
+
+pool_verify:
+  # 4 卡算子验证池(verify.py / benchmark.py)。engine_id 恒为 verify-pool。
+  - {card_id: 12, chip_id: 0, engine_id: verify-pool, tp_rank: 0}
+  - {card_id: 13, chip_id: 0, engine_id: verify-pool, tp_rank: 1}
+  - {card_id: 14, chip_id: 0, engine_id: verify-pool, tp_rank: 2}
+  - {card_id: 15, chip_id: 0, engine_id: verify-pool, tp_rank: 3}
+
+# 每张 engine 的推理服务地址(用于 vllm /metrics 抓取 + engine_id 关联)。
+# 按你的实际端口填;PD 不开,一个 engine 一个 vllm server。
+engine_endpoints:
+  infer-0: http://127.0.0.1:15000
+  infer-1: http://127.0.0.1:15001
+  infer-2: http://127.0.0.1:15002
