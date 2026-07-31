@@ -200,7 +200,7 @@ def main():
     ap = argparse.ArgumentParser()
     here = Path(__file__).resolve().parent
     ap.add_argument("--topology", type=Path, default=here / "card_topology.yaml")
-    ap.add_argument("--port", type=int, default=9800)
+    ap.add_argument("--port", type=int, default=9810)
     ap.add_argument("--interval", type=float, default=5.0)
     ap.add_argument("--once", action="store_true", help="采集一次打印后退出(校准用)")
     ap.add_argument("--raw", action="store_true", help="打印某卡 npu-smi 原始输出")

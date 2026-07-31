@@ -8,7 +8,7 @@
 # 落盘目录默认 = 下面的 POLAR_ENGINE_METRICS_DIR(共享 FS,免在 vime 端设)。改路径就 export 同名变量。
 #
 # 用法:  bash deploy/ascend_operator/telemetry/start_telemetry_run.sh
-# 可调:  EXPORTER_PORT(默认9800) TELEMETRY_DISABLE=1(只起 polar 不起采集)
+# 可调:  EXPORTER_PORT(默认9810) TELEMETRY_DISABLE=1(只起 polar 不起采集)
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
@@ -16,13 +16,12 @@ DEPLOY_DIR="$(cd "${HERE}/.." && pwd -P)"
 
 export POLAR_ENGINE_METRICS_DIR="${POLAR_ENGINE_METRICS_DIR:-/mnt/share/polar_engine_metrics}"
 mkdir -p "${POLAR_ENGINE_METRICS_DIR}"
-EXPORTER_PORT="${EXPORTER_PORT:-9800}"
+EXPORTER_PORT="${EXPORTER_PORT:-9810}"
 
 if [[ "${TELEMETRY_DISABLE:-0}" != "1" ]]; then
-  # --- npu-smi exporter(幂等)---
-  if pgrep -f "npu_smi_exporter.py --.*${EXPORTER_PORT}" >/dev/null 2>&1 \
-     || pgrep -f "npu_smi_exporter.py" | grep -q .; then
-    echo "[telemetry] npu-smi exporter 已在运行,跳过"
+  # --- npu-smi exporter(幂等,只按本端口判;不因别端口的旧实例而跳过)---
+  if pgrep -f "npu_smi_exporter.py .*--port ${EXPORTER_PORT}\b" >/dev/null 2>&1; then
+    echo "[telemetry] npu-smi exporter 已在 :${EXPORTER_PORT} 运行,跳过"
   else
     PYBIN="${POLAR_PYTHON:-python3}"
     nohup "${PYBIN}" "${HERE}/npu_smi_exporter.py" \
