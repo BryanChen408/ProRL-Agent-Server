@@ -1,6 +1,11 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+unset http_proxy
+unset https_proxy
+unset HTTP_PROXY
+unset HTTPS_PROXY
+
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)/_paths.sh"
 
 if [[ -z "${POLAR_PYTHON:-}" && -x /root/polar-venv/bin/python ]]; then
