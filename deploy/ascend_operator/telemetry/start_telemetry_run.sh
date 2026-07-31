@@ -35,6 +35,8 @@ if [[ "${TELEMETRY_DISABLE:-0}" != "1" ]]; then
   echo "[telemetry] 记得:vime 侧 vllm 需重启以加载 polar_telemetry(engine_id 自动按 --port)"
 fi
 
-# --- 起 polar(沿用现有入口)---
+# --- 起 polar(沿用现有入口;t2a run 默认 profile.t2a.yaml,可用 POLAR_PROFILE 覆盖)---
+export POLAR_PROFILE="${POLAR_PROFILE:-${DEPLOY_DIR}/profile.t2a.yaml}"
+echo "[telemetry] POLAR_PROFILE=${POLAR_PROFILE}"
 echo "[telemetry] 拉起 polar ..."
 exec bash "${DEPLOY_DIR}/restart_polar_host.sh" "$@"

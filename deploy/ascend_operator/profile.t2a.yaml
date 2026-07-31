@@ -12,11 +12,11 @@
 # workflow=legacy(judge_command 驱动)、budget、npu_lease(0-3)、gateway、operator(timeout/max_turns)全部照 vime 不变。
 service:
   bind_host: 0.0.0.0
-  rollout_url: http://80.48.5.52:8080
-  gateway_url: http://80.48.5.52:8100
-  sglang_router_url: http://80.48.5.52:8001
+  rollout_url: http://80.5.25.119:8080
+  gateway_url: http://80.5.25.119:8100
+  sglang_router_url: http://80.5.25.119:8001
   inference_engine: vllm
-  model_served: /home/docker/Qwen3.6-35B-A3B
+  model_served: /mnt/weight/Qwen3.6-35B-A3B
 
 paths:
   output_dir: output/ascend_operator
