@@ -70,7 +70,7 @@ operator:
   #   8000s(133 min)会顶到上限。放到 4h。
   timeout_seconds: 14400.0
   runtime:
-    image: ascendc-sandbox:v1                          # ← delta 2
+    image: ascendc-tilelang:v1-aarch64                 # ← delta 2(本机实际镜像名)
     network: host
     workdir: /opt/workspace/agent_workdir
     env:

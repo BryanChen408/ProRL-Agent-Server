@@ -1,7 +1,7 @@
 # AscendC profile —— 逐字派生自 profile.vime.yaml(triton 那份一字不动)。
 # 【仅 4 处 delta,其余与 profile.vime.yaml 完全一致】:
 #   1. paths.operator_runtime_dir  : operator_runtime → operator_runtime_ascendc(canonical:skills/CLAUDE/tools/ascendc_eval_pipeline)
-#   2. operator.runtime.image      : sandbox:v1 → ascendc-sandbox:v1(cmake<4 + AscendC 工具链)
+#   2. operator.runtime.image      : sandbox:v1 → ascendc-tilelang:v1-aarch64(cmake<4 + AscendC 工具链)
 #   3. operator.evaluator.judge_command : triton_eval_pipeline.sh → ascendc_eval_pipeline.sh(解 tarball→编 kernel→对拍→测速→metrics)
 #   4. operator.evaluator.submission_* : 单 .py → tarball(多文件 AscendC 工程跨 fresh-judge 边界)
 # workflow=legacy(judge_command 驱动)、budget、npu_lease(0-3)、gateway、operator(timeout/max_turns)全部照 vime 不变。
@@ -50,7 +50,7 @@ operator:
   profile: operator_npu
   timeout_seconds: 8000.0
   runtime:
-    image: ascendc-sandbox:v1                          # ← delta 2
+     image: ascendc-tilelang:v1-aarch64                 # ← delta 2
     network: host
     workdir: /opt/workspace/agent_workdir
     env:
