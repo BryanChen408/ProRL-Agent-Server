@@ -3,14 +3,17 @@
 # Agent 禁止手动改/ source;由固定入口自动加载。路径默认值按部署环境填,均可用容器 -e 覆盖。
 
 # --- Python(单一解释器)---
-# 优先 /usr/local/bin/python;该 symlink 不存在时兜底到 PATH 上的 python3
-# (镜像常缺此 symlink → 评测第一步找不到解释器,被误记为 ast_check_failed)。仍可用容器 -e 覆盖。
-_default_python="/usr/local/bin/python"
-[ -x "${_default_python}" ] || _default_python="$(command -v python3 || command -v python)"
-: "${OPERATOR_PYTHON:=${_default_python}}"   # 跑 verify.py / benchmark.py(需 torch_npu / 上 NPU)
-: "${AST_CHECK_PYTHON:=${_default_python}}"  # validate_triton_impl.py 纯 AST,任意 python 即可
+# 解释器兜底:容器常缺 /usr/local/bin/python,且 python3 未必在 PATH → 评测第一步找不到解释器,
+# 被误记为 ast_check_failed。先探已知绝对安装位(含 /usr/local/python*/bin/python3),再退 PATH。仍可 -e 覆盖。
+_polar_py=""
+for _c in /usr/local/bin/python /usr/local/python*/bin/python3 /usr/local/python*/bin/python /opt/*/bin/python3; do
+  [ -x "${_c}" ] && { _polar_py="${_c}"; break; }
+done
+[ -z "${_polar_py}" ] && _polar_py="$(command -v python3 2>/dev/null || command -v python 2>/dev/null || true)"
+: "${OPERATOR_PYTHON:=${_polar_py:-python3}}"   # 跑 verify.py / benchmark.py(需 torch_npu / 上 NPU)
+: "${AST_CHECK_PYTHON:=${_polar_py:-python3}}"  # validate_triton_impl.py 纯 AST,任意 python 即可
 export OPERATOR_PYTHON AST_CHECK_PYTHON
-unset _default_python
+unset _polar_py _c
 
 # --- Workspace ---
 : "${WORKSPACE_BASE:=/opt/workspace}"

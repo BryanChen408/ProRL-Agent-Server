@@ -7,9 +7,17 @@
 
 # --- Python(两个角色分开;部署时可把 AST 那个换成不装 torch_npu 的解释器,
 #     让"免卡阶段"物理上碰不到 NPU。当前部署两者同指一个 python3)---
-: "${OPERATOR_PYTHON:=python3}"   # verification_ascendc.py / performance.py(需 torch_npu、上 NPU)
-: "${AST_CHECK_PYTHON:=python3}"  # validate_ascendc_impl.py 纯 AST + 抢卡器本身,不碰 NPU
+# 解释器兜底:容器里 /usr/local/bin/python 与 PATH 上的 python3 都可能缺;先探已知绝对安装位
+# (含 /usr/local/python*/bin/python3),再退 PATH,最后才裸 python3。仍可用容器 -e 覆盖。
+_polar_py=""
+for _c in /usr/local/bin/python /usr/local/python*/bin/python3 /usr/local/python*/bin/python /opt/*/bin/python3; do
+  [ -x "${_c}" ] && { _polar_py="${_c}"; break; }
+done
+[ -z "${_polar_py}" ] && _polar_py="$(command -v python3 2>/dev/null || command -v python 2>/dev/null || true)"
+: "${OPERATOR_PYTHON:=${_polar_py:-python3}}"   # verification_ascendc.py / performance.py(需 torch_npu、上 NPU)
+: "${AST_CHECK_PYTHON:=${_polar_py:-python3}}"  # validate_ascendc_impl.py 纯 AST + 抢卡器本身,不碰 NPU
 export OPERATOR_PYTHON AST_CHECK_PYTHON
+unset _polar_py _c
 
 # --- Workspace ---
 : "${WORKSPACE_BASE:=/opt/workspace}"
