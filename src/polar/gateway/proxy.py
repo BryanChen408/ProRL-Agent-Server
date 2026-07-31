@@ -143,8 +143,15 @@ class InferenceClient:
             return UpstreamTimeoutError("Upstream request timed out")
         return UpstreamTransportError(f"Upstream request failed: {exc}")
 
-    async def completion(self, request: dict[str, Any]) -> dict[str, Any]:
-        """Non-streaming chat completion. Returns the full JSON response."""
+    async def completion(
+        self, request: dict[str, Any], *, trace_headers: dict[str, str] | None = None
+    ) -> dict[str, Any]:
+        """Non-streaming chat completion. Returns the full JSON response.
+
+        ``trace_headers`` (e.g. ``x-polar-trace-id``) are forwarded to the engine so the
+        engine-side per-request logger can join back to this gateway completion. Purely
+        observability -- never affects generation.
+        """
         await self._acquire_generation_slot()
         client = await self._get_client()
         from copy import deepcopy
@@ -153,11 +160,14 @@ class InferenceClient:
         request_copy.pop("stream", None)
         request_copy["stream"] = False
         request_copy = self.engine.prepare_request(request_copy)
+        headers = {"Content-Type": "application/json", "x-polar-engine-url": self.base_url}
+        if trace_headers:
+            headers.update({str(k): str(v) for k, v in trace_headers.items()})
         try:
             resp = await client.post(
                 "/v1/chat/completions",
                 json=request_copy,
-                headers={"Content-Type": "application/json"},
+                headers=headers,
             )
         except httpx.RequestError as exc:
             raise self._translate_transport_error(exc) from exc

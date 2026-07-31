@@ -816,11 +816,12 @@ async def _handle_non_streaming(
             api_type, transformer, openai_request, original_request, session_id,
             original_model=original_model, session_info=session_info,
         )
+    _trace = {"x-polar-trace-id": f"{session_id}:{state.storage.peek_sequence(session_id)}"}
     try:
         generation = await state.inflight.run(
             session_id,
             openai_request,
-            lambda: state.inference.completion(openai_request),
+            lambda: state.inference.completion(openai_request, trace_headers=_trace),
         )
     except UpstreamError as exc:
         logger.warning("Non-streaming upstream error for session %s: %s", session_id, exc)
@@ -844,6 +845,7 @@ async def _handle_non_streaming(
             created_at=session_info.created_at.isoformat() if session_info else None,
             metadata=metadata,
             latency_ms=generation.latency_ms,
+            engine_url=state.inference.base_url,
             streaming=False,
         )
     transformed = transformer.transform_response(response, original_request)
@@ -870,11 +872,12 @@ async def _handle_streaming(
         )
     non_stream_request = {k: v for k, v in openai_request.items() if k != "stream_options"}
     non_stream_request["stream"] = False
+    _trace = {"x-polar-trace-id": f"{session_id}:{state.storage.peek_sequence(session_id)}"}
     try:
         generation = await state.inflight.run(
             session_id,
             non_stream_request,
-            lambda: state.inference.completion(non_stream_request),
+            lambda: state.inference.completion(non_stream_request, trace_headers=_trace),
         )
     except UpstreamError as exc:
         logger.warning("Upstream error for streaming session %s: %s", session_id, exc)
@@ -898,6 +901,7 @@ async def _handle_streaming(
             created_at=session_info.created_at.isoformat() if session_info else None,
             metadata=metadata,
             latency_ms=generation.latency_ms,
+            engine_url=state.inference.base_url,
             streaming=True,
         )
 

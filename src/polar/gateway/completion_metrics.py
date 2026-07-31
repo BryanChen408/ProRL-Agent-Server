@@ -82,6 +82,21 @@ def _tokens_per_second(tokens: int | None, latency_ms: float | None) -> float | 
     return tokens / (latency_ms / 1000.0)
 
 
+def _engine_timing_passthrough(response: dict[str, Any]) -> dict[str, Any]:
+    """If the engine returns per-request timing (some vllm builds put it under
+    ``metrics``/``timings``), surface it so it joins the gateway event. All optional;
+    the engine-side logger remains the primary source of TTFT/prefill/decode."""
+    out: dict[str, Any] = {}
+    for container in ("metrics", "timings"):
+        blob = response.get(container)
+        if isinstance(blob, dict):
+            for k in ("ttft_ms", "prefill_ms", "decode_ms", "queue_ms",
+                      "num_cached_tokens", "prefix_cache_hit_pct"):
+                if blob.get(k) is not None:
+                    out.setdefault(k, blob[k])
+    return out
+
+
 def build_completion_metric_event(
     *,
     session_id: str,
@@ -94,23 +109,40 @@ def build_completion_metric_event(
     response: dict[str, Any],
     latency_ms: float | None,
     streaming: bool,
+    policy_version: Any = None,
+    engine_url: str | None = None,
+    scheduler_metadata: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Build a small per-completion event safe to expose in logs/UI."""
+    """Build a small per-completion event safe to expose in logs/UI.
+
+    schema_version 2 adds join/attribution keys (``trace_id``, ``policy_version``,
+    ``engine_url``, ``group_id``, ``rollout_step``, ``op_name``) and passthrough of
+    engine timing when the server returns it. All additive; v1 consumers keep working.
+    """
     usage = _usage(response)
     latency = _float_or_none(latency_ms)
     if latency is not None:
         latency = round(max(0.0, latency), 3)
     completion_tokens = usage["completion_tokens"]
-    return {
-        "schema_version": 1,
+    md = scheduler_metadata if isinstance(scheduler_metadata, dict) else {}
+    event = {
+        "schema_version": 2,
         "recorded_at": _utcnow_iso(),
         "session_id": session_id,
         "task_id": task_id,
         "completion_id": completion_id,
         "sequence": sequence,
+        # trace-id the gateway forwarded to the engine → joins engine_request_logger rows
+        "trace_id": f"{session_id}:{sequence}",
         "api_type": api_type,
         "model_requested": model_requested,
         "model_used": model_used,
+        # attribution
+        "policy_version": policy_version,
+        "engine_url": engine_url,
+        "group_id": md.get("group_id"),
+        "rollout_step": md.get("rollout_step"),
+        "op_name": md.get("op_name") or md.get("operator_name"),
         "streaming": bool(streaming),
         "latency_ms": latency,
         "prompt_tokens": usage["prompt_tokens"],
@@ -120,6 +152,8 @@ def build_completion_metric_event(
         "completion_tokens_per_second": _tokens_per_second(completion_tokens, latency),
         "finish_reason": _finish_reason(response),
     }
+    event.update(_engine_timing_passthrough(response))
+    return event
 
 
 @dataclass(slots=True)

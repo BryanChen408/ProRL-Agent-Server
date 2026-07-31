@@ -81,6 +81,16 @@ class SessionStore:
             state = self._sessions.get(session_id)
             return state.gen_version if state is not None else None
 
+    def peek_sequence(self, session_id: str) -> int:
+        """Upcoming completion sequence (turn) for this session — observability only.
+
+        Stamps ``x-polar-trace-id`` before generation so the engine-side per-request log
+        joins the gateway completion. Best-effort: may be off by one under coalescing;
+        session_id still joins at session granularity."""
+        with self._lock:
+            state = self._sessions.get(session_id)
+            return (state.completion_count + 1) if state is not None else 1
+
     def session_would_span(self, session_id: str) -> bool:
         """True iff this session already generated under a version != current, so its
         NEXT turn would span a weight update (mixed-weight).  O(1); reject before
@@ -182,6 +192,7 @@ class SessionStore:
         metadata: dict[str, Any] | None = None,
         latency_ms: float | None = None,
         streaming: bool = False,
+        engine_url: str | None = None,
     ) -> str | None:
         """Append one completion record to the in-memory session."""
         effective_model_used = model_used or request.get("model", "unknown")
@@ -230,6 +241,9 @@ class SessionStore:
                 response=response,
                 latency_ms=latency_ms,
                 streaming=streaming,
+                policy_version=record.metadata.get("policy_version"),
+                engine_url=engine_url,
+                scheduler_metadata=metadata,
             )
             state.completion_metrics.update(metric_event)
             effective_task_id = state.task_id
