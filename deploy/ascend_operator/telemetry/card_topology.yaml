@@ -1,7 +1,9 @@
 # NPU 卡 → 池/engine 拓扑映射(采集用)。
-# 布局:16 卡 = 12 推理(3 engine × 4, TP4)+ 4 验证。
-# card_id 用 npu-smi 的 NPU ID(-i);多数 910B 部署 chip_id=0。
-# 若你的物理卡号与下面不同,改这里即可——exporter 只认这张表。
+# 布局:16 chip = 12 推理(3 engine × 4, TP4)+ 4 验证。
+# card_id = 全局 Phy-ID(0-15,= ASCEND_RT_VISIBLE_DEVICES 口径)。
+# 本机是 8 NPU × 2 chip:exporter 自动把 Phy-ID 反解成 npu-smi 寻址 -i(phy//2) -c(phy%2),
+# 即 phy0→-i0-c0, phy1→-i0-c1, phy4→-i2-c0 …(见 npu_smi_exporter._cards)。
+# 若是单 chip 机型或物理号不同:可在行内显式加 npu_id/chip 覆盖,否则自动检测(npu-smi info -l)。
 #
 # 校准方法:`npu-smi info` 看实际 NPU ID;推理进程/engine 与卡的对应关系
 # 可从 gateway.log 的 "physical card N" 或各 engine 启动时的 ASCEND_RT_VISIBLE_DEVICES 反查。

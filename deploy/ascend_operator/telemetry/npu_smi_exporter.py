@@ -73,17 +73,51 @@ def _load_topology(path: Path):
     return doc
 
 
+def _detect_layout():
+    """从 npu-smi info -l 读 NPU 总数 + 每 NPU chip 数(910 多为 8 NPU×2 chip=16)。失败回落 (None,1)。"""
+    txt = _run_smi(["-l"])
+    if txt.startswith("__ERROR__"):
+        return None, 1
+    total = None
+    chips = []
+    for line in txt.splitlines():
+        if "Total Count" in line and ":" in line:
+            try:
+                total = int(line.split(":")[1].strip())
+            except Exception:
+                pass
+        elif "Chip Count" in line and ":" in line:
+            try:
+                chips.append(int(line.split(":")[1].strip()))
+            except Exception:
+                pass
+    cpn = max(chips) if chips else 1
+    return total, (cpn or 1)
+
+
 def _cards(topo):
-    out = []
+    rows = []
     for pool, key in (("inference", "pool_inference"), ("verify", "pool_verify")):
         for row in topo.get(key) or []:
-            out.append({
-                "card_id": int(row["card_id"]),
-                "chip_id": int(row.get("chip_id", 0)),
-                "engine_id": str(row.get("engine_id", "")),
-                "tp_rank": int(row.get("tp_rank", 0)),
-                "pool": pool,
-            })
+            rows.append((pool, row))
+    total_npu, chips_per_npu = _detect_layout()
+    # 卡数 > 物理 NPU 数 且 每 NPU 多 chip → 所有 card_id 都是全局 Phy-ID,统一反解 npu_id=phy//cpn, chip=phy%cpn。
+    phy_mode = bool(total_npu) and chips_per_npu > 1 and len(rows) > (total_npu or 0)
+    out = []
+    for pool, row in rows:
+        cid = int(row["card_id"])
+        if "npu_id" in row:                       # 拓扑显式指定优先
+            npu_id, chip = int(row["npu_id"]), int(row.get("chip", row.get("chip_id", 0)))
+        elif phy_mode:
+            npu_id, chip = cid // chips_per_npu, cid % chips_per_npu
+        else:
+            npu_id, chip = cid, int(row.get("chip_id", 0))
+        out.append({
+            "card_id": cid, "npu_id": npu_id, "chip_id": chip,
+            "engine_id": str(row.get("engine_id", "")),
+            "tp_rank": int(row.get("tp_rank", 0)),
+            "pool": pool,
+        })
     return out
 
 
@@ -116,7 +150,8 @@ def _pick(kv: dict[str, str], field: str):
 
 
 def sample_card(card) -> dict[str, float]:
-    i, c = card["card_id"], card["chip_id"]
+    # 用解析出的 npu_id + chip 寻址(910 双 chip:card_id 是 Phy-ID,npu_id=phy//2, chip=phy%2)。
+    i, c = card.get("npu_id", card["card_id"]), card["chip_id"]
     kv = _parse_kv(_run_smi(["-t", "common", "-i", str(i), "-c", str(c)]))
     kv.update(_parse_kv(_run_smi(["-t", "usages", "-i", str(i), "-c", str(c)])))
     # power/temp/mem 在部分 CANN 版本单独子表里(key:value,比默认表格稳)。取不到就跳过,不报错。
