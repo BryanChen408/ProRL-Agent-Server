@@ -24,11 +24,23 @@ if [[ "${TELEMETRY_DISABLE:-0}" != "1" ]]; then
     echo "[telemetry] npu-smi exporter 已在 :${EXPORTER_PORT} 运行,跳过"
   else
     PYBIN="${POLAR_PYTHON:-python3}"
+    # T1:NPU 利用率/显存 → 落文件(--out;不依赖 Prometheus)+ 同时开 /metrics 端点
     nohup "${PYBIN}" "${HERE}/npu_smi_exporter.py" \
       --topology "${HERE}/card_topology.yaml" --port "${EXPORTER_PORT}" --interval 5 \
+      --out "${POLAR_ENGINE_METRICS_DIR}/npu_state" \
       >"${HERE}/exporter.nohup.log" 2>&1 &
-    echo "[telemetry] npu-smi exporter 起于 :${EXPORTER_PORT}(pid $!,日志 ${HERE}/exporter.nohup.log)"
+    echo "[telemetry] npu-smi exporter 起于 :${EXPORTER_PORT}(pid $!);T1 → ${POLAR_ENGINE_METRICS_DIR}/npu_state/npu_card.jsonl"
     echo "[telemetry] ⚠️ 确认 card_topology.yaml 的卡号/端口与本机一致(npu-smi info 核对)"
+  fi
+  # T2:vllm /metrics(TTFT/TPOT/KV/吞吐/抢占/prefix)→ 落文件。读 topology engine_endpoints。
+  if pgrep -f 'vllm_metrics_poller\.py' >/dev/null 2>&1; then
+    echo "[telemetry] vllm_metrics_poller 已在运行,跳过"
+  else
+    nohup "${POLAR_PYTHON:-python3}" "${HERE}/vllm_metrics_poller.py" \
+      --topology "${HERE}/card_topology.yaml" \
+      --out "${POLAR_ENGINE_METRICS_DIR}/vllm_state" --interval 5 \
+      >"${HERE}/vllm_poller.nohup.log" 2>&1 &
+    echo "[telemetry] vllm_metrics_poller 起(pid $!);T2 → ${POLAR_ENGINE_METRICS_DIR}/vllm_state/*.jsonl"
   fi
   echo "[telemetry] engine 落盘目录 POLAR_ENGINE_METRICS_DIR=${POLAR_ENGINE_METRICS_DIR}"
   echo "[telemetry] 记得:vime 侧 vllm 需重启以加载 polar_telemetry(engine_id 自动按 --port)"

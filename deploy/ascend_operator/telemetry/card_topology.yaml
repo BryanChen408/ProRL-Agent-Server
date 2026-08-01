@@ -31,7 +31,9 @@ pool_inference:
 
 # 每张 engine 的推理服务地址(用于 vllm /metrics 抓取 + engine_id 关联)。
 # 按你的实际端口填;PD 不开,一个 engine 一个 vllm server。
+# 引擎 API server 端口(vllm /metrics 抓取用)。实测:engine 0/1/2 = 15000/15002/15004
+# (rollout.py 'Ports for engine N' 那行;dist_init/nccl 用 15001/15003/15005 等,不是 API 口)。
 engine_endpoints:
-  infer-0: http://127.0.0.1:15000
-  infer-1: http://127.0.0.1:15001
-  infer-2: http://127.0.0.1:15002
+  infer-0: http://80.5.25.119:15000
+  infer-1: http://80.5.25.119:15002
+  infer-2: http://80.5.25.119:15004

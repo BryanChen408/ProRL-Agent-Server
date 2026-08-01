@@ -128,18 +128,42 @@ def sample_card(card) -> dict[str, float]:
 
 
 class Sampler(threading.Thread):
-    def __init__(self, cards, interval: float):
+    def __init__(self, cards, interval: float, out_dir=None):
         super().__init__(daemon=True)
         self.cards, self.interval = cards, interval
         self.snapshot: str = "# no sample yet\n"
         self._stop = threading.Event()
+        # T1 落文件:不依赖 Prometheus,直接把每卡采样写 jsonl,供 analyze/DuckDB。
+        self.out_path = None
+        if out_dir:
+            import os as _os
+            _os.makedirs(out_dir, exist_ok=True)
+            self.out_path = _os.path.join(out_dir, "npu_card.jsonl")
 
     def run(self):
         while not self._stop.is_set():
-            self.snapshot = self._render()
+            samples = [(card, sample_card(card)) for card in self.cards]
+            self.snapshot = self._render(samples)
+            if self.out_path:
+                self._write_jsonl(samples)
             self._stop.wait(self.interval)
 
-    def _render(self) -> str:
+    def _write_jsonl(self, samples):
+        import json as _json
+        ts = round(_now(), 3)
+        try:
+            with open(self.out_path, "a", buffering=1) as f:
+                for card, vals in samples:
+                    row = {"recorded_at_unix": ts, "card_id": card["card_id"],
+                           "pool": card["pool"], "engine_id": card["engine_id"],
+                           "tp_rank": card["tp_rank"], **vals}
+                    f.write(_json.dumps(row, ensure_ascii=False) + "\n")
+        except Exception:
+            pass
+
+    def _render(self, samples=None) -> str:
+        if samples is None:
+            samples = [(card, sample_card(card)) for card in self.cards]
         lines = [
             "# HELP npu_aicore_util_pct AICore utilization percent",
             "# TYPE npu_aicore_util_pct gauge",
@@ -154,8 +178,7 @@ class Sampler(threading.Thread):
             "power_w": "npu_power_watts",
             "temp_c": "npu_temp_celsius",
         }
-        for card in self.cards:
-            vals = sample_card(card)
+        for card, vals in samples:
             lbl = (f'card_id="{card["card_id"]}",pool="{card["pool"]}",'
                    f'engine_id="{card["engine_id"]}",tp_rank="{card["tp_rank"]}"')
             for field, metric in metric_help.items():
@@ -205,6 +228,7 @@ def main():
     ap.add_argument("--once", action="store_true", help="采集一次打印后退出(校准用)")
     ap.add_argument("--raw", action="store_true", help="打印某卡 npu-smi 原始输出")
     ap.add_argument("--card", type=int, default=0)
+    ap.add_argument("--out", default=None, help="T1 落文件目录:每 interval 每卡写 npu_card.jsonl(不依赖 Prometheus)")
     args = ap.parse_args()
 
     if args.raw:
@@ -222,9 +246,10 @@ def main():
             print(card["pool"], card["engine_id"], f"card{card['card_id']}", sample_card(card))
         return
 
-    sampler = Sampler(cards, args.interval)
+    sampler = Sampler(cards, args.interval, out_dir=args.out)
     sampler.start()
-    print(f"npu-smi exporter on :{args.port}/metrics — {len(cards)} cards, interval {args.interval}s")
+    print(f"npu-smi exporter on :{args.port}/metrics — {len(cards)} cards, interval {args.interval}s"
+          + (f"; T1 落文件 → {args.out}/npu_card.jsonl" if args.out else ""))
     _serve(sampler, args.port)
 
 
