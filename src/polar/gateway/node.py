@@ -293,11 +293,26 @@ class GatewayNodeManager:
         """Execute an ordered prepare action list (``spec.prepare`` by default)."""
         steps = actions if actions is not None else spec.prepare
         base_env = self._runtime_env(request, managed, runtime_override=runtime)
+        if log_prefix == "eval_prepare":
+            logger.warning(
+                "[EVALPREP-PROBE] run_prepare session=%s prefix=%s n_steps=%d cancel_at_entry=%s",
+                request.session_id, log_prefix, len(steps or []), managed.cancel_requested,
+            )
         for i, action in enumerate(steps):
             if managed.cancel_requested:
+                if log_prefix == "eval_prepare":
+                    logger.warning(
+                        "[EVALPREP-PROBE] run_prepare session=%s CANCEL 在第 %d/%d 步中途返回 → 剩余步(含铺 input/)被跳过",
+                        request.session_id, i, len(steps or []),
+                    )
                 return
             if action.type == "upload_file":
                 await runtime.upload_file(action.source, action.target)
+                if log_prefix == "eval_prepare":
+                    logger.warning(
+                        "[EVALPREP-PROBE] run_prepare session=%s step %d upload_file OK: %s → %s",
+                        request.session_id, i, action.source, action.target,
+                    )
             elif action.type == "upload_dir":
                 await runtime.upload_dir(action.source, action.target)
             elif action.type == "exec":
@@ -471,6 +486,12 @@ class GatewayNodeManager:
                 if runtime_spec.eval_prepare is not None
                 else runtime_spec.prepare
             )
+            logger.warning(
+                "[EVALPREP-PROBE] prepare_eval session=%s eval_prepare_is_none=%s n_actions=%d types=%s "
+                "(n=0 或无 upload_file/exec ⇒ input/ 不会被铺)",
+                request.session_id, runtime_spec.eval_prepare is None,
+                len(eval_actions or []), [getattr(a, "type", "?") for a in (eval_actions or [])],
+            )
             await self._run_runtime_prepare(
                 eval_runtime,
                 runtime_spec,
@@ -478,6 +499,10 @@ class GatewayNodeManager:
                 managed,
                 actions=eval_actions,
                 log_prefix="eval_prepare",
+            )
+            logger.warning(
+                "[EVALPREP-PROBE] prepare_eval session=%s _run_runtime_prepare 正常返回(eval_prepare 已跑完)",
+                request.session_id,
             )
             return eval_runtime
         except asyncio.CancelledError:
@@ -855,7 +880,12 @@ class GatewayNodeManager:
 
         fresh_eval_runtime: BaseRuntime | None = None
         try:
-            if not submission_context.get("submission_missing"):
+            _sub_missing = bool(submission_context.get("submission_missing"))
+            logger.warning(
+                "[EVALPREP-PROBE] lazy_eval session=%s submission_missing=%s (若 True 则不 prepare、不铺 input/)",
+                request.session_id, _sub_missing,
+            )
+            if not _sub_missing:
                 fresh_eval_runtime = await self._prepare_eval_runtime(managed)
                 if fresh_eval_runtime is None:
                     return trajectory.model_copy(
@@ -867,6 +897,11 @@ class GatewayNodeManager:
                             ),
                         }
                     )
+            logger.warning(
+                "[EVALPREP-PROBE] lazy_eval session=%s fresh_eval_runtime=%s → judge 将用 %s 运行时",
+                request.session_id, fresh_eval_runtime is not None,
+                "fresh" if fresh_eval_runtime is not None else "source(agent)",
+            )
 
             evaluator = self.evaluators.create(strategy_spec)
             eval_result = await self._await_with_budget(
