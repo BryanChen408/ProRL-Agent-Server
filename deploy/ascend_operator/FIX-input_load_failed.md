@@ -1,6 +1,12 @@
 # 修复方案:input_load_failed 假 INFRA + 丢弃已产出算子
 
-状态:**已实施,待重启验证**(node.py `_run_runtime_prepare` 加 honor_cancel;`_prepare_eval_runtime` 传 False)
+状态:**已实施 + 已验证 + 探针已回滚**（node.py `_run_runtime_prepare` 加 honor_cancel;`_prepare_eval_runtime` 传 False）
+
+## 验证结果（run 20260801-223611，重启后实测）
+- 取消 session `sk-polar-20156667` 探针实证:`cancel_at_entry=True honor_cancel=False` → `step 0/1 upload_file OK`（input/{op}.py + .json 已铺）→ judge 正常判分。
+- 被 budget 取消(7>6)的 session 现在拿到**真 verdict**:`status=COMPLETED reward=0.3 error_type=correctness_failed`（评了 best-so-far,非丢弃）。
+- 全局 `input_load_failed = 0`（旧 run 为 62/180=34%）。
+- 结论:取消照常发生,产出不再被扔,正常评分。调试探针 [EVALPREP-PROBE] 已回滚。
 适用:算子场景 profile.t2a / profile.ascendc(operator_judge + ascendc_eval_pipeline)
 日期锚点:2026-08-01 定位于 run 20260731-180255-795ae6 + 20260801-193002-58a116
 
