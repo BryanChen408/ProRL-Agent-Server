@@ -1,6 +1,6 @@
 # 修复方案:input_load_failed 假 INFRA + 丢弃已产出算子
 
-状态:**待实施**(根因已双实锤,代码未改)
+状态:**已实施,待重启验证**(node.py `_run_runtime_prepare` 加 honor_cancel;`_prepare_eval_runtime` 传 False)
 适用:算子场景 profile.t2a / profile.ascendc(operator_judge + ascendc_eval_pipeline)
 日期锚点:2026-08-01 定位于 run 20260731-180255-795ae6 + 20260801-193002-58a116
 

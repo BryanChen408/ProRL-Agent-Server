@@ -289,17 +289,24 @@ class GatewayNodeManager:
         *,
         actions: list | None = None,
         log_prefix: str = "prepare",
+        honor_cancel: bool = True,
     ) -> None:
-        """Execute an ordered prepare action list (``spec.prepare`` by default)."""
+        """Execute an ordered prepare action list (``spec.prepare`` by default).
+
+        ``honor_cancel``:agent prepare 在取消时应尽早停(True)。但 **eval/judge prepare 传 False** ——
+        取消(如 pipeline_budget_exceeded)只该停 agent,不该连"给 agent 已产出物打分的判分准备"也跳过;
+        跳过会导致 judge 在没铺 input/ 的空容器上判分 → 假 input_load_failed → 丢弃产出 + 无谓 retry。
+        """
         steps = actions if actions is not None else spec.prepare
         base_env = self._runtime_env(request, managed, runtime_override=runtime)
         if log_prefix == "eval_prepare":
             logger.warning(
-                "[EVALPREP-PROBE] run_prepare session=%s prefix=%s n_steps=%d cancel_at_entry=%s",
-                request.session_id, log_prefix, len(steps or []), managed.cancel_requested,
+                "[EVALPREP-PROBE] run_prepare session=%s prefix=%s n_steps=%d cancel_at_entry=%s honor_cancel=%s",
+                request.session_id, log_prefix, len(steps or []),
+                managed.cancel_requested, honor_cancel,
             )
         for i, action in enumerate(steps):
-            if managed.cancel_requested:
+            if honor_cancel and managed.cancel_requested:
                 if log_prefix == "eval_prepare":
                     logger.warning(
                         "[EVALPREP-PROBE] run_prepare session=%s CANCEL 在第 %d/%d 步中途返回 → 剩余步(含铺 input/)被跳过",
@@ -499,6 +506,9 @@ class GatewayNodeManager:
                 managed,
                 actions=eval_actions,
                 log_prefix="eval_prepare",
+                # 取消(如 budget 超限)只停 agent;判分准备必须跑全,否则 judge 在空容器上判分
+                # → 假 input_load_failed、丢弃 best-so-far 产出。见 deploy/ascend_operator/FIX-input_load_failed.md
+                honor_cancel=False,
             )
             logger.warning(
                 "[EVALPREP-PROBE] prepare_eval session=%s _run_runtime_prepare 正常返回(eval_prepare 已跑完)",
