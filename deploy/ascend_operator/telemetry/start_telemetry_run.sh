@@ -19,31 +19,12 @@ mkdir -p "${POLAR_ENGINE_METRICS_DIR}"
 EXPORTER_PORT="${EXPORTER_PORT:-9810}"
 
 if [[ "${TELEMETRY_DISABLE:-0}" != "1" ]]; then
-  # --- npu-smi exporter(幂等,只按本端口判;不因别端口的旧实例而跳过)---
-  if pgrep -f "npu_smi_exporter.py .*--port ${EXPORTER_PORT}\b" >/dev/null 2>&1; then
-    echo "[telemetry] npu-smi exporter 已在 :${EXPORTER_PORT} 运行,跳过"
-  else
-    PYBIN="${POLAR_PYTHON:-python3}"
-    # T1:NPU 利用率/显存 → 落文件(--out;不依赖 Prometheus)+ 同时开 /metrics 端点
-    nohup "${PYBIN}" "${HERE}/npu_smi_exporter.py" \
-      --topology "${HERE}/card_topology.yaml" --port "${EXPORTER_PORT}" --interval 5 \
-      --out "${POLAR_ENGINE_METRICS_DIR}/npu_state" \
-      >"${HERE}/exporter.nohup.log" 2>&1 &
-    echo "[telemetry] npu-smi exporter 起于 :${EXPORTER_PORT}(pid $!);T1 → ${POLAR_ENGINE_METRICS_DIR}/npu_state/npu_card.jsonl"
-    echo "[telemetry] ⚠️ 确认 card_topology.yaml 的卡号/端口与本机一致(npu-smi info 核对)"
-  fi
-  # T2:vllm /metrics(TTFT/TPOT/KV/吞吐/抢占/prefix)→ 落文件。读 topology engine_endpoints。
-  if pgrep -f 'vllm_metrics_poller\.py' >/dev/null 2>&1; then
-    echo "[telemetry] vllm_metrics_poller 已在运行,跳过"
-  else
-    nohup "${POLAR_PYTHON:-python3}" "${HERE}/vllm_metrics_poller.py" \
-      --topology "${HERE}/card_topology.yaml" \
-      --out "${POLAR_ENGINE_METRICS_DIR}/vllm_state" --interval 5 \
-      >"${HERE}/vllm_poller.nohup.log" 2>&1 &
-    echo "[telemetry] vllm_metrics_poller 起(pid $!);T2 → ${POLAR_ENGINE_METRICS_DIR}/vllm_state/*.jsonl"
-  fi
+  # --- 全套 T1–T8 常驻采集(幂等):T1 npu / T2 vllm / T3 host / T5–T8 aggregator ---
+  # 复用 start_all_telemetry.sh;端口与落盘目录透传,POLAR_RUNS_ROOT 用其默认(算子 runs)或外部覆盖。
+  EXPORTER_PORT="${EXPORTER_PORT}" POLAR_ENGINE_METRICS_DIR="${POLAR_ENGINE_METRICS_DIR}" \
+    bash "${HERE}/start_all_telemetry.sh" || echo "[telemetry] ⚠️ start_all_telemetry 部分失败,polar 仍继续"
   echo "[telemetry] engine 落盘目录 POLAR_ENGINE_METRICS_DIR=${POLAR_ENGINE_METRICS_DIR}"
-  echo "[telemetry] 记得:vime 侧 vllm 需重启以加载 polar_telemetry(engine_id 自动按 --port)"
+  echo "[telemetry] 记得:vime 侧 vllm 需重启以加载 polar_telemetry(T4,engine_id 自动按 --port)"
 fi
 
 # --- 起 polar(沿用现有入口;t2a run 默认 profile.t2a.yaml,可用 POLAR_PROFILE 覆盖)---
