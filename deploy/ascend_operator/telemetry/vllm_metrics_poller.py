@@ -55,13 +55,22 @@ def _load_endpoints(topo_path: Path) -> dict[str, str]:
     return out
 
 
-def _scrape(url: str) -> dict[str, float]:
-    """拉一次 /metrics,解析成 {metric_name(+bucketless): value}。histogram 累加各 label 的 _sum/_count。"""
-    try:
-        with urllib.request.urlopen(url, timeout=5) as r:
-            text = r.read().decode("utf-8", "replace")
-    except Exception as e:  # noqa: BLE001
-        return {"__error__": str(e)[:80]}
+def _scrape(url: str, timeout: float = 10.0, retries: int = 1) -> dict[str, float]:
+    """拉一次 /metrics,解析成 {metric_name(+bucketless): value}。histogram 累加各 label 的 _sum/_count。
+
+    失败(超时/连不上)返回 {"__error__": ...}(**不含任何指标键**)——上层据此写 scrape_ok=false,
+    绝不把失败当成 0(否则 counter 差分被击穿:gen 从 60万突然掉 0 又跳回)。负载下 /metrics 常 >5s,
+    故默认 10s + 1 次重试。"""
+    last = "unknown"
+    for _ in range(retries + 1):
+        try:
+            with urllib.request.urlopen(url, timeout=timeout) as r:
+                text = r.read().decode("utf-8", "replace")
+            break
+        except Exception as e:  # noqa: BLE001
+            last = str(e)[:80]
+    else:
+        return {"__error__": last}
     agg: dict[str, float] = {}
     want_hist_sfx = tuple(h + s for h in _HISTS for s in ("_sum", "_count"))
     want_bucket = tuple(h + "_bucket" for h in _HISTS)
@@ -115,8 +124,11 @@ def main():
     while True:
         ts = time.time()
         for eid, base in engines.items():
+            scraped = _scrape(base.rstrip("/") + "/metrics")
+            ok = "__error__" not in scraped
+            # scrape_ok 显式标注:分析侧只用 scrape_ok=true 的行做 counter 差分,失败行不参与。
             row = {"recorded_at_unix": round(ts, 3), "engine_id": eid,
-                   "endpoint": base, **_scrape(base.rstrip("/") + "/metrics")}
+                   "endpoint": base, "scrape_ok": ok, **scraped}
             with open(out / f"{eid}.jsonl", "a", buffering=1) as f:
                 f.write(json.dumps(row, ensure_ascii=False) + "\n")
         if args.once:
