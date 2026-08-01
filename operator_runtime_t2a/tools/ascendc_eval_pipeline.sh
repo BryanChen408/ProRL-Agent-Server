@@ -248,17 +248,7 @@ find "$TASK_DIR" \( -name '*.so' -o -name '*.a' -o -name '*.o' -o -name '*.whl' 
      -o -name 'build' -o -name 'dist' -o -name '*.egg-info' -o -name '__pycache__' \) \
      -exec rm -rf {} + 2>/dev/null || true
 
-# golden 参考输入:优先绝对只读数据集目录(agent 碰不到、不受 cwd 漂移/工作区清理影响)。
-# 显式 --task_file 最高优先;golden 目录没有该 op 才兜底老的相对 input/(兼容其他数据集)。
-# 之前默认 input/${OP_NAME}.py 是 cwd 相对 + 落在 agent 可写目录 → flaky golden missing(input_load_failed)。
-: "${POLAR_GOLDEN_DIR:=/home/docker/datasets/op_tasks/npukernelbench_level1_ascendc/op_tasks}"
-if [[ -n "$TASK_FILE" ]]; then
-  TASK_SRC="$TASK_FILE"
-elif [[ -f "${POLAR_GOLDEN_DIR}/${OP_NAME}.py" ]]; then
-  TASK_SRC="${POLAR_GOLDEN_DIR}/${OP_NAME}.py"
-else
-  TASK_SRC="input/${OP_NAME}.py"
-fi
+TASK_SRC="${TASK_FILE:-input/${OP_NAME}.py}"
 JSON_SRC="$(dirname "$TASK_SRC")/${OP_NAME}.json"
 TASK_SRC="$(realpath "$TASK_SRC" 2>/dev/null || echo "$TASK_SRC")"
 JSON_SRC="$(realpath "$JSON_SRC" 2>/dev/null || echo "$JSON_SRC")"

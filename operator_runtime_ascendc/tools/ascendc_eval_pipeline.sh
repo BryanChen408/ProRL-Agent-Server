@@ -286,17 +286,7 @@ find "$TASK_DIR" \( -name '*.so' -o -name '*.a' -o -name '*.o' -o -name '*.whl' 
 # 31/31 个数据集算子的 get_input_groups() 都是硬编码同名 json(无 __file__ 推导),
 # 故改名成 model.py 后仍能正确读到同目录的 {op}.json。
 # --task 仅保留给本地/离线测试(judge_command 不传)。
-# golden 参考输入:优先绝对只读数据集目录(agent 碰不到、不受 cwd 漂移/工作区清理影响)。
-# 显式 --task_file 最高优先;golden 目录没有该 op 才兜底老的相对 input/(兼容其他数据集)。
-# 之前默认 input/${OP_NAME}.py 是 cwd 相对 + 落在 agent 可写目录 → flaky golden missing(input_load_failed)。
-: "${POLAR_GOLDEN_DIR:=/home/docker/datasets/op_tasks/npukernelbench_level1_ascendc/op_tasks}"
-if [[ -n "$TASK_FILE" ]]; then
-  TASK_SRC="$TASK_FILE"
-elif [[ -f "${POLAR_GOLDEN_DIR}/${OP_NAME}.py" ]]; then
-  TASK_SRC="${POLAR_GOLDEN_DIR}/${OP_NAME}.py"
-else
-  TASK_SRC="input/${OP_NAME}.py"
-fi
+TASK_SRC="${TASK_FILE:-input/${OP_NAME}.py}"
 JSON_SRC="$(dirname "$TASK_SRC")/${OP_NAME}.json"
 TASK_SRC="$(realpath "$TASK_SRC" 2>/dev/null || echo "$TASK_SRC")"
 JSON_SRC="$(realpath "$JSON_SRC" 2>/dev/null || echo "$JSON_SRC")"
