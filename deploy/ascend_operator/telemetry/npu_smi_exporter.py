@@ -250,7 +250,15 @@ def main():
     sampler.start()
     print(f"npu-smi exporter on :{args.port}/metrics — {len(cards)} cards, interval {args.interval}s"
           + (f"; T1 落文件 → {args.out}/npu_card.jsonl" if args.out else ""))
-    _serve(sampler, args.port)
+    try:
+        _serve(sampler, args.port)
+    except OSError as e:
+        # 端口被占等 → HTTP 端点起不来,但落文件采集必须继续(T1 与 /metrics 端点解耦)。
+        print(f"[warn] :{args.port} 起不来({e}); /metrics 端点跳过,继续落文件采集。", file=sys.stderr)
+        if not args.out:
+            sys.exit(f"既无 --out 落文件,:{args.port} 又被占,退出。换端口或加 --out。")
+        while True:
+            time.sleep(3600)
 
 
 if __name__ == "__main__":
