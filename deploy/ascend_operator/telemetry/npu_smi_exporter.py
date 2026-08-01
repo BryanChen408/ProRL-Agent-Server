@@ -149,8 +149,12 @@ class Sampler(threading.Thread):
             self.out_path = _os.path.join(out_dir, "npu_card.jsonl")
 
     def run(self):
+        from concurrent.futures import ThreadPoolExecutor
+        pool = ThreadPoolExecutor(max_workers=min(16, len(self.cards) or 1))
         while not self._stop.is_set():
-            samples = [(card, sample_card(card)) for card in self.cards]
+            # 每卡 5 次 npu-smi 子调用;16 卡串行会几十秒/轮,跟不上间隔 → 按卡并发。
+            vals = list(pool.map(sample_card, self.cards))
+            samples = list(zip(self.cards, vals))
             self.snapshot = self._render(samples)
             if self.out_path:
                 self._write_jsonl(samples)
@@ -224,6 +228,7 @@ def _serve(sampler: Sampler, port: int):
         def log_message(self, *a):  # 静默
             pass
 
+    http.server.HTTPServer.allow_reuse_address = True  # 旧 socket TIME_WAIT 不挡重启
     http.server.HTTPServer(("0.0.0.0", port), H).serve_forever()
 
 
