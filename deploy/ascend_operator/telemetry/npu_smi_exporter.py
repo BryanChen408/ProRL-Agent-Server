@@ -28,12 +28,15 @@ from pathlib import Path
 # --- key 别名:不同 CANN 版本字段名有差异,尽量都覆盖 ---
 _ALIASES = {
     "aicore_util_pct": ["Aicore Usage Rate(%)", "AI Core Usage Rate(%)", "AICore Usage Rate(%)"],
+    "npu_util_pct":    ["NPU Real-time Utilization(%)", "NPU Utilization(%)", "Chip Usage Rate(%)",
+                        "NPU Real-time Power Utilization(%)"],
     "hbm_util_pct":    ["HBM Usage Rate(%)"],
     "mem_util_pct":    ["Memory Usage Rate(%)", "DDR Usage Rate(%)"],
     "hbm_total_mb":    ["HBM Capacity(MB)"],
     "hbm_used_mb":     ["HBM Usage(MB)", "HBM Used(MB)"],
-    "power_w":         ["Power(W)", "NPU Real-time Power(W)"],
-    "temp_c":          ["Temperature(C)", "NPU Temperature(C)"],
+    "power_w":         ["Power(W)", "NPU Real-time Power(W)", "Chip Power(W)", "Power Dissipation(W)"],
+    "temp_c":          ["Temperature(C)", "NPU Temperature(C)", "Chip Temperature(C)",
+                        "NPU Real-time Temperature(C)"],
 }
 
 _KV = re.compile(r"^\s*([A-Za-z][A-Za-z0-9 ()/%.-]*?)\s*[:=]\s*(.+?)\s*$")
@@ -116,6 +119,11 @@ def sample_card(card) -> dict[str, float]:
     i, c = card["card_id"], card["chip_id"]
     kv = _parse_kv(_run_smi(["-t", "common", "-i", str(i), "-c", str(c)]))
     kv.update(_parse_kv(_run_smi(["-t", "usages", "-i", str(i), "-c", str(c)])))
+    # power/temp/mem 在部分 CANN 版本单独子表里(key:value,比默认表格稳)。取不到就跳过,不报错。
+    for sub in ("power", "temp", "mem"):
+        extra = _run_smi(["-t", sub, "-i", str(i), "-c", str(c)])
+        if not extra.startswith("__ERROR__"):
+            kv.update(_parse_kv(extra))
     vals: dict[str, float] = {}
     for field in _ALIASES:
         v = _pick(kv, field)

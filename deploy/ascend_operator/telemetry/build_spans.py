@@ -91,7 +91,8 @@ def process_session(transcript, session_id, session_dir):
         for b in _content_blocks(o):
             if isinstance(b, dict) and b.get("type") == "tool_use":
                 tool_name_of[b.get("id")] = b.get("name", "?")
-                if "triton_eval_pipeline" in json.dumps(b.get("input", {}))[:400]:
+                # 验证段:triton_eval_pipeline / ascendc_eval_pipeline / *_eval_pipeline 都算(两后端通用)
+                if "_eval_pipeline" in json.dumps(b.get("input", {}))[:600]:
                     verify_tool_ids.add(b.get("id"))
 
     # 逐相邻 gap 归因(互不重叠、和=墙钟 → 占比必 ≤1)

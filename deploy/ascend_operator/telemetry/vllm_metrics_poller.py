@@ -32,6 +32,8 @@ _HISTS = ["vllm:time_to_first_token_seconds", "vllm:inter_token_latency_seconds"
           "vllm:request_time_per_output_token_seconds", "vllm:e2e_request_latency_seconds"]
 
 _LINE = re.compile(r'^([a-zA-Z_:][\w:]*)(\{[^}]*\})?\s+([0-9eE.+-]+)$')
+_LE = re.compile(r'le="([^"]*)"')
+_FR = re.compile(r'(?:finished_reason|finish_reason)="([^"]*)"')
 
 
 def _load_endpoints(topo_path: Path) -> dict[str, str]:
@@ -62,6 +64,7 @@ def _scrape(url: str) -> dict[str, float]:
         return {"__error__": str(e)[:80]}
     agg: dict[str, float] = {}
     want_hist_sfx = tuple(h + s for h in _HISTS for s in ("_sum", "_count"))
+    want_bucket = tuple(h + "_bucket" for h in _HISTS)
     want_flat = set(_COUNTERS + _GAUGES)
     for line in text.splitlines():
         if line.startswith("#"):
@@ -69,13 +72,21 @@ def _scrape(url: str) -> dict[str, float]:
         m = _LINE.match(line.strip())
         if not m:
             continue
-        name, _lbl, val = m.group(1), m.group(2), m.group(3)
+        name, lbl, val = m.group(1), m.group(2) or "", m.group(3)
         try:
             v = float(val)
         except ValueError:
             continue
         if name in want_flat or name.endswith(want_hist_sfx):
-            agg[name] = agg.get(name, 0.0) + v  # 跨 label(多 rank/多 finish_reason)求和
+            # request_success_total 保留 finish_reason 拆分(不塌成一个数)
+            fr = _FR.search(lbl) if name == "vllm:request_success_total" else None
+            key = f"{name}|{fr.group(1)}" if fr else name
+            agg[key] = agg.get(key, 0.0) + v  # 跨其余 label(多 rank)求和
+        elif name.endswith(want_bucket):
+            # histogram 桶:按 le 存(跨 rank 求和)→ 相邻两行差分 + 桶插值 = 真实 p50/p90/p99
+            le = _LE.search(lbl)
+            if le:
+                agg[f"{name}@le={le.group(1)}"] = agg.get(f"{name}@le={le.group(1)}", 0.0) + v
     return agg
 
 
