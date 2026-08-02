@@ -1058,7 +1058,24 @@ def _run_verification(op: str, non_compute: bool = False):
             _dl.append(f"torch.ops.npu 已注册: {[a for a in dir(torch.ops.npu) if not a.startswith('_')][:25]}")
         except Exception as _e:  # noqa: BLE001
             _dl.append(f"torch.ops.npu 访问失败: {type(_e).__name__}: {_e}")
-        # 没 .so 时,把编译日志尾部打出来定位"为什么没编出库"(compile.log 在 judge_out 根,向上找)
+        # .so 可能在 wheel 包里而非 kernel/build/:递归找 + 测 wheel import + pip 列表。
+        try:
+            import glob as _glob, subprocess as _sp
+            _all_so = _glob.glob(str(kernel_build_dir.parent / "**" / "*.so"), recursive=True)
+            _dl.append(f"kernel/ 下所有 .so(递归): {[_p.split('/kernel/')[-1] for _p in _all_so][:10] or '无'}")
+            _pipl = _sp.run(["pip", "list"], capture_output=True, text=True, timeout=20).stdout
+            _pkgs = [l for l in _pipl.splitlines() if any(c.isdigit() for c in l.split()[:1] or [""]) or op.lower().replace("_", "-")[:6] in l.lower()]
+            _dl.append(f"pip 里疑似本算子包: {_pkgs[:5] or '无'}")
+            # 测:候选 model 里 import 的包能不能 import
+            for _cand_name in (op, op.lower(), op.split('_', 1)[-1].lower()):
+                try:
+                    __import__(_cand_name)
+                    _dl.append(f"import {_cand_name}: OK")
+                except Exception as _e:  # noqa: BLE001
+                    _dl.append(f"import {_cand_name}: FAIL -> {type(_e).__name__}: {str(_e)[:80]}")
+        except Exception as _e:  # noqa: BLE001
+            _dl.append(f"wheel 探测异常: {type(_e).__name__}: {_e}")
+        # 把编译日志尾部打出来(compile.log 在 judge_out 根,向上找)
         if not _sos:
             _clog = None
             _p = kernel_build_dir
