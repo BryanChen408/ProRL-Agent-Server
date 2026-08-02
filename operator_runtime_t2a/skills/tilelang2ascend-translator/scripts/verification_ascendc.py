@@ -1032,6 +1032,36 @@ def _run_verification(op: str, non_compute: bool = False):
         return report
 
     inserted_paths = _setup_paths(kernel_build_dir)
+    # ---- [KERNEL-LOAD-DIAG] 定位 .so 编译/加载/注册链(判分侧,输出进 verify.log→metrics_error.log)----
+    # 目的:分辨 correctness_failed 的真因 —— (a) build 没产出 .so vs (b) 产出了但 load_library 失败被吞。
+    try:
+        import os as _os
+        _dl = ["", "==== KERNEL-LOAD-DIAG ===="]
+        _sos = []
+        if kernel_build_dir.is_dir():
+            _sos = sorted(f for f in _os.listdir(str(kernel_build_dir)) if f.endswith(".so"))
+            _dl.append(f"build_dir EXISTS: {kernel_build_dir} | .so={_sos or '【无 .so —— 编译没产出库!】'}")
+        else:
+            _dl.append(f"build_dir MISSING: {kernel_build_dir} 【kernel 没编译产出目录】")
+        try:
+            import torch_npu  # noqa: F401
+            _dl.append("import torch_npu: OK")
+        except Exception as _e:  # noqa: BLE001
+            _dl.append(f"import torch_npu: FAIL -> {type(_e).__name__}: {str(_e)[:160]}")
+        for _f in _sos:
+            try:
+                torch.ops.load_library(str(kernel_build_dir / _f))
+                _dl.append(f"load_library({_f}): OK")
+            except Exception as _e:  # noqa: BLE001
+                _dl.append(f"load_library({_f}): FAIL -> {type(_e).__name__}: {str(_e)[:220]}")
+        try:
+            _dl.append(f"torch.ops.npu 已注册: {[a for a in dir(torch.ops.npu) if not a.startswith('_')][:25]}")
+        except Exception as _e:  # noqa: BLE001
+            _dl.append(f"torch.ops.npu 访问失败: {type(_e).__name__}: {_e}")
+        _dl.append("==== /KERNEL-LOAD-DIAG ====")
+        print("\n".join(_dl), flush=True)
+    except Exception as _e:  # noqa: BLE001
+        print(f"[KERNEL-LOAD-DIAG] diag 自身异常: {type(_e).__name__}: {_e}", flush=True)
     try:
         ref_module = _load_module(ref_path, f"{op}_ref_model")
         cand_module = _load_module(cand_path, f"{op}_ascendc_model")
