@@ -20,21 +20,26 @@ echo "[run_debug] OP=$OP"
 echo "[run_debug] TAR=$TAR"
 echo "[run_debug] IMAGE=$IMAGE"
 
-# NPU 设备:注册检查不必需;若 build 报缺卡可设 NPU_DEV=1 加上判分同款卡池 0-3
+# golden 数据集(STEP4 对拍要 golden model.py)
+GOLDEN="${GOLDEN:-/home/docker/datasets/op_tasks/npukernelbench_level1_ascendc/op_tasks}"
+
+# NPU 设备:STEP1 编译不必需,但 STEP4 对拍要卡。默认开(NPU_DEV=0 可关,只做 build/register 检查)。
 NPU_ARGS=()
-if [ "${NPU_DEV:-0}" = "1" ]; then
-  for d in davinci0 davinci1 davinci2 davinci3 davinci_manager devmm_svm hisi_hdc; do
+if [ "${NPU_DEV:-1}" = "1" ]; then
+  for d in davinci0 davinci1 davinci2 davinci3 davinci_manager devmm_svm hisi_hdc upgrade; do
     [ -e "/dev/$d" ] && NPU_ARGS+=(--device "/dev/$d")
   done
   [ -d /usr/local/Ascend/driver ] && NPU_ARGS+=(-v /usr/local/Ascend/driver:/usr/local/Ascend/driver:ro)
-  echo "[run_debug] 已加 NPU 设备(${#NPU_ARGS[@]} 项)"
+  echo "[run_debug] NPU 设备: ${#NPU_ARGS[@]} 项(NPU_DEV=0 可关)"
 fi
+[ -d "$GOLDEN" ] && GOLDEN_ARG=(-v "$GOLDEN":/opt/golden:ro) || GOLDEN_ARG=()
+echo "[run_debug] golden: ${GOLDEN:-无}"
 
 exec docker run --rm -i \
   -v "$RT":/opt/canonical:ro \
   -v "$RT/tools":/opt/workspace/agent_workdir/tools:ro \
   -v "$TAR":/tmp/impl.tar.gz:ro \
   -v "$DBG":/tmp/dbg.sh:ro \
-  -e SOC_VERSION=ascend910b1 -e ASC_DEVKIT_DIR=/opt/asc-devkit \
-  "${NPU_ARGS[@]}" \
+  "${GOLDEN_ARG[@]}" "${NPU_ARGS[@]}" \
+  -e SOC_VERSION=ascend910b1 -e ASC_DEVKIT_DIR=/opt/asc-devkit -e GOLDEN_DIR=/opt/golden \
   "$IMAGE" bash /tmp/dbg.sh "$OP" /tmp/impl.tar.gz

@@ -76,4 +76,20 @@ try:
 except Exception as e:
     print("model_new import FAIL:", type(e).__name__, str(e)[:200])
 PY
+
+# STEP4:跑完整对拍(病B:注册成功但输出全错)。需 golden model.py + NPU 卡。
+# golden 从数据集 op_tasks 取(挂到 /opt/golden),复制成 judge 期望的 input/{op}.py(+.json)。
+GOLDEN_DIR="${GOLDEN_DIR:-/opt/golden}"
+if [ -f "$GOLDEN_DIR/${OP}.py" ]; then
+  echo "===== STEP4 完整对拍（verification_ascendc.py，含 golden，需 NPU）====="
+  mkdir -p "$(dirname "$TASK")/../input" 2>/dev/null || true
+  # verification 期望 cwd 下 input/{op}.py;TASK=work/{op},判分 cwd=work
+  WROOT="$(cd "$TASK/.." && pwd)"
+  mkdir -p "$WROOT/input"
+  cp -f "$GOLDEN_DIR/${OP}.py" "$WROOT/input/${OP}.py"
+  [ -f "$GOLDEN_DIR/${OP}.json" ] && cp -f "$GOLDEN_DIR/${OP}.json" "$WROOT/input/${OP}.json"
+  ( cd "$WROOT" && PYTHONPATH="$SK/scripts:${PYTHONPATH:-}" python3 "$SK/scripts/verification_ascendc.py" "$OP" 2>&1 ) | tail -60
+else
+  echo "===== STEP4 跳过:未挂 golden（$GOLDEN_DIR/${OP}.py 不存在;设 GOLDEN_DIR 或用 run_debug_kernel.sh 自动挂）====="
+fi
 echo "########## DONE ##########"
