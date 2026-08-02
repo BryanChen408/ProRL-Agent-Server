@@ -1055,9 +1055,34 @@ def _run_verification(op: str, non_compute: bool = False):
             except Exception as _e:  # noqa: BLE001
                 _dl.append(f"load_library({_f}): FAIL -> {type(_e).__name__}: {str(_e)[:220]}")
         try:
-            _dl.append(f"torch.ops.npu 已注册: {[a for a in dir(torch.ops.npu) if not a.startswith('_')][:25]}")
+            _dl.append(f"torch.ops.npu 已注册(dir,懒加载不全): {[a for a in dir(torch.ops.npu) if not a.startswith('_')][:20]}")
         except Exception as _e:  # noqa: BLE001
             _dl.append(f"torch.ops.npu 访问失败: {type(_e).__name__}: {_e}")
+        # 版本 + 真实 op getattr(dir 对 _OpNamespace 懒加载不可靠,直接按 register.cpp 的 m.def 名试)
+        try:
+            import torch_npu as _tn  # noqa: F811
+            _dl.append(f"torch={getattr(torch,'__version__','?')} torch_npu={getattr(_tn,'__version__','?')}")
+        except Exception:  # noqa: BLE001
+            _dl.append(f"torch={getattr(torch,'__version__','?')} torch_npu=不可用")
+        try:
+            import re as _re
+            _reg = list((kernel_build_dir.parent).glob("register.cpp")) + list((kernel_build_dir.parent).rglob("register.cpp"))
+            _opname = None
+            if _reg:
+                _m = _re.search(r'm\.def\("([a-zA-Z_][a-zA-Z0-9_]*)', _reg[0].read_text(errors="replace"))
+                _opname = _m.group(1) if _m else None
+            if _opname:
+                _has = hasattr(torch.ops.npu, _opname)
+                _dl.append(f"register.cpp 定义的 op = '{_opname}' | torch.ops.npu.{_opname} 存在? {_has}")
+                if not _has:
+                    try:
+                        getattr(torch.ops.npu, _opname)
+                    except Exception as _e:  # noqa: BLE001
+                        _dl.append(f"  取 {_opname} 真实报错: {type(_e).__name__}: {str(_e)[:150]}")
+            else:
+                _dl.append("register.cpp 没找到 m.def 名")
+        except Exception as _e:  # noqa: BLE001
+            _dl.append(f"op 名探测异常: {type(_e).__name__}: {_e}")
         # .so 可能在 wheel 包里而非 kernel/build/:递归找 + 测 wheel import + pip 列表。
         try:
             import glob as _glob, subprocess as _sp
