@@ -1058,6 +1058,22 @@ def _run_verification(op: str, non_compute: bool = False):
             _dl.append(f"torch.ops.npu 已注册: {[a for a in dir(torch.ops.npu) if not a.startswith('_')][:25]}")
         except Exception as _e:  # noqa: BLE001
             _dl.append(f"torch.ops.npu 访问失败: {type(_e).__name__}: {_e}")
+        # 没 .so 时,把编译日志尾部打出来定位"为什么没编出库"(compile.log 在 judge_out 根,向上找)
+        if not _sos:
+            _clog = None
+            _p = kernel_build_dir
+            for _up in range(5):
+                _p = _p.parent
+                _cand = _p / "compile.log"
+                if _cand.is_file():
+                    _clog = _cand
+                    break
+            if _clog:
+                _tail = _clog.read_text(errors="replace").splitlines()[-40:]
+                _dl.append(f"--- compile.log 尾部({_clog}) ---")
+                _dl.extend(_tail)
+            else:
+                _dl.append("compile.log 未找到(向上 5 层没搜到)")
         _dl.append("==== /KERNEL-LOAD-DIAG ====")
         print("\n".join(_dl), flush=True)
     except Exception as _e:  # noqa: BLE001
