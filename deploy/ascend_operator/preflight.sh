@@ -6,6 +6,32 @@ set -euo pipefail
 
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)/_paths.sh"
 
+# 设了 POLAR_PROFILE 就按它选 canonical 树。_paths.sh 的默认值恒为 operator_runtime,
+# 不读 profile 会让 t2a run 的 preflight 静默检查 triton 树(flavor 判错,看着过了其实
+# 检的是另一棵树)。这里只解析 paths.operator_runtime_dir,不调 load_polar_profile.py ——
+# 那个 loader 会 mkdir run 目录并写 effective_topology.yaml,preflight 不该有这种副作用。
+# 判定逻辑与 loader 的 _operator_runtime_dir() 一致(含 workflow=cannbot 的特例)。
+# 不设 POLAR_PROFILE 时一字不变(triton 老用法照旧)。
+if [[ -n "${POLAR_PROFILE:-}" ]]; then
+  POLAR_OPERATOR_RUNTIME_DIR="$("${POLAR_PYTHON:-python3}" - \
+      "${POLAR_PROFILE}" "${POLAR_REPO_ROOT}" <<'RUNTIMEDIR'
+import sys
+from pathlib import Path
+import yaml
+
+profile, repo = Path(sys.argv[1]), Path(sys.argv[2])
+data = yaml.safe_load(profile.read_text(encoding="utf-8")) or {}
+workflow = ((data.get("operator_runtime") or {}).get("workflow")) or "legacy"
+if workflow == "cannbot":
+    print((repo / "operator_runtime" / "cannbot").resolve())
+else:
+    configured = Path(((data.get("paths") or {}).get("operator_runtime_dir")) or "operator_runtime")
+    print(configured if configured.is_absolute() else (repo / configured).resolve())
+RUNTIMEDIR
+  )"
+  export POLAR_OPERATOR_RUNTIME_DIR
+fi
+
 ROOT="${POLAR_DEPLOY_DIR}"
 POLAR_ROOT="${POLAR_ROOT:-${POLAR_REPO_ROOT}}"
 SKILLS_DIR="${POLAR_SKILLS_DIR:-${POLAR_OPERATOR_RUNTIME_DIR}}"

@@ -225,11 +225,17 @@ class DockerRuntime(BaseRuntime):
         await self._run_local_command(
             "docker", "exec", self._container_name, "mkdir", "-p", parent
         )
-        rc, _, _ = await self._run_local_command(
-            "docker", "cp", local_path, f"{self._container_name}:{remote_path}"
+        rc, _, stderr = await self._run_local_command(
+            "docker", "cp", local_path, f"{self._container_name}:{remote_path}",
+            capture=True,
         )
         if rc != 0:
-            raise RuntimeError(f"docker cp upload_file failed with exit code {rc}")
+            # 带上 src/dst/stderr:原先只报 exit code,session init 全挂时无法归因
+            # (docker cp 的失败原因全在 stderr 里,丢了就只能靠猜)。
+            raise RuntimeError(
+                f"docker cp upload_file failed with exit code {rc}: "
+                f"src={local_path} dst={self._container_name}:{remote_path} stderr={stderr}"
+            )
         await self._make_runtime_path_writable(remote_path, recursive=False)
 
     async def upload_dir(self, local_path: str, remote_path: str) -> None:

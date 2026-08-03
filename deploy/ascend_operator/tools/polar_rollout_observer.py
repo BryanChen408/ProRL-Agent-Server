@@ -916,11 +916,24 @@ def _is_operator_task_text(text: str) -> bool:
         return True
     if "Write your implementation as class ModelNew" in text and "tools/triton_eval_pipeline.sh" in text:
         return True
+    # AscendC / t2a task prompt (gen_ascendc_tasks.py): the reference lives under
+    # input/ and the fixed validation entry is ascendc_eval_pipeline.sh, so none of
+    # the Triton-worded branches above can ever match it.
+    if "Implement an AscendC operator" in text:
+        return True
+    if "reference task is at input/" in text and "output/submission/" in text:
+        return True
+    if "class ModelNew" in text and "tools/ascendc_eval_pipeline.sh" in text:
+        return True
     return False
 
 
 def _is_skill_reference_text(text: str) -> bool:
     stripped = text.lstrip()
+    # Injected context blocks (skill list, claudeMd) are never the task prompt.
+    # Without this the t2a prompt-block fallback returns the 50 KB claudeMd blob.
+    if stripped.startswith("<system-reminder>"):
+        return True
     if stripped.startswith("# Triton Ascend 基础知识参考手册"):
         return True
     if stripped.startswith("# ") and "Triton Ascend" in stripped and "参考" in stripped[:300]:
@@ -929,9 +942,19 @@ def _is_skill_reference_text(text: str) -> bool:
 
 
 def _select_task_prompt(prompt_blocks: list[dict[str, Any]]) -> str:
-    for block in prompt_blocks:
-        text = str(block.get("text") or "")
+    # Injected context (skill list, claudeMd) quotes the same phrases as the task
+    # prompt — CLAUDE.md names both `class ModelNew` and ascendc_eval_pipeline.sh —
+    # so it must be excluded before matching, not only in the fallback loop.
+    candidates = [
+        str(block.get("text") or "")
+        for block in prompt_blocks
+        if not _is_skill_reference_text(str(block.get("text") or ""))
+    ]
+    for text in candidates:
         if _is_operator_task_text(text):
+            return text
+    for text in candidates:
+        if text:
             return text
     for block in prompt_blocks:
         text = str(block.get("text") or "")
@@ -1086,7 +1109,7 @@ def _tool_name_and_target(tool: dict[str, Any]) -> tuple[str, str]:
 def _classify_tool_result(text: str) -> dict[str, Any]:
     low = text.lower()
     labels = []
-    if "success=true" in low or "[triton-eval] done" in low:
+    if "success=true" in low or "[triton-eval] done" in low or "[ascendc-eval] done" in low:
         labels.append("success")
     if "ast failed" in low or "ast_check_failed" in low:
         labels.append("ast_fail")
@@ -1094,7 +1117,18 @@ def _classify_tool_result(text: str) -> dict[str, Any]:
         labels.append("verify_fail")
     if "benchmark failed" in low or "性能测试失败" in text:
         labels.append("benchmark_fail")
-    if "polar pipeline budget exhausted" in low or "pipeline budget exhausted" in low:
+    # AscendC adds a compile step (Step2, no NPU) that Triton's 3-step pipeline has
+    # no equivalent of. Without a label an A-class compile error is indistinguishable
+    # from "the pipeline never got anywhere".
+    if "compile failed" in low or "ascendc_compile_failed" in low:
+        labels.append("compile_fail")
+    # ascendc_eval_pipeline.sh prints "[pipeline-budget] LIMIT_EXHAUSTED phase=..."
+    # rather than the Triton-side wording.
+    if (
+        "polar pipeline budget exhausted" in low
+        or "pipeline budget exhausted" in low
+        or "limit_exhausted" in low
+    ):
         labels.append("budget_exhausted")
     if "verify_result.json" in low or "验证结果已保存到" in text:
         total = _extract_shallow_json_number(text, "total_cases")
@@ -1106,7 +1140,15 @@ def _classify_tool_result(text: str) -> dict[str, Any]:
             labels.append("verify_fail")
         else:
             labels.append("verify")
-    if "perf_result.json" in low or "性能测试结果" in text or "speedup_vs_torch" in low:
+    # ascendc fail_hint() prints the verdict line unconditionally, including
+    # "speedup_vs_torch=None" on compile/AST failures. Treating that as a benchmark
+    # result marks failed runs as benchmark_success, so require a real number.
+    has_speedup = "speedup_vs_torch" in low and not re.search(
+        r"speedup_vs_torch\s*[=:]\s*(?:none|null|n/a|\"\"|''|,|$)",
+        low,
+        re.MULTILINE,
+    )
+    if "perf_result.json" in low or "性能测试结果" in text or has_speedup:
         if "性能测试失败" in text or "benchmark failed" in low or "verify gate" in low or "l1 闸门" in low:
             labels.append("benchmark_fail")
         elif "success" not in labels:
@@ -1121,7 +1163,11 @@ def _classify_tool_result(text: str) -> dict[str, Any]:
 
 
 PLAN_TOOL_NAMES = {"TaskCreate", "TaskUpdate", "TodoWrite", "EnterPlanMode", "ExitPlanMode"}
-PROTECTED_PATH_PREFIXES = ("tools/", ".agents/skills/")
+# t2a installs skills at the project level (.claude/skills, see profile delta 9) and
+# its task prompt forbids touching the verifier scripts under
+# .claude/skills/tilelang2ascend-*/scripts/ — that path is not covered by the
+# user-level .agents/skills prefix the Triton side relies on.
+PROTECTED_PATH_PREFIXES = ("tools/", ".agents/skills/", ".claude/skills/")
 PROTECTED_EXACT_PATHS = ("CLAUDE.md", "./CLAUDE.md")
 SUBMISSION_PATH_RE = re.compile(r"(?:^|/)output/submission/[^/\s]+_impl\.py$")
 DOC_DRIFT_TERMS = ("总结", "点评", "评价", "改写", "重写", "完整", "全面", "实用", "详细", "涵盖", "包括", "提供", "介绍")
@@ -1178,6 +1224,10 @@ def _validation_command_kind(command: str) -> str | None:
         else:
             script = executable
         if script.endswith("tools/triton_eval_pipeline.sh") or script.endswith("/triton_eval_pipeline.sh"):
+            return LEGACY_PIPELINE_LABEL
+        # AscendC / t2a share the legacy (judge_command-driven) workflow, so they are
+        # budget-counted exactly like the Triton entry.
+        if script.endswith("tools/ascendc_eval_pipeline.sh") or script.endswith("/ascendc_eval_pipeline.sh"):
             return LEGACY_PIPELINE_LABEL
         if script.endswith("verify.py") or script.endswith("/verify.py"):
             return CANNBOT_VERIFY_LABEL
@@ -1257,12 +1307,16 @@ def _pipeline_status(labels: list[str], text: str) -> str:
         and "verify_fail" not in labels
         and "ast_fail" not in labels
         and "benchmark_fail" not in labels
+        and "compile_fail" not in labels
     ):
         return "success"
     if "verify_success" in labels and "verify_fail" not in labels:
         return "verify_success"
     if "ast_fail" in labels:
         return "ast_fail"
+    # AST runs before compile, so ast_fail keeps priority above.
+    if "compile_fail" in labels:
+        return "compile_fail"
     if "verify_fail" in labels:
         return "verify_fail"
     if "benchmark_fail" in labels:
@@ -1282,6 +1336,7 @@ def _is_pipeline_feedback(text: str) -> bool:
         "[pipeline-budget]" in low
         or "polar pipeline budget exhausted" in low
         or "[triton-eval]" in low
+        or "[ascendc-eval]" in low
         or "verify_result.json" in low
         or "perf_result.json" in low
         or "验证结果已保存到" in text
@@ -1296,6 +1351,8 @@ def _pipeline_stage_status(labels: list[str], text: str) -> dict[str, str]:
     low = text.lower()
     precision_started = (
         "[triton-eval] step2 verify" in low
+        or "[ascendc-eval] step2b verify" in low
+        or "correctness_ok=true" in low
         or "verify_result.json" in low
         or "验证结果已保存到" in text
         or "verify failed" in low
@@ -1303,17 +1360,30 @@ def _pipeline_stage_status(labels: list[str], text: str) -> dict[str, str]:
         or "数值验证失败" in text
         or "验证失败" in text
     )
+    # Same "speedup_vs_torch=None" trap as in _classify_tool_result: profiling_started
+    # forces precision="pass" below, so an unconditional verdict line on a compile
+    # failure would report both stages green.
     profiling_started = (
         "[triton-eval] step3" in low
+        or "[ascendc-eval] step3" in low
         or "perf_result.json" in low
         or "benchmark" in low
         or "性能测试" in text
-        or "speedup_vs_torch" in low
+        or (
+            "speedup_vs_torch" in low
+            and not re.search(
+                r"speedup_vs_torch\s*[=:]\s*(?:none|null|n/a|\"\"|''|,|$)",
+                low,
+                re.MULTILINE,
+            )
+        )
     )
 
     if "budget_exhausted" in labels:
         precision = "fail" if precision_started else "not_reached"
-    elif "ast_fail" in labels:
+    elif "ast_fail" in labels or "compile_fail" in labels:
+        # Compile precedes verify: nothing was ever checked for numerical accuracy,
+        # so this is not_reached rather than a precision failure.
         precision = "not_reached"
     elif "verify_fail" in labels:
         precision = "fail"
@@ -1324,7 +1394,12 @@ def _pipeline_stage_status(labels: list[str], text: str) -> dict[str, str]:
     else:
         precision = "not_reached"
 
-    if "ast_fail" in labels or "verify_fail" in labels or "budget_exhausted" in labels:
+    if (
+        "ast_fail" in labels
+        or "compile_fail" in labels
+        or "verify_fail" in labels
+        or "budget_exhausted" in labels
+    ):
         profiling = "not_reached"
     elif "benchmark_fail" in labels:
         profiling = "fail"
@@ -1386,7 +1461,15 @@ def analyze_session_messages(data: dict[str, Any]) -> dict[str, Any]:
     first_pipeline_turn: int | None = None
     doc_drift_turns: list[int] = []
     abnormal_events: list[dict[str, Any]] = []
-    validation = {"success": 0, "ast_fail": 0, "verify_fail": 0, "benchmark_fail": 0, "core_dim": 0, "cbuf": 0}
+    validation = {
+        "success": 0,
+        "ast_fail": 0,
+        "compile_fail": 0,
+        "verify_fail": 0,
+        "benchmark_fail": 0,
+        "core_dim": 0,
+        "cbuf": 0,
+    }
     pipeline_stage_counts = _empty_pipeline_stage_counts()
     for turn in turns:
         result_by_id = {r.get("tool_use_id"): r for r in turn.get("tool_results", []) if r.get("tool_use_id")}

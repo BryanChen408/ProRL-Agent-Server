@@ -63,5 +63,10 @@ for name in gateway rollout; do
   rm -f "${pid_file}"
 done
 
-stop_by_pattern "gateway" "from polar.cli import main.*serve_gateway"
-stop_by_pattern "rollout" "from polar.cli import main.*serve_rollout"
+# 只杀监听本 profile 端口的实例。原来的 pattern 是
+# "from polar.cli import main.*serve_gateway"，pgrep -f 会全机匹配 ——
+# 同机跑第二个 polar（如 PD 分离那套）时会把别人的 gateway/rollout 一起杀掉。
+# gateway/rollout 的命令行不含端口，所以按 topology 文件路径区分：
+# 每个 run 的 topology 是 run 专属的绝对路径，天然唯一。                                                                                               
+stop_by_pattern "gateway" "serve_gateway.*${TOPOLOGY}"
+stop_by_pattern "rollout" "serve_rollout.*${TOPOLOGY}"

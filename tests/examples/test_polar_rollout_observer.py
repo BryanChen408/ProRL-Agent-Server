@@ -833,3 +833,161 @@ def test_observer_lists_cannbot_artifacts(tmp_path: Path) -> None:
     assert by_kind["verify_result"]["passed_cases"] == 2
     assert by_kind["perf_result"]["speedup_vs_torch"] == 4.25
     assert by_kind["generated_code"]["path"] == "output/generated_code.py"
+
+
+ASCENDC_TASK_PROMPT = (
+    "Implement an AscendC operator for Ascend NPU. The reference task is at "
+    "input/cuda_llm_ops_1_2_simple_000320_nn_Softplus_torch_t.py (class Model).\n"
+    "- model_new_ascendc.py (class ModelNew whose forward ONLY calls torch.ops.npu.<op>)\n"
+    "Use this fixed validation entry as the only executable validation path:\n"
+    "  bash tools/ascendc_eval_pipeline.sh --op_name op --impl "
+    "output/submission/op_impl.tar.gz --out_dir judge_out\n"
+)
+
+
+def test_select_task_prompt_prefers_ascendc_task_over_injected_context() -> None:
+    module = _load_module()
+    # claudeMd quotes both `class ModelNew` and ascendc_eval_pipeline.sh, so a naive
+    # matcher returns the 50 KB blob instead of the real instruction.
+    claude_md = (
+        "<system-reminder>\nAs you answer the user's questions, you can use the "
+        "following context:\n# claudeMd\nProduce class ModelNew and validate with "
+        "bash tools/ascendc_eval_pipeline.sh; reference task is at input/op.py, "
+        "submit to output/submission/op_impl.tar.gz\n</system-reminder>"
+    )
+    blocks = [
+        {"text": "<system-reminder>\nThe following skills are available for use"},
+        {"text": claude_md},
+        {"text": ASCENDC_TASK_PROMPT},
+    ]
+
+    assert module._is_operator_task_text(ASCENDC_TASK_PROMPT) is True
+    assert module._select_task_prompt(blocks) == ASCENDC_TASK_PROMPT
+
+
+def test_ascendc_eval_pipeline_is_budget_counted_like_triton() -> None:
+    module = _load_module()
+    cmd = (
+        "bash tools/ascendc_eval_pipeline.sh --op_name op "
+        "--impl output/submission/op_impl.tar.gz --out_dir judge_out"
+    )
+
+    assert module._validation_command_kind(cmd) == module.LEGACY_PIPELINE_LABEL
+    assert module._is_pipeline_command(cmd) is True
+
+
+def test_analyze_session_messages_counts_ascendc_correctness_failure() -> None:
+    module = _load_module()
+    # fail_hint() prints the verdict line unconditionally, so speedup_vs_torch=None
+    # must not be read as a benchmark result.
+    result_text = (
+        "[pipeline-budget] phase=generation attempt=1/6\n"
+        "[ascendc-eval] Step1 anti-degradation (AST)\n"
+        "[ascendc-eval] Step2 compile (no NPU)\n"
+        "[ascendc-eval] Step2b verify (NPU lease)\n"
+        "[ascendc-eval] verify FAILED\n"
+        "[ascendc-eval] verdict — success=False ast_check_ok=True correctness_ok=False "
+        "error_type=correctness_failed speedup_vs_torch=None\n"
+        "[ascendc-eval] 错误分类: D类-精度不匹配\n"
+    )
+    payload = {
+        "original_request": {
+            "messages": [
+                {"role": "user", "content": ASCENDC_TASK_PROMPT},
+                {
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "tool_use",
+                            "id": "toolu_ac",
+                            "name": "Bash",
+                            "input": {
+                                "command": "bash tools/ascendc_eval_pipeline.sh --op_name op"
+                            },
+                        }
+                    ],
+                },
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": "toolu_ac",
+                            "content": result_text,
+                        }
+                    ],
+                },
+            ]
+        },
+        "response": {"choices": [{"message": {"content": "", "tool_calls": []}}]},
+    }
+
+    summary = module.analyze_session_messages(payload)
+
+    assert summary["pipeline_runs"] == 1
+    assert summary["request"]["task_prompt_is_operator"] is True
+    detail = summary["pipeline_runs_detail"][0]
+    assert detail["kind"] == module.LEGACY_PIPELINE_LABEL
+    assert detail["status"] == "verify_fail"
+    assert "benchmark_success" not in detail["labels"]
+    assert detail["precision_status"] == "fail"
+    assert detail["profiling_status"] == "not_reached"
+    assert summary["pipeline_stage_counts"]["precision"]["fail"] == 1
+    assert summary["pipeline_stage_counts"]["profiling"]["attempts"] == 0
+
+
+def test_ascendc_compile_failure_is_labelled_and_not_a_precision_attempt() -> None:
+    module = _load_module()
+    # AscendC's Step2 compile has no Triton equivalent; unlabelled it read as
+    # status=unknown with both stages not_reached, i.e. indistinguishable from a
+    # pipeline that never started.
+    result_text = (
+        "[ascendc-eval] Step1 anti-degradation (AST)\n"
+        "[ascendc-eval] Step2 compile (no NPU)\n"
+        "[ascendc-eval] compile FAILED\n"
+        "[ascendc-eval] verdict — success=False ast_check_ok=True correctness_ok=False "
+        "error_type=ascendc_compile_failed speedup_vs_torch=None\n"
+    )
+
+    labels = module._classify_tool_result(result_text)["labels"]
+
+    assert "compile_fail" in labels
+    assert module._pipeline_status(labels, result_text) == "compile_fail"
+    stage = module._pipeline_stage_status(labels, result_text)
+    assert stage == {"precision": "not_reached", "profiling": "not_reached"}
+
+
+def test_ast_failure_keeps_priority_over_compile_failure() -> None:
+    module = _load_module()
+    # AST runs before compile, so a payload mentioning both must report ast_fail.
+    text = "[ascendc-eval] AST FAILED\n[ascendc-eval] compile FAILED\n"
+
+    labels = module._classify_tool_result(text)["labels"]
+
+    assert {"ast_fail", "compile_fail"} <= set(labels)
+    assert module._pipeline_status(labels, text) == "ast_fail"
+
+
+def test_t2a_project_level_skill_scripts_are_protected() -> None:
+    module = _load_module()
+
+    assert module._is_protected_path(
+        ".claude/skills/tilelang2ascend-translator/scripts/verify.py"
+    )
+    assert module._is_protected_path("tools/ascendc_eval_pipeline.sh")
+    # The agent's own kernel sources and submission must stay writable.
+    assert not module._is_protected_path("myop/kernel/op_host/myop.cpp")
+    assert not module._is_protected_path("output/submission/op_impl.tar.gz")
+
+
+def test_analyze_session_messages_flags_ascendc_budget_limit_exhausted() -> None:
+    module = _load_module()
+    result_text = (
+        "[pipeline-budget] LIMIT_EXHAUSTED phase=generation attempt=7/6\n"
+        "本阶段固定评测入口调用次数已经用完。必须立即停止当前任务。\n"
+    )
+
+    labels = module._classify_tool_result(result_text)["labels"]
+
+    assert "budget_exhausted" in labels
+    assert module._pipeline_status(labels, result_text) == "budget_exhausted"

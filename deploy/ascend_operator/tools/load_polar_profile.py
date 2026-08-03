@@ -104,7 +104,16 @@ def _operator_prepare(
     actions: list[dict] = [
         {"type": "upload_file", "source": upload_source, "target": target},
     ]
-    if backend == "ascendc" and task_assets_dir:
+    # 数据集里是否真的有同名 .json(用例规格)。NPUKernelBench 有,cuda-llm 没有
+    # (它的输入直接写在 get_inputs() 里,判分链的 _get_input_groups() 对此有兜底)。
+    # 没有却仍追加上传项 → docker cp 找不到源文件退 1 → session init 全挂,
+    # 且失败发生在 agent 起来之前,日志只有一行 exit 1,极难归因。
+    # source_optional 标记指望 gateway 侧 _prune_optional_uploads 剔除,实测未生效,
+    # 所以在这里就按数据集实际内容决定要不要加这条。
+    _has_case_json = bool(task_assets_dir) and any(
+        Path(task_assets_dir).glob("*.json")
+    )
+    if backend == "ascendc" and task_assets_dir and _has_case_json:
         # NPUKernelBench 的 model.py 用 get_input_groups() 读**同名 .json**(用例规格),
         # 必须与 {op}.py 并排落在 input/。{op}.py 走 vime 的 sample.task_source(内容寻址
         # 缓存,polar 会把这条 upload 的 source 改写成 cache 路径);.json 没有这条通道,

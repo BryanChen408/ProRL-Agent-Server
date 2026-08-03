@@ -121,6 +121,16 @@ def apply_deltas(text: str) -> str:
     i = text.index("**Skill 参考资料**")
     j = text.index("\n## ", i)
     text = text[:i] + REF_MARKER + "\n" + text[j:]
+
+    # [D7] 上游笔误:Phase 3 功能验证那条命令写成 script/(单数),实际目录是 scripts/。
+    #      agent 照抄即 No such file or directory。上游同一文件另一处(Phase 3 的退化检测)
+    #      写的是 scripts/,两处不一致 —— 可确认是笔误而非另一套布局。
+    #      锚点用 _sub:上游哪天自己修了,构建会立即报 anchor missing 提醒撤掉本条。
+    text = _sub(
+        text,
+        ".claude/skills/tilelang2ascend-tilelang-designer/script/evaluate_tilelang.sh",
+        ".claude/skills/tilelang2ascend-tilelang-designer/scripts/evaluate_tilelang.sh",
+    )
     return text
 
 

@@ -717,7 +717,7 @@ while tl_iteration < max_tl_iterations:
     ── 3.3 功能验证 ──────────────────────────────────
     调用 tilelang2ascend-tilelang-designer skill 自带的 evaluate_tilelang.sh
 
-    bash .claude/skills/tilelang2ascend-tilelang-designer/script/evaluate_tilelang.sh \
+    bash .claude/skills/tilelang2ascend-tilelang-designer/scripts/evaluate_tilelang.sh \
         {output_dir}
 
     验证通过:

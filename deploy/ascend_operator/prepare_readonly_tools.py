@@ -34,7 +34,18 @@ def publish_readonly_tools(source: Path, dest: Path) -> None:
     dest.parent.mkdir(parents=True, exist_ok=True)
     shutil.copytree(source, dest, symlinks=True, ignore=_ignore)
 
-    required = ("triton_eval_pipeline.sh", "env.sh", "npu_lease_exec.py")
+    # 评测入口按 canonical 树判型:triton 树带 triton_eval_pipeline.sh,ascendc 树带
+    # ascendc_eval_pipeline.sh。两者都没有 = 树是坏的,仍然报错(闸门强度不变)。
+    # 原先硬编码 triton_eval_pipeline.sh,指向 ascendc 树时必然误报(preflight 的
+    # bash -n 那步早已按 flavor 选文件,这里没跟上)。
+    eval_pipelines = ("triton_eval_pipeline.sh", "ascendc_eval_pipeline.sh")
+    present = [name for name in eval_pipelines if (dest / name).is_file()]
+    if not present:
+        raise FileNotFoundError(
+            f"readonly tools missing an eval pipeline: expected one of {list(eval_pipelines)}"
+        )
+
+    required = ("env.sh", "npu_lease_exec.py")
     missing = [name for name in required if not (dest / name).is_file()]
     if missing:
         raise FileNotFoundError(f"readonly tools missing required file(s): {missing}")
