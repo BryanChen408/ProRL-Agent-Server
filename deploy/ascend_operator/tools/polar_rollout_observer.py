@@ -1106,15 +1106,64 @@ def _tool_name_and_target(tool: dict[str, Any]) -> tuple[str, str]:
     return name, target
 
 
+_CACHED_VERDICT_RE = re.compile(
+    r"cached verdict\s*—\s*success=(\w+)\s+ast_check_ok=(\w+)\s+correctness_ok=(\w+)\s+speedup_vs_torch=(\S+)"
+)
+
+
+def _cached_verdict_labels(text: str) -> list[str] | None:
+    """缓存复用(源码没变 → pipeline 复用上次结论)的判定。
+
+    完整跑一遍的输出格式(observer 的 success/verify/compile 等标记)这里都不会出现,
+    cached verdict 是另一套:`cached verdict — success=X ast_check_ok=Y correctness_ok=Z
+    speedup_vs_torch=W`。不单独解析就会全部落 unknown。返回对应标签;不是 cached
+    verdict 返回 None。"""
+    m = _CACHED_VERDICT_RE.search(text)
+    if not m:
+        return None
+    success = m.group(1) == "True"
+    ast_ok = m.group(2) == "True"
+    corr_ok = m.group(3) == "True"
+    has_speedup = m.group(4) not in ("None", "null", "n/a", "N/A", "")
+    if not ast_ok:
+        return ["ast_fail"]
+    if not corr_ok:
+        return ["verify_fail"]
+    if success and has_speedup:
+        # 只给 success(不加 benchmark_success):原有的 validation 计数把 verify_success/
+        # benchmark_success 也都折算成 success,两个一起给会被重复计数。
+        return ["success"]
+    # 对拍过了但没测速/没测成 → 精度 pass、性能未达
+    return ["verify_success"]
+
+
 def _classify_tool_result(text: str) -> dict[str, Any]:
     low = text.lower()
     labels = []
+    cached = _cached_verdict_labels(text)
+    if cached is not None:
+        labels.extend(cached)
+        if "unsupportedlanguageconstruct" in low:
+            labels.append("unsupported_construct")
+        if "cbuf" in low:
+            labels.append("cbuf")
+        if "coredim" in low:
+            labels.append("core_dim")
+        return {"labels": labels, "snippet": _snippet(text, 900)}
     if "success=true" in low or "[triton-eval] done" in low or "[ascendc-eval] done" in low:
         labels.append("success")
     if "ast failed" in low or "ast_check_failed" in low:
         labels.append("ast_fail")
     if "verify failed" in low or "数值验证失败" in text:
         labels.append("verify_fail")
+    # submission missing:agent 在没建工程/跑错目录时跑了评测,pipeline 没找到提交物。
+    # 它和「没打包就判分」是一类前置错误,不是 compile/verify 失败。
+    if (
+        "submission missing" in low
+        or "submission_missing" in low
+        or "工程目录不存在" in text
+    ):
+        labels.append("submission_missing")
     if "benchmark failed" in low or "性能测试失败" in text:
         labels.append("benchmark_fail")
     # AscendC adds a compile step (Step2, no NPU) that Triton's 3-step pipeline has
@@ -1310,6 +1359,10 @@ def _bash_readonly_mutation(command: str) -> dict[str, str] | None:
 def _pipeline_status(labels: list[str], text: str) -> str:
     if "budget_exhausted" in labels:
         return "budget_exhausted"
+    # submission missing:没建工程/跑错目录就跑了评测,什么都没发生。优先于 success 判
+    # (这类输出里不会有 success,但明确单列比落 unknown 更有信息量)。
+    if "submission_missing" in labels:
+        return "submission_missing"
     if (
         ("success" in labels or "benchmark_success" in labels)
         and "verify_fail" not in labels
@@ -1358,6 +1411,17 @@ def _is_pipeline_feedback(text: str) -> bool:
     )
 
 
+def _is_background_launch(text: str) -> bool:
+    """agent 用 run_in_background 把 pipeline 放后台跑时,工具结果只是「已在后台启动」
+    的包装消息(真实输出写到容器内临时文件,host 读不到),不是 pipeline 的真实反馈,
+    更不是错误。认出它,标成 background 而不是 command_error。"""
+    low = text.lower()
+    return (
+        "command running in background with id:" in low
+        or "output is being written to:" in low
+    )
+
+
 def _pipeline_stage_status(labels: list[str], text: str) -> dict[str, str]:
     low = text.lower()
     precision_started = (
@@ -1392,7 +1456,7 @@ def _pipeline_stage_status(labels: list[str], text: str) -> dict[str, str]:
 
     if "budget_exhausted" in labels:
         precision = "fail" if precision_started else "not_reached"
-    elif "ast_fail" in labels or "compile_fail" in labels or "op_not_registered" in labels:
+    elif "ast_fail" in labels or "compile_fail" in labels or "op_not_registered" in labels or "submission_missing" in labels:
         # Compile precedes verify: nothing was ever checked for numerical accuracy,
         # so this is not_reached rather than a precision failure.
         precision = "not_reached"
@@ -1409,6 +1473,7 @@ def _pipeline_stage_status(labels: list[str], text: str) -> dict[str, str]:
         "ast_fail" in labels
         or "compile_fail" in labels
         or "op_not_registered" in labels
+        or "submission_missing" in labels
         or "verify_fail" in labels
         or "budget_exhausted" in labels
     ):
@@ -1557,7 +1622,10 @@ def analyze_session_messages(data: dict[str, Any]) -> dict[str, Any]:
                         if first_pipeline_turn is None:
                             first_pipeline_turn = turn["index"]
                     pipeline_commands.append({"turn": turn["index"], "command": target})
-                    if result_text:
+                    background = _is_background_launch(result_text)
+                    # 后台启动只是「壳」,不是 command error;只有带非壳、非 pipeline 输出的
+                    # 才是真命令错误(脚本崩了/bash 报错等),那才进 pipeline_command_errors。
+                    if result_text and not background:
                         pipeline_command_errors.append(
                             {
                                 "turn": turn["index"],
@@ -1569,6 +1637,12 @@ def analyze_session_messages(data: dict[str, Any]) -> dict[str, Any]:
                                 "result_snippet": _snippet(result_text, 1200),
                             }
                         )
+                    if not result_text:
+                        status = "pending"
+                    elif background:
+                        status = "background"
+                    else:
+                        status = "command_error"
                     pipeline_runs_detail.append(
                         {
                             "index": event_index,
@@ -1578,7 +1652,7 @@ def analyze_session_messages(data: dict[str, Any]) -> dict[str, Any]:
                             "kind": validation_kind,
                             "budget_counted": budget_counted,
                             "labels": [],
-                            "status": "pending" if not result_text else "command_error",
+                            "status": status,
                             "precision_status": "not_reached",
                             "profiling_status": "not_reached",
                             "is_error": bool(result.get("is_error")),
@@ -2389,7 +2463,7 @@ HTML_PAGE = r"""<!doctype html>
         <span class="mono">${esc(f.file)}</span><span class="small">${esc(f.time)}</span><span class="small">${Math.round((f.size||0)/1024)}KB</span>
       </div>`).join('');
       const pipelineDetails = (sum.pipeline_runs_detail || []).slice().reverse().map((run, idx) => {
-        const cls = run.status === 'success' ? 'green' : (run.status === 'unknown' ? '' : 'red');
+        const cls = run.status === 'success' ? 'green' : ((run.status === 'unknown' || run.status === 'pending' || run.status === 'background') ? '' : 'red');
         const shouldOpen = idx === 0 && run.status !== 'success';
         const labels = (run.labels || []).map(l => `<span class="badge ${l==='success'?'green':(l.includes('fail')?'amber':'blue')}">${esc(l)}</span>`).join(' ');
         return `<details data-key="pipeline-run-${esc(run.index)}" ${shouldOpen ? 'open' : ''}>

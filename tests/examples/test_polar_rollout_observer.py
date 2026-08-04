@@ -188,6 +188,58 @@ def test_analyze_session_messages_recognizes_cached_success_case_insensitively()
     assert summary["pipeline_stage_counts"]["profiling"]["attempts"] == 1
 
 
+def test_analyze_session_messages_classifies_partial_cached_verdict() -> None:
+    """cached verdict with success=False was falling through to 'unknown'.
+
+    The AscendC pipeline reuses the previous result when the source is unchanged and
+    prints `cached verdict — success=... ...`, which matches none of the full-run
+    markers. Parse it explicitly so a 'correct but not benchmarked' cached state shows
+    as verify_success (precision pass, profiling not reached) instead of unknown."""
+    module = _load_module()
+    payload = {
+        "original_request": {
+            "messages": [
+                {"role": "user", "content": "task"},
+                {
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "tool_use",
+                            "id": "toolu_cached2",
+                            "name": "Bash",
+                            "input": {"command": "bash tools/ascendc_eval_pipeline.sh --op_name op"},
+                        }
+                    ],
+                },
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": "toolu_cached2",
+                            "content": (
+                                "[ascendc-eval] {op}/ 源码与上次评测完全一致 → 复用上次结论\n"
+                                "[ascendc-eval] cached verdict — success=False "
+                                "ast_check_ok=True correctness_ok=True speedup_vs_torch=None\n"
+                            ),
+                        }
+                    ],
+                },
+            ]
+        },
+        "response": {"choices": [{"message": {"content": "", "tool_calls": []}}]},
+    }
+
+    summary = module.analyze_session_messages(payload)
+
+    detail = summary["pipeline_runs_detail"][0]
+    assert detail["status"] == "verify_success"
+    assert detail["precision_status"] == "pass"
+    assert detail["profiling_status"] == "not_reached"
+    assert summary["pipeline_stage_counts"]["precision"]["pass"] == 1
+    assert summary["pipeline_stage_counts"]["profiling"]["attempts"] == 0
+
+
 def test_analyze_session_messages_recognizes_cannbot_verify_and_benchmark() -> None:
     module = _load_module()
     verify_json = json.dumps(
