@@ -9,8 +9,14 @@
 from __future__ import annotations
 import argparse, glob, json, os, statistics as st, time
 from collections import Counter, defaultdict
+try:
+    import perf_charts as CH
+except Exception:
+    CH = None
+_PNG = bool(CH and CH.available())
+_OUT = {"dir": None}  # 报告输出目录(charts 存这里)
 
-# ============ ASCII 图元件 ============
+# ============ ASCII 图元件(PNG 不可用时降级) ============
 _SPARK = "▁▂▃▄▅▆▇█"
 def spark(vals):
     xs = [v for v in vals if isinstance(v, (int, float))]
@@ -83,6 +89,7 @@ def build(run_dir, metrics_dir, window_n, out_suffix):
     der = os.path.join(run_dir, "telemetry_derived")
     out = os.path.join(run_dir, "perf_report" + (out_suffix or "_expert"))
     os.makedirs(out, exist_ok=True)
+    _OUT["dir"] = out
     R = []
     def P(*a): R.append(" ".join(str(x) for x in a))
 
@@ -130,7 +137,7 @@ def build(run_dir, metrics_dir, window_n, out_suffix):
     P("| T6 验证作业 | metrics.json | 每验证 | success, error_type, speedup | telemetry_derived/verify_job.jsonl |")
     P("| T7 rollout | ses.json | 每 session | status, reward, timing | telemetry_derived/rollout.jsonl |")
     P("| T8 step 聚合 | 派生 | 每 step | goodput, engine_balance(CV) | telemetry_derived/rollout_step.jsonl |")
-    P("\n图例:`▁▂▃▄▅▆▇█` sparkline(时序,左→右=时间早→晚,高=值大)· `█···` 水平占比条 · 直方图=分布计数。\n")
+    P(f"\n图表: {'PNG(charts/,matplotlib 生成)' if _PNG else 'ASCII 降级(未装 matplotlib)'}。图内标签为英文,正文中文对照。\n")
     P("拓扑:16 chip = **12 推理**(3 engine × TP4, infer-0/1/2)+ **4 验证**(npu_lease 池)。数据源见上表,均已切到本窗口。\n")
     P("---\n")
 
@@ -182,11 +189,17 @@ def _section_engine(P, t1, t2, W0, W1, NB, span_h):
           f"{st.mean(kv):.1f} | {max(kv):.0f} | {st.mean(run):.1f} | {st.mean(wt):.2f} | {max(wt):.0f} | {int(pre)} | {100*ph/pq if pq else 0:.1f} |")
     # 1.2 KV 时序图(饱和度可视化)
     P("\n### 1.2 KV cache 占用时序(饱和度)")
-    P("**【来源】** T2 `vllm:kv_cache_usage_perc`。**【计算】** 每 ~%dmin 分桶取均值。" % round((W1-W0)/NB/60))
+    P("**【来源】** T2 `vllm:kv_cache_usage_perc`。**【计算】** 每 ~%dmin 分桶取均值,画时序。" % round((W1-W0)/NB/60))
+    kvser = {}
     for e, rows in t2.items():
         series, _ = _bucketize(rows, "vllm:kv_cache_usage_perc", W0, W1, NB)
-        vals = [v*100 for _, v in series]
-        P(f"  {e}  KV% `{spark(vals)}`  {min(vals):.0f}→{max(vals):.0f}%" if vals else f"  {e} 无")
+        kvser[e] = [(t, v*100) for t, v in series]
+    png = CH.lines_timeseries(_OUT["dir"], "kv_timeseries", kvser, "time (min)", "KV cache %",
+                              "KV cache usage over time (per engine)") if _PNG else None
+    if png: P(f"\n![KV时序]({png})\n")
+    else:
+        for e, s in kvser.items():
+            vals=[v for _,v in s]; P(f"  {e} KV% `{spark(vals)}` {min(vals):.0f}→{max(vals):.0f}%" if vals else f"  {e} 无")
     # 1.3 判定
     allkv = [r.get("vllm:kv_cache_usage_perc",0)*100 for rows in t2.values() for r in rows]
     allwt = [r.get("vllm:num_requests_waiting",0) for rows in t2.values() for r in rows]
@@ -204,12 +217,19 @@ def _section_engine(P, t1, t2, W0, W1, NB, span_h):
         P(f"  - {'⚠️ 不均(CV>0.1):某引擎被喂得少,LB/DP 分发不平。' if cv>0.1 else '✅ 均衡(CV<0.1)。'}")
     # 1.5 NPU 时序
     P("\n### 1.4 NPU aicore 利用率时序 + 池间/引擎间不均(T1)")
-    P("**【来源】** `npu_card.jsonl` `aicore_util_pct`,16 chip 每 5s。**【计算】** 按 engine_id 聚合,每 ~%dmin 均值。" % round((W1-W0)/NB/60))
+    P("**【来源】** `npu_card.jsonl` `aicore_util_pct`,16 chip 每 5s。**【计算】** 按 engine_id 聚合,每 ~%dmin 均值,画时序。" % round((W1-W0)/NB/60))
+    aiser = {}
     for eng in ["infer-0","infer-1","infer-2","verify-pool"]:
         rows = [r for r in t1 if r.get("engine_id")==eng]
         series, _ = _bucketize(rows, "aicore_util_pct", W0, W1, NB)
-        vals = [v for _, v in series]
-        if vals: P(f"  {eng:12s} `{spark(vals)}`  均{st.mean(vals):.0f}%  峰{max(vals):.0f}%")
+        aiser[eng] = series
+    png = CH.lines_timeseries(_OUT["dir"], "npu_aicore_timeseries", aiser, "time (min)", "aicore %",
+                              "NPU aicore utilization over time (per pool/engine)") if _PNG else None
+    if png: P(f"\n![NPU时序]({png})\n")
+    else:
+        for eng, s in aiser.items():
+            vals=[v for _,v in s]
+            if vals: P(f"  {eng:12s} `{spark(vals)}` 均{st.mean(vals):.0f}% 峰{max(vals):.0f}%")
     inf = [r.get("aicore_util_pct") for r in t1 if r["pool"]=="inference" and r.get("aicore_util_pct") is not None]
     ver = [r.get("aicore_util_pct") for r in t1 if r["pool"]=="verify" and r.get("aicore_util_pct") is not None]
     P(f"\n**【依据】** 推理池 aicore {_fmt(_stats(inf),1,'%')}")
@@ -224,13 +244,21 @@ def _section_length(P, t4):
     ch = [r.get("prefix_cache_hit_pct") for r in t4]
     P(f"\n### 2.1 prompt 长度分布(prefill 压力)")
     P(f"**【计算】** 每请求 num_prompt_tokens 直方图。**【统计】** {_fmt(_stats(pt),1,' tok')}")
-    for l in histogram(pt, bins=8, unit="tok"): P(l)
+    png = CH.hist(_OUT["dir"], "prompt_len_hist", pt, "prompt tokens", "Prompt length distribution (T4 per-request)") if _PNG else None
+    if png: P(f"\n![prompt长度]({png})\n")
+    else:
+        for l in histogram(pt, bins=8, unit="tok"): P(l)
     P(f"\n### 2.2 decode 长度分布(生成压力)")
     P(f"**【统计】** {_fmt(_stats(gt),1,' tok')}")
-    for l in histogram(gt, bins=8, unit="tok"): P(l)
+    png = CH.hist(_OUT["dir"], "decode_len_hist", gt, "generation tokens", "Decode length distribution (T4 per-request)") if _PNG else None
+    if png: P(f"\n![decode长度]({png})\n")
+    else:
+        for l in histogram(gt, bins=8, unit="tok"): P(l)
     over = sum(1 for c in ctx if c > 240000)
     P(f"\n### 2.3 总 context 与上限压力")
     P(f"**【计算】** prompt+decode。**【统计】** {_fmt(_stats(ctx),1,' tok')} · 上限 262144。")
+    png = CH.hist(_OUT["dir"], "context_hist", ctx, "total context tokens", "Total context vs 262144 limit", vline=262144, vline_label="262144 limit") if _PNG else None
+    if png: P(f"\n![context分布]({png})\n")
     P(f"  - **逼近上限(>240k)请求: {over}/{len(ctx)}({100*over/max(1,len(ctx)):.1f}%)** {hbar(over/max(1,len(ctx)))}")
     P(f"  - **【依据】** {'⚠️ 有真实 context 触顶压力' if over/max(1,len(ctx))>0.02 else '✅ context 压力不大' }:prompt p50 已 {(_q(pt,.5) or 0):.0f} tok,长 prompt 是主体。")
     cs = _stats(ch)
@@ -242,13 +270,25 @@ def _section_agent(P, t5, t6, t7, ses):
     P("\n---\n\n## 3. Agent 瓶颈(时间拆解 / 轮数 / 验证 / 结局)\n")
     P("**【来源】** T5 rollout_span(转录重建时间段)+ T6 verify_job(metrics.json)+ T7/ses.json(结局)。")
     if t5:
-        P("\n### 3.1 块④ rollout 时间拆解(推理外占比)")
-        P("**【计算】** 每 session 从转录相邻事件 gap 归因到 推理/验证/工具/等待,占墙钟比。")
-        for k, lab in [("infer_frac","推理 inference"),("verify_frac","环境验证 verify"),("tool_frac","工具 tool"),("wait_cpu_frac","等待/CPU")]:
+        P("\n### 3.1 块④ rollout 时间拆解(一轮 rollout 里推理/验证/工具/等待占比)")
+        P("**【来源】** T5 rollout_span 的 infer/verify/tool/wait_cpu_frac(转录相邻事件 gap 归因)。")
+        P("**【计算】** 每 session 各段占墙钟比,再对 %d 个 session 取均值。" % len(t5))
+        means = {}
+        for k, cn in [("infer_frac","推理"),("verify_frac","验证"),("tool_frac","工具"),("wait_cpu_frac","等待/CPU")]:
             vals = [s.get(k) for s in t5 if isinstance(s.get(k),(int,float))]
-            m = st.mean(vals) if vals else 0
-            P(f"  {lab:20s} {hbar(m)}  (p50 {(_q(vals,.5) or 0)*100:.0f}% p90 {(_q(vals,.9) or 0)*100:.0f}%)")
-        noninf = 100 - st.mean([s.get('infer_frac',0) for s in t5])*100
+            means[cn] = st.mean(vals) if vals else 0
+        png = CH.pie_time_breakdown(_OUT["dir"],
+              {"Inference": means["推理"], "Verify": means["验证"], "Tool": means["工具"], "Wait/CPU": means["等待/CPU"]}
+              ) if _PNG else None
+        if png:
+            P(f"\n![时间占比饼图]({png})\n")
+            P("(饼图:一轮 rollout 墙钟时间构成。Inference=推理 · Verify=环境验证 · Tool=工具调用 · Wait/CPU=等待与CPU)")
+        else:
+            for cn, m in means.items(): P(f"  {cn:8s} {hbar(m)}")
+        for k, cn in [("infer_frac","推理"),("verify_frac","验证"),("tool_frac","工具"),("wait_cpu_frac","等待/CPU")]:
+            vals = [s.get(k) for s in t5 if isinstance(s.get(k),(int,float))]
+            P(f"  - {cn}: 均值 {means[cn]*100:.1f}% · p50 {(_q(vals,.5) or 0)*100:.0f}% · p90 {(_q(vals,.9) or 0)*100:.0f}%")
+        noninf = 100 - means["推理"]*100
         P(f"\n  - **【依据】推理外开销 ≈ {noninf:.0f}%** = agentic RL 相比纯推理多付的代价(编译/对拍/工具/等待)。推理只占 ~{100-noninf:.0f}%。")
     P("\n### 3.2 结局 × 时长 × 轮数 相关性")
     P("**【计算】** 按 ses.status 分组,run_ms / trace_count 分位。")
@@ -269,9 +309,12 @@ def _section_agent(P, t5, t6, t7, ses):
         et = Counter(v.get("error_type") for v in t6)
         P(f"\n### 3.3 验证结果分布(T6,{len(t6)} 次)")
         P("**【计算】** 每次 metrics.json 的 error_type 计数。")
-        mx = max(et.values()) if et else 1
-        for k, c in et.most_common():
-            P(f"  {str(k):24s} |{'█'*int(round(c/mx*30)):<30} {c}")
+        png = CH.bars_simple(_OUT["dir"], "verify_errtype", [(str(k),c) for k,c in et.most_common()],
+                             "count", f"Verify error_type distribution (T6, n={len(t6)})") if _PNG else None
+        if png: P(f"\n![验证结果]({png})\n")
+        else:
+            mx = max(et.values()) if et else 1
+            for k, c in et.most_common(): P(f"  {str(k):24s} |{'█'*int(round(c/mx*30)):<30} {c}")
         top = et.most_common(1)[0] if et else (None,0)
         P(f"\n  - **【依据】** 主导失败 = `{top[0]}`({top[1]}/{len(t6)}={100*top[1]/len(t6):.0f}%)→ 这是拉低通过率的头号原因。")
         lw = [v.get("lease_wait_s") for v in t6 if v.get("lease_wait_s") is not None]
@@ -287,12 +330,16 @@ def _section_multigrain(P, t8, ses):
         P(f"  - step={r['step'] if 'step' in r else r.get('rollout_step')}: sessions={r['num_sessions']} · goodput={r['goodput']} · "
           f"reward_p50={(r.get('reward_dist') or {}).get('p50')} · engine请求CV={b.get('request_cv')} · 份额={b.get('requests_per_engine')}")
     P("\n### 4.2 per-op(算子级:哪些算子难)")
-    P("**【计算】** 按 op 分组,COMPLETED 比例 + reward + 时长。")
-    P("| op | n | COMPLETED | reward_p50 | run_min p50 |")
-    P("|---|---|---|---|---|")
+    P("**【计算】** 按 op 分组,COMPLETED 比例(通过率)+ reward + 时长。图按通过率升序(红=难)。")
     by = defaultdict(list)
     for s in ses: by[s["op"]].append(s)
-    for op in sorted(by, key=lambda o: (sum(1 for s in by[o] if s["status"]=="COMPLETED")/len(by[o]))):
+    ordered = sorted(by, key=lambda o: (sum(1 for s in by[o] if s["status"]=="COMPLETED")/len(by[o])))
+    pairs = [(op, 100*sum(1 for s in by[op] if s["status"]=="COMPLETED")/len(by[op])) for op in ordered]
+    png = CH.barh_ops(_OUT["dir"], "per_op_passrate", pairs, "COMPLETED %", "Per-operator pass rate (green≥80 / orange≥50 / red<50)") if _PNG else None
+    if png: P(f"\n![per-op通过率]({png})\n")
+    P("| op | n | COMPLETED | reward_p50 | run_min p50 |")
+    P("|---|---|---|---|---|")
+    for op in ordered:
         g = by[op]; comp=sum(1 for s in g if s["status"]=="COMPLETED")
         rw=[s["reward"] for s in g if isinstance(s.get("reward"),(int,float))]; rm=[s["run_ms"] for s in g if s.get("run_ms")]
         P(f"| {op} | {len(g)} | {comp}/{len(g)}({100*comp/len(g):.0f}%) | {_q(rw,.5) if rw else '—'} | {(_q(rm,.5) or 0)/60000:.0f} |")
