@@ -86,6 +86,13 @@ class ClaudeCodeHarness(BaseHarness):
         }
         env.setdefault("API_TIMEOUT_MS", self._DEFAULT_API_TIMEOUT_MS)
         env.setdefault("CLAUDE_CODE_MAX_RETRIES", self._DEFAULT_MAX_RETRIES)
+        # Bash tool timeouts: default any unset per-call timeout to 10 min. The eval
+        # pipeline (cmake compile + NPU verify + benchmark) takes minutes; with a short
+        # timeout Claude Code auto-backgrounds the command, hiding the verdict from both
+        # the agent and the observer. This only sets the DEFAULT — an explicit per-call
+        # timeout still wins, so the task prompt also tells the agent not to set a short one.
+        env.setdefault("BASH_DEFAULT_TIMEOUT_MS", "600000")
+        env.setdefault("BASH_MAX_TIMEOUT_MS", "600000")
         if self.settings.get("max_thinking_tokens"):
             env["MAX_THINKING_TOKENS"] = str(self.settings["max_thinking_tokens"])
 
