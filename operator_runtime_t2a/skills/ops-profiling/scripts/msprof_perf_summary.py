@@ -871,10 +871,17 @@ def _generate_wrapper_script(cfg: _WrapperConfig):
     if cfg.jsonl_case is not None:
         inputs_code = _serialize_jsonl_inputs(cfg.jsonl_case)
     else:
+        # 对齐 triton 的 resolve_inputs: get_input_groups 返回多组 case 直接用;
+        # 只有 get_inputs(单组输入)时包一层成 [inputs],否则 input_groups[case_idx]
+        # 会取到单个 tensor 而不是输入列表,model(*tensor) 直接 TypeError 崩掉。
         inputs_code = f"""
     ref_mod = _load(out_dir / "model.py", "ref_for_inputs")
-    input_groups = getattr(ref_mod, "get_input_groups",
-                           getattr(ref_mod, "get_inputs", lambda: [[]]))()
+    if hasattr(ref_mod, "get_input_groups"):
+        input_groups = ref_mod.get_input_groups()
+    elif hasattr(ref_mod, "get_inputs"):
+        input_groups = [ref_mod.get_inputs()]
+    else:
+        raise AttributeError("model.py must provide get_inputs() or get_input_groups()")
     inputs = input_groups[{cfg.case_idx}]
 """
     return _build_wrapper_script_content(cfg, model_file, cls_name, inputs_code)
