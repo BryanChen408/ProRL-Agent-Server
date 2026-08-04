@@ -36,14 +36,8 @@ operator_runtime:
   #   路径映射:skill 写死 docs/zh/api,9.0.0 布局是 docs/api/context,已在仓内建相对软链。
   asc_devkit_dir: /home/docker/asc-devkit-9.0.0
   budget:
-    # ← delta 12:对齐上游**单次 subagent 调用**内的评测量 = A 类 5 次 + D 类 1 轮 = 6。
-    #   上游的 D 类 12 次是主 agent 反复重入堆出来的(每轮新 subagent,只带 trace.md 摘要,
-    #   上下文清零);AGENTS.md:141-147 明写"Subagent 内部执行 4.5D 流程【一轮】"。
-    #   我们是单会话 = 一次调用,装不下重入才能达到的总量:实测每次评测上下文增长约 145 KB,
-    #   所有 session 都在 ~300 KB 处停住(上限 262144 tokens ≈ 768 KB),实际只跑到 1-5 次。
-    #   原值 5 是照搬 triton 侧默认(偏低 1 次);中途改过 17(把重入总量当成单次容量,错)。
-    generation_max: 6
-    optimization_max: 3
+    generation_max: 10
+    optimization_max: 4
     interval_seconds: 2
   npu_lease:
     enabled: true

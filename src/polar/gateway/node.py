@@ -45,6 +45,18 @@ from polar.trajectory.registry import StrategyRegistry
 logger = logging.getLogger(__name__)
 
 
+def _is_retryable_judge_infra(exc: BaseException) -> bool:
+    """operator_judge 的 infra 失败(判 judge 级重试) vs 真错误(不重试)。
+
+    infra 失败 = golden 缺失/NPU 不可用/容器传输失败/超时等环境故障,重起 runtime 重判
+    可能恢复;其他异常(bug、config 错、真算子失败)重判结果一样,不重。
+    operator_judge 把 infra 失败 raise 为带 "infra failure" 的 RuntimeError 或 TimeoutError。
+    """
+    if isinstance(exc, (TimeoutError, asyncio.TimeoutError)):
+        return True
+    return "infra failure" in str(exc).lower()
+
+
 class GatewayExecutionTimeout(TimeoutError):
     """Raised when a session exhausts its shared gateway execution budget."""
 
@@ -457,6 +469,82 @@ class GatewayNodeManager:
             return False
         return bool(evaluator.config.get("lazy_refresh_runtime"))
 
+    @staticmethod
+    def _judge_infra_retries(evaluator_spec) -> int:
+        """judge 级 infra 重试次数(默认 2,即最多 3 次判分)。evaluator.config.judge_infra_retries 可调。"""
+        config = getattr(evaluator_spec, "config", None)
+        if isinstance(config, dict):
+            try:
+                return max(0, int(config.get("judge_infra_retries", 2)))
+            except (TypeError, ValueError):
+                pass
+        return 2
+
+    async def _verify_eval_golden_input(
+        self,
+        runtime: BaseRuntime,
+        request: SessionDispatchRequest,
+        actions: list | None,
+    ) -> None:
+        """eval_prepare 后核对 golden input/<op>.py 真的传上了;没传上就按动作补传并记日志。
+
+        背景:input_load_failed(golden missing)在并发 judge 时间歇出现,根因待这条日志
+        确认。这里对每个指向 input/<op>.py 的 upload_file 动作,核对容器内目标文件存在,
+        不在就补传一次。只核对、不重跑整个 prepare,代价极小。
+        """
+        op_name = ""
+        evaluator = getattr(request, "evaluator", None)
+        config = getattr(evaluator, "config", None)
+        if isinstance(config, dict):
+            op_name = str(config.get("op_name") or "").strip()
+        if not op_name:
+            return
+        for action in actions or []:
+            if getattr(action, "type", None) != "upload_file":
+                continue
+            target = str(getattr(action, "target", "") or "")
+            if not target.endswith(f"/input/{op_name}.py"):
+                continue
+            try:
+                check = await runtime.exec(
+                    f'test -f "{target}" && echo P || echo M', timeout_sec=30
+                )
+                present = "P" in (check.stdout or "")
+            except Exception as exc:
+                logger.warning(
+                    "eval golden check failed session=%s op=%s target=%s: %s",
+                    request.session_id, op_name, target, exc,
+                )
+                continue
+            if present:
+                logger.info(
+                    "eval golden present session=%s op=%s target=%s",
+                    request.session_id, op_name, target,
+                )
+                continue
+            source = str(getattr(action, "source", "") or "")
+            logger.warning(
+                "eval golden MISSING after eval_prepare session=%s op=%s target=%s; "
+                "re-upload from %s",
+                request.session_id, op_name, target, source,
+            )
+            try:
+                await runtime.upload_file(source, target)
+                recheck = await runtime.exec(
+                    f'test -f "{target}" && echo P || echo M', timeout_sec=30
+                )
+                ok = "P" in (recheck.stdout or "")
+                logger.info(
+                    "eval golden re-upload %s session=%s op=%s target=%s",
+                    "OK" if ok else "STILL-MISSING",
+                    request.session_id, op_name, target,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "eval golden re-upload FAILED session=%s op=%s target=%s: %s",
+                    request.session_id, op_name, target, exc,
+                )
+
     async def _prepare_eval_runtime(
         self, managed: ManagedSession
     ) -> BaseRuntime | None:
@@ -488,6 +576,11 @@ class GatewayNodeManager:
                 # → 假 input_load_failed、丢弃 best-so-far 产出。见 deploy/ascend_operator/FIX-input_load_failed.md
                 honor_cancel=False,
             )
+            # 判分前自检: golden input/<op>.py 必须真的传上了。最终 judge 用 fresh
+            # runtime(隔离),并发 judge 时 eval_prepare 的 golden 上传偶发没落上,
+            # pipeline 一跑就 input_load_failed、整个 session 被判重试。在这里先核对,
+            # 没传上就按 prepare 动作补传,把 golden missing 挡在 pipeline 开跑之前。
+            await self._verify_eval_golden_input(eval_runtime, request, eval_actions)
             return eval_runtime
         except asyncio.CancelledError:
             with suppress(Exception):
@@ -785,33 +878,71 @@ class GatewayNodeManager:
             config=evaluator_spec.config,
         )
 
-        try:
-            evaluator = self.evaluators.create(strategy_spec)
-            eval_result = await self._await_with_budget(
-                evaluator.evaluate(
-                    trajectory,
-                    session_id=request.session_id,
-                    task_id=request.task_id,
-                    session_dir=managed.session_dir,
-                    artifacts_dir=managed.artifacts_dir,
-                    agent_result=agent_result,
-                    env=self._evaluator_env(evaluator_spec, eval_runtime_spec),
-                    timeout_seconds=self._remaining_budget(managed),
-                    runtime=live_runtime,
-                    fresh_eval_runtime=fresh_eval_runtime,
-                    runtime_spec=eval_runtime_spec,
-                    refresh_runtime=evaluator_spec.refresh_runtime,
-                ),
-                managed,
-            )
-        except Exception as exc:
+        max_attempts = 1 + self._judge_infra_retries(evaluator_spec)
+        judge_rt = fresh_eval_runtime
+        eval_result = None
+        last_exc: Exception | None = None
+        evaluator = self.evaluators.create(strategy_spec)
+        for attempt in range(1, max_attempts + 1):
+            try:
+                eval_result = await self._await_with_budget(
+                    evaluator.evaluate(
+                        trajectory,
+                        session_id=request.session_id,
+                        task_id=request.task_id,
+                        session_dir=managed.session_dir,
+                        artifacts_dir=managed.artifacts_dir,
+                        agent_result=agent_result,
+                        env=self._evaluator_env(evaluator_spec, eval_runtime_spec),
+                        timeout_seconds=self._remaining_budget(managed),
+                        runtime=live_runtime,
+                        fresh_eval_runtime=judge_rt,
+                        runtime_spec=eval_runtime_spec,
+                        refresh_runtime=evaluator_spec.refresh_runtime,
+                    ),
+                    managed,
+                )
+                last_exc = None
+                break
+            except Exception as exc:  # noqa: BLE001
+                last_exc = exc
+                if attempt >= max_attempts or not _is_retryable_judge_infra(exc):
+                    break
+                # judge 级重试: infra 失败(golden 缺失/NPU 不可用/容器传输/超时)只重起
+                # judge runtime 重判,不牵连整个 session(agent 不用重跑)。.best.tar.gz
+                # 还在宿主机,重判代价远小于 session 级重试。
+                logger.warning(
+                    "judge infra failure (attempt %d/%d) for session %s: %s; "
+                    "retrying judge only",
+                    attempt, max_attempts, request.session_id, exc,
+                )
+                if evaluator_spec.refresh_runtime:
+                    if isinstance(judge_rt, BaseRuntime):
+                        with suppress(Exception):
+                            await judge_rt.stop()
+                    judge_rt = await self._prepare_eval_runtime(managed)
+                    if judge_rt is None:
+                        logger.warning(
+                            "judge retry: could not prepare a fresh runtime for session %s",
+                            request.session_id,
+                        )
+                        break
+                # refresh_runtime=false 时在 source(agent)runtime 原地重试,对瞬时 NPU/超时有效。
+
+        if judge_rt is not None and judge_rt is not fresh_eval_runtime:
+            # 重试期间新建的 eval runtime 不在 managed.eval_prewarm_task 里,teardown 只清
+            # prewarm 那个;在这里显式停掉,避免容器泄漏。
+            with suppress(Exception):
+                await judge_rt.stop()
+
+        if last_exc is not None:
             logger.exception(
                 "Evaluator %s failed for session %s",
                 evaluator_spec.strategy,
                 request.session_id,
             )
             return trajectory.model_copy(
-                update={"status": "ERROR", "error": f"evaluator failed: {exc}"}
+                update={"status": "ERROR", "error": f"evaluator failed: {last_exc}"}
             )
 
         return self._merge_eval_result(trajectory, eval_result, evaluator_spec)
@@ -863,9 +994,13 @@ class GatewayNodeManager:
         )
 
         fresh_eval_runtime: BaseRuntime | None = None
+        judge_rt: BaseRuntime | None = None
+        last_exc: Exception | None = None
+        eval_result = None
         try:
             if not submission_context.get("submission_missing"):
                 fresh_eval_runtime = await self._prepare_eval_runtime(managed)
+                judge_rt = fresh_eval_runtime
                 if fresh_eval_runtime is None:
                     return trajectory.model_copy(
                         update={
@@ -877,25 +1012,52 @@ class GatewayNodeManager:
                         }
                     )
 
+            max_attempts = 1 + self._judge_infra_retries(evaluator_spec)
             evaluator = self.evaluators.create(strategy_spec)
-            eval_result = await self._await_with_budget(
-                evaluator.evaluate(
-                    trajectory,
-                    session_id=request.session_id,
-                    task_id=request.task_id,
-                    session_dir=managed.session_dir,
-                    artifacts_dir=managed.artifacts_dir,
-                    agent_result=agent_result,
-                    env=self._evaluator_env(evaluator_spec, eval_runtime_spec),
-                    timeout_seconds=self._remaining_budget(managed),
-                    runtime=None,
-                    fresh_eval_runtime=fresh_eval_runtime,
-                    runtime_spec=eval_runtime_spec,
-                    refresh_runtime=evaluator_spec.refresh_runtime,
-                    **submission_context,
-                ),
-                managed,
-            )
+            for attempt in range(1, max_attempts + 1):
+                try:
+                    eval_result = await self._await_with_budget(
+                        evaluator.evaluate(
+                            trajectory,
+                            session_id=request.session_id,
+                            task_id=request.task_id,
+                            session_dir=managed.session_dir,
+                            artifacts_dir=managed.artifacts_dir,
+                            agent_result=agent_result,
+                            env=self._evaluator_env(evaluator_spec, eval_runtime_spec),
+                            timeout_seconds=self._remaining_budget(managed),
+                            runtime=None,
+                            fresh_eval_runtime=judge_rt,
+                            runtime_spec=eval_runtime_spec,
+                            refresh_runtime=evaluator_spec.refresh_runtime,
+                            **submission_context,
+                        ),
+                        managed,
+                    )
+                    last_exc = None
+                    break
+                except Exception as exc:  # noqa: BLE001
+                    last_exc = exc
+                    if attempt >= max_attempts or not _is_retryable_judge_infra(exc):
+                        break
+                    # judge 级重试: infra 失败只重起 judge runtime 重判,不牵连 session。
+                    logger.warning(
+                        "judge infra failure (attempt %d/%d) for session %s: %s; "
+                        "retrying judge only",
+                        attempt, max_attempts, request.session_id, exc,
+                    )
+                    if submission_context.get("submission_missing"):
+                        break
+                    if isinstance(judge_rt, BaseRuntime):
+                        with suppress(Exception):
+                            await judge_rt.stop()
+                    judge_rt = await self._prepare_eval_runtime(managed)
+                    if judge_rt is None:
+                        logger.warning(
+                            "judge retry: could not prepare a fresh runtime for session %s",
+                            request.session_id,
+                        )
+                        break
         except Exception as exc:
             logger.exception(
                 "Evaluator %s failed for session %s",
@@ -906,10 +1068,15 @@ class GatewayNodeManager:
                 update={"status": "ERROR", "error": f"evaluator failed: {exc}"}
             )
         finally:
-            if fresh_eval_runtime is not None:
+            if judge_rt is not None:
                 await self._stop_runtime_best_effort(
-                    fresh_eval_runtime, request.session_id, "eval runtime"
+                    judge_rt, request.session_id, "eval runtime"
                 )
+
+        if last_exc is not None:
+            return trajectory.model_copy(
+                update={"status": "ERROR", "error": f"evaluator failed: {last_exc}"}
+            )
 
         return self._merge_eval_result(trajectory, eval_result, evaluator_spec)
 

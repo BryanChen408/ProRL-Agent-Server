@@ -1122,6 +1122,14 @@ def _classify_tool_result(text: str) -> dict[str, Any]:
     # from "the pipeline never got anywhere".
     if "compile failed" in low or "ascendc_compile_failed" in low:
         labels.append("compile_fail")
+    # Step2a registration smoke (t2a): the op never loaded, so nothing numerical was
+    # ever compared. Distinct from compile_fail — the kernel built fine.
+    if (
+        "op registration failed" in low
+        or "op_not_registered" in low
+        or "ascendc_load_failed" in low
+    ):
+        labels.append("op_not_registered")
     # ascendc_eval_pipeline.sh prints "[pipeline-budget] LIMIT_EXHAUSTED phase=..."
     # rather than the Triton-side wording.
     if (
@@ -1317,6 +1325,9 @@ def _pipeline_status(labels: list[str], text: str) -> str:
     # AST runs before compile, so ast_fail keeps priority above.
     if "compile_fail" in labels:
         return "compile_fail"
+    # Registration smoke runs after compile, before verify.
+    if "op_not_registered" in labels:
+        return "op_not_registered"
     if "verify_fail" in labels:
         return "verify_fail"
     if "benchmark_fail" in labels:
@@ -1381,7 +1392,7 @@ def _pipeline_stage_status(labels: list[str], text: str) -> dict[str, str]:
 
     if "budget_exhausted" in labels:
         precision = "fail" if precision_started else "not_reached"
-    elif "ast_fail" in labels or "compile_fail" in labels:
+    elif "ast_fail" in labels or "compile_fail" in labels or "op_not_registered" in labels:
         # Compile precedes verify: nothing was ever checked for numerical accuracy,
         # so this is not_reached rather than a precision failure.
         precision = "not_reached"
@@ -1397,6 +1408,7 @@ def _pipeline_stage_status(labels: list[str], text: str) -> dict[str, str]:
     if (
         "ast_fail" in labels
         or "compile_fail" in labels
+        or "op_not_registered" in labels
         or "verify_fail" in labels
         or "budget_exhausted" in labels
     ):
@@ -1465,6 +1477,7 @@ def analyze_session_messages(data: dict[str, Any]) -> dict[str, Any]:
         "success": 0,
         "ast_fail": 0,
         "compile_fail": 0,
+        "op_not_registered": 0,
         "verify_fail": 0,
         "benchmark_fail": 0,
         "core_dim": 0,

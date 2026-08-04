@@ -968,6 +968,31 @@ def test_ast_failure_keeps_priority_over_compile_failure() -> None:
     assert module._pipeline_status(labels, text) == "ast_fail"
 
 
+def test_op_not_registered_is_distinct_from_compile_and_precision() -> None:
+    module = _load_module()
+    # Step2a registration smoke: kernel compiled fine, but the .so never loaded, so
+    # no element was ever compared. Must not read as compile_fail or as a precision
+    # failure.
+    result_text = (
+        "[ascendc-eval] Step2 compile (no NPU)\n"
+        "[ascendc-eval] Step2a op registration smoke (no NPU)\n"
+        "[ascendc-eval] op registration FAILED\n"
+        "[ascendc-eval] verdict — success=False ast_check_ok=True correctness_ok=False "
+        "error_type=op_not_registered speedup_vs_torch=None\n"
+        "[ascendc-eval] 首个异常: AttributeError: '_OpNamespace' 'npu' object "
+        "has no attribute 'foo'\n"
+    )
+
+    labels = module._classify_tool_result(result_text)["labels"]
+
+    assert "op_not_registered" in labels
+    assert "compile_fail" not in labels
+    assert "verify_fail" not in labels
+    assert module._pipeline_status(labels, result_text) == "op_not_registered"
+    stage = module._pipeline_stage_status(labels, result_text)
+    assert stage == {"precision": "not_reached", "profiling": "not_reached"}
+
+
 def test_t2a_project_level_skill_scripts_are_protected() -> None:
     module = _load_module()
 

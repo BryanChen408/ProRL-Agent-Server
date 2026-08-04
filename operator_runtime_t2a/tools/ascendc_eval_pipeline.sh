@@ -56,12 +56,16 @@ AGENT_SIDE=0; [[ -d "$SRC_DIR" ]] && AGENT_SIDE=1
 STATE_DIR="$PWD/output/.selfcheck"
 PACK_SH="${_SCRIPT_DIR}/pack_submission.sh"
 
-write_metrics() {  # ast_ok corr_ok success fw impl speedup error [完整日志文件]
-  local ast_ok="$1" corr_ok="$2" success="$3" fw="$4" impl="$5" sp="$6" error="$7" log_src="${8:-}"
+write_metrics() {  # ast_ok corr_ok success fw impl speedup error [完整日志文件] [强制 error_type]
+  # $9 (force_type) 覆盖文本推断:classify() 按关键词猜,而部分失败的措辞里天然带
+  # "对拍"/"编译" 之类的词,会被归错档(例如"对拍前的注册冒烟检查失败"被判成
+  # correctness_failed)。调用方已经确知类型时,直接指定。
+  local ast_ok="$1" corr_ok="$2" success="$3" fw="$4" impl="$5" sp="$6" error="$7" log_src="${8:-}" force_type="${9:-}"
   : > "$OUT_DIR/metrics_error.log"
   [[ -n "$error" ]] && printf "%s\n" "$error" >> "$OUT_DIR/metrics_error.log"
   [[ -n "$log_src" && -f "$log_src" ]] && cat "$log_src" >> "$OUT_DIR/metrics_error.log"
   AST_OK="$ast_ok" CORR_OK="$corr_ok" SUCCESS="$success" FW="$fw" IMPL="$impl" SP="$sp" \
+  FORCE_TYPE="$force_type" \
   ERR_FILE="$OUT_DIR/metrics_error.log" OUT_DIR="$OUT_DIR" OP="$OP_NAME" python3 - <<'PY'
 import json, os, hashlib
 from pathlib import Path
@@ -91,7 +95,7 @@ metrics = {
     "schema_version": 2, "op_name": os.environ.get("OP",""),
     "success": b(os.environ["SUCCESS"]), "ast_check_ok": b(os.environ["AST_OK"]),
     "correctness_ok": b(os.environ["CORR_OK"]), "perf_data": perf,
-    "error": None, "error_type": classify(full),
+    "error": None, "error_type": (os.environ.get("FORCE_TYPE") or "").strip() or classify(full),
     "error_file": "metrics_error.log" if full else None,
     "error_bytes": len(full.encode("utf-8")) if full else 0,
     "error_sha256": hashlib.sha256(full.encode("utf-8")).hexdigest() if full else None,
@@ -113,8 +117,8 @@ PY
 
 fail_hint() {
   python3 -c "import json;d=json.load(open('$OUT_DIR/metrics.json'));p=d.get('perf_data') or {};print('[ascendc-eval] verdict — success=%s ast_check_ok=%s correctness_ok=%s error_type=%s speedup_vs_torch=%s'%(d.get('success'),d.get('ast_check_ok'),d.get('correctness_ok'),d.get('error_type'),p.get('speedup_vs_torch')))" 2>/dev/null || true
-  python3 - "$OUT_DIR/metrics.json" <<'CLASSIFY' 2>/dev/null || true
-import json, sys
+  python3 - "$OUT_DIR/metrics.json" "$OUT_DIR/metrics_error.log" <<'CLASSIFY' 2>/dev/null || true
+import json, re, sys
 try:
     d = json.load(open(sys.argv[1]))
 except Exception:
@@ -122,11 +126,42 @@ except Exception:
 if d.get("success"):
     print("[ascendc-eval] 错误分类: 通过"); sys.exit(0)
 et = str(d.get("error_type") or "")
+
+# Pull the first real exception line out of metrics_error.log. Without this the
+# agent only ever sees the coarse label and has to guess; a load/registration
+# failure looks exactly like a numerical one.
+EXC_RE = re.compile(
+    r"^\s*(?:\w+\.)*(?:AttributeError|ImportError|ModuleNotFoundError|RuntimeError|"
+    r"TypeError|ValueError|KeyError|IndexError|OSError|AssertionError|"
+    r"NameError|SyntaxError|Error|Exception)\b.*",
+)
+first_exc = ""
+try:
+    for line in open(sys.argv[2], encoding="utf-8", errors="replace"):
+        s = line.rstrip()
+        if EXC_RE.match(s):
+            first_exc = s.strip()[:400]
+            break
+except Exception:
+    pass
+
+# A "correctness_failed" whose log shows a load/registration exception never
+# compared a single element -- calling it a precision mismatch sends the agent
+# to tune numerics when the real fix is packaging/registration.
+LOAD_EXC = ("AttributeError", "ImportError", "ModuleNotFoundError", "OSError")
+load_failure = bool(first_exc) and any(k in first_exc for k in LOAD_EXC)
+if "_OpNamespace" in first_exc or "has no attribute" in first_exc:
+    load_failure = True
+
 INFRA = {"npu_runtime_unavailable", "input_load_failed", "judge_container_failed",
          "judge_metrics_unreadable", "judge_no_metrics", "task_missing",
          "submission_fetch_failed"}
 if et in INFRA:
     label = "INFRA-环境故障(不是你的代码问题,不要迭代修复)"
+elif et in ("op_not_registered", "ascendc_load_failed"):
+    label = "A类-算子未注册/加载失败(不是精度问题:改 setup.py 打包与 import,别调数值)"
+elif et == "correctness_failed" and load_failure:
+    label = "A类-算子未注册/加载失败(对拍未比较任何元素,不是精度问题:改 setup.py 打包与 import)"
 elif et == "correctness_failed":
     label = "D类-精度不匹配"
 elif et in ("ascendc_compile_failed", "ast_check_failed", "submission_missing",
@@ -135,6 +170,8 @@ elif et in ("ascendc_compile_failed", "ast_check_failed", "submission_missing",
 else:
     label = "A类-代码/编译错误"
 print(f"[ascendc-eval] 错误分类: {label}")
+if first_exc:
+    print(f"[ascendc-eval] 首个异常: {first_exc}")
 CLASSIFY
   echo "  ↳ 完整错误在 $OUT_DIR/metrics_error.log;只改 {op}/ 下实现、重打 tarball、重跑本固定入口。"
 }
@@ -316,12 +353,38 @@ if ! (
   fi
 ) >"$OUT_DIR/compile.log" 2>&1; then
   write_metrics true false false "" "" "" "AscendC 编译失败(完整构建日志如下)" "$OUT_DIR/compile.log"
+  # 改动3: 编译失败时把首个错误 ±上下文直接打到 stderr(进工具结果),否则 agent 只能拿到
+  # "完整错误在 metrics_error.log",38% 的 session 会跑去自编译 cmake 反推错误、白烧轮数。
+  echo "--- compile.log 首个错误上下文(完整日志见 $OUT_DIR/compile.log) ---" >&2
+  _ERR_LINE=$(grep -n -m1 -E "error:|CMake Error|undefined reference" "$OUT_DIR/compile.log" | cut -d: -f1)
+  if [[ -n "$_ERR_LINE" ]]; then
+    sed -n "$(( _ERR_LINE > 5 ? _ERR_LINE - 5 : 1 )),$(( _ERR_LINE + 25 ))p" "$OUT_DIR/compile.log" >&2
+  else
+    tail -30 "$OUT_DIR/compile.log" >&2
+  fi
   echo "[ascendc-eval] compile FAILED"; fail_hint; exit 1
 fi
 
 if ! inject_baseline; then
   write_metrics false false false "" "" "" "判分基准注入失败(get_input):对拍前无法复位 $TASK_DIR"
   echo "[ascendc-eval] baseline re-inject failed"; fail_hint; exit 1
+fi
+
+# Step2a: is the operator actually reachable via torch.ops.npu? Packaging mistakes
+# (nested NpuExtension name, .so built where the submission's loader never globs,
+# silently skipped wheel install) survive compile and only blow up inside Step2b
+# as an AttributeError, which then gets reported as correctness_failed ->
+# "D类-精度不匹配". Catch it here, needs no NPU, and give it its own error_type.
+SMOKE="${_SCRIPT_DIR}/check_op_registered.py"
+if [[ -f "$SMOKE" ]]; then
+  echo "[ascendc-eval] Step2a op registration smoke (no NPU)"
+  if ! SMOKE_OUT=$(cd "$WORK" && WORKDIR="$WORK" "$PY_BIN" "$SMOKE" "$TASK_DIR" --workdir "$WORK" 2>&1); then
+    printf "%s\n" "$SMOKE_OUT" > "$OUT_DIR/op_smoke.log"
+    write_metrics true false false "" "" "" \
+      "算子未注册/加载失败(对拍前冒烟检查;完整输出如下)" "$OUT_DIR/op_smoke.log" "op_not_registered"
+    echo "[ascendc-eval] op registration FAILED"; fail_hint; exit 1
+  fi
+  printf "%s\n" "$SMOKE_OUT" > "$OUT_DIR/op_smoke.log"
 fi
 
 # Step2b
@@ -331,6 +394,14 @@ if ! VER_OUT=$(cd "$WORK" && export WORKDIR="$WORK" PYTHONPATH="$SK/$TRANS_SKILL
       && run_npu_phase verify "$PY_BIN" "$VER" "$OP_DIR_NAME" 2>&1); then
   printf "%s\n" "$VER_OUT" > "$OUT_DIR/verify.log"
   write_metrics true false false "" "" "" "数值对拍失败(Result: fail;完整对拍输出如下)" "$OUT_DIR/verify.log"
+  # 改动3扩展: 对拍失败把 Comparison 段直接打到 stderr(进工具结果)。否则 agent 只拿到
+  # "D类-精度不匹配"一句,没有 max_abs_diff/tolerance/失配元素数,只能盲调数值。
+  echo "--- verify 对拍失败详情(完整日志见 $OUT_DIR/verify.log) ---" >&2
+  if grep -q "Comparison" "$OUT_DIR/verify.log"; then
+    sed -n '/Comparison/,$p' "$OUT_DIR/verify.log" | head -60 >&2
+  else
+    tail -40 "$OUT_DIR/verify.log" >&2
+  fi
   echo "[ascendc-eval] verify FAILED"; fail_hint; exit 1
 fi
 printf "%s\n" "$VER_OUT" > "$OUT_DIR/verify.log"
