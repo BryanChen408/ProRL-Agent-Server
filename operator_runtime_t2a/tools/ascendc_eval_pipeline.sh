@@ -4,7 +4,17 @@ set -uo pipefail
 WARMUP="${WARMUP:-5}"
 REPEATS="${REPEATS:-50}"
 export SOC_VERSION="${SOC_VERSION:-ascend910b1}"
-_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# 先 readlink -f 解掉软链接再取 dirname —— 直接 dirname 在脚本被软链接调用时会拿到
+# 软链接的目录而不是真脚本目录,导致 _SCRIPT_DIR/WORK_ROOT 全错。readlink -f 对非软链
+# 按原样返回,所以两种情况都安全。
+_SRC="${BASH_SOURCE[0]}"
+command -v readlink >/dev/null 2>&1 && _SRC="$(readlink -f "$_SRC")"
+_SCRIPT_DIR="$(cd "$(dirname "$_SRC")" && pwd)"
+# WORK_ROOT = agent 的 workdir(tools/ 的上一级)。打包/找工程/judge_out 一律用它,
+# 不用调用时的 $PWD —— agent 常在 <op>/ 或 <op>/kernel/build/ 里跑评测,用 $PWD 会
+# 找不到 {op_name}/ → 报 submission missing。脚本固定在 <workdir>/tools/,所以它的
+# 上一级就是 workdir,与调用目录无关。
+WORK_ROOT="$(cd "${_SCRIPT_DIR}/.." && pwd)"
 if [[ -z "${ASCENDC_SKILLS_SRC:-}" ]]; then
   if [[ -d /opt/canonical/skills ]]; then ASCENDC_SKILLS_SRC=/opt/canonical/skills
   else ASCENDC_SKILLS_SRC="${_SCRIPT_DIR}/../skills"; fi
@@ -48,12 +58,16 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 [[ -z "$OP_NAME" ]] && { echo "[ascendc-eval] --op_name required" >&2; exit 1; }
-OUT_DIR="${OUT_DIR:-judge_out}"; mkdir -p "$OUT_DIR"; OUT_DIR="$(cd "$OUT_DIR" && pwd)"
+OUT_DIR="${OUT_DIR:-judge_out}"; case "$OUT_DIR" in /*) ;; *) OUT_DIR="$WORK_ROOT/$OUT_DIR";; esac
+mkdir -p "$OUT_DIR"; OUT_DIR="$(cd "$OUT_DIR" && pwd)"
 IMPL_FILE="${IMPL_FILE:-output/submission/${OP_NAME}_impl.tar.gz}"
+# 相对路径的 --impl / --out_dir 一律相对 WORK_ROOT 解析(而不是调用目录),
+# 这样从 <op>/ 或 <op>/kernel/build/ 里跑也能定位到 workdir 下的工程与提交物。
+case "$IMPL_FILE" in /*) ;; *) IMPL_FILE="$WORK_ROOT/$IMPL_FILE";; esac
 
-SRC_DIR="$PWD/$OP_NAME"
+SRC_DIR="$WORK_ROOT/$OP_NAME"
 AGENT_SIDE=0; [[ -d "$SRC_DIR" ]] && AGENT_SIDE=1
-STATE_DIR="$PWD/output/.selfcheck"
+STATE_DIR="$WORK_ROOT/output/.selfcheck"
 PACK_SH="${_SCRIPT_DIR}/pack_submission.sh"
 
 write_metrics() {  # ast_ok corr_ok success fw impl speedup error [完整日志文件] [强制 error_type]
@@ -179,14 +193,16 @@ CLASSIFY
 PIPELINE_GEN_MAX="${POLAR_GEN_PIPELINE_MAX:-6}"
 PIPELINE_OPT_MAX="${POLAR_OPT_PIPELINE_MAX:-3}"
 PIPELINE_PHASE="generation"; PIPELINE_LIMIT="$PIPELINE_GEN_MAX"; PIPELINE_ATTEMPT=1
-BEST_META="$PWD/output/submission/.${OP_NAME}_impl.best.meta.json"
+BEST_META="$WORK_ROOT/output/submission/.${OP_NAME}_impl.best.meta.json"
 CUR_HASH=""
 
 pack_best() {  # $1=verified?  $2=speedup?
   [[ -x "$PACK_SH" || -f "$PACK_SH" ]] || return 0
   local args=("$OP_NAME"); [[ -n "${1:-}" ]] && args+=(--verified)
   [[ -n "${2:-}" ]] && args+=(--speedup "$2")
-  WORKDIR="$PWD" bash "$PACK_SH" "${args[@]}" || true
+  # 打包目录用 WORK_ROOT(脚本位置反推的 workdir),不用调用时的 $PWD —— 否则在
+  # <op>/ 或 <op>/kernel/build/ 里跑时 pack 找不到 {op_name}/,submission missing。
+  WORKDIR="$WORK_ROOT" bash "$PACK_SH" "${args[@]}" || true
 }
 
 if [[ "$AGENT_SIDE" == "1" ]]; then
@@ -249,7 +265,18 @@ trap _on_exit EXIT
 WORK="$OUT_DIR/work"
 [[ "$INCREMENTAL" == "1" ]] || rm -rf "$WORK"
 mkdir -p "$WORK"
-if [[ ! -f "$IMPL_FILE" ]]; then write_metrics false false false "" "" "" "submission missing: $IMPL_FILE"; echo "[ascendc-eval] submission missing"; fail_hint; exit 1; fi
+if [[ ! -f "$IMPL_FILE" ]]; then
+  if [[ ! -d "$SRC_DIR" ]]; then
+    # 工程目录压根不存在:agent 在没建 {op_name}/ 工程时就跑了评测(逻辑错,不是 infra)。
+    # 明确告诉它先建工程,而不是一句 "submission missing" 让它猜。
+    write_metrics false false false "" "" "" \
+      "工程目录不存在: $SRC_DIR —— 先创建 $OP_NAME/ 工程(kernel/ + model_new_ascendc.py),再跑固定评测入口;不要在没建工程时跑评测"
+  else
+    # 工程在,但提交物没出来(pack 失败或 judge 侧没就位)。
+    write_metrics false false false "" "" "" "submission missing: $IMPL_FILE (工程目录 $SRC_DIR 存在但打包未产出 tarball)"
+  fi
+  echo "[ascendc-eval] submission missing"; fail_hint; exit 1
+fi
 tar xzf "$IMPL_FILE" -C "$WORK" 2>/dev/null || { write_metrics false false false "" "" "" "cannot untar submission: $IMPL_FILE"; echo "[ascendc-eval] untar failed"; fail_hint; exit 1; }
 MNA="$(find "$WORK" -maxdepth 3 -name model_new_ascendc.py | head -1)"
 TASK_DIR="$(dirname "$MNA" 2>/dev/null)"
