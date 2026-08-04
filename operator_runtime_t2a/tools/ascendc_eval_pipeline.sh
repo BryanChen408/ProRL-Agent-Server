@@ -341,11 +341,15 @@ KERNEL_DIR="$TASK_DIR/kernel"
 BUILDER="$SK/$TRANS_SKILL/scripts/build_ascendc.py"
 _CLEAN=(--clean); [[ "$INCREMENTAL" == "1" ]] && _CLEAN=()
 if ! (
-  set -e
+  # 不要用 set -e:在 `if ! ( ... )` 里 `!` 会禁用子 shell 的 errexit,build_ascendc
+  # 失败时 set -e 不退出,继续跑 setup.py(被 || echo 兜底成 exit 0),子 shell 退出码变 0,
+  # `if !` 看不到失败 → 编译失败被错标成后续的 op_not_registered(.so NONE)。
+  # 改为 build 失败后 `|| exit $?` 显式传播退出码。
   cd "$WORK"
   rm -rf "$KERNEL_DIR/dist"
   WORKDIR="$WORK" ASCEND_HOME_PATH="$ASCEND_HOME_PATH" \
-    "$PY_BIN" "$BUILDER" "$TASK_DIR" -v "$SOC_VERSION" --build-type "$BUILD_TYPE" "${_CLEAN[@]}"
+    "$PY_BIN" "$BUILDER" "$TASK_DIR" -v "$SOC_VERSION" --build-type "$BUILD_TYPE" "${_CLEAN[@]}" \
+    || exit $?
   if [[ -f "$KERNEL_DIR/setup.py" ]]; then
     cd "$KERNEL_DIR"
     "$PY_BIN" setup.py bdist_wheel && "$PY_BIN" -m pip install dist/*.whl --force-reinstall \
