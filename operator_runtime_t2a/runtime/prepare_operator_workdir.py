@@ -67,6 +67,37 @@ def _copy_file(src: Path, dst: Path) -> None:
     shutil.copy2(src, dst)
 
 
+def _camel(name: str) -> str:
+    """op_name → 合法 C++ 类名后缀(Kernel{OpName})。下划线/非字母数字分段,逐段首字母大写。"""
+    return "".join(p[:1].upper() + p[1:] for p in re.split(r"[^0-9A-Za-z]+", name) if p)
+
+
+def _instantiate_kernel_skeleton(canonical: Path, workdir: Path, op: str) -> None:
+    """把 kernel_skeleton 模板按 op_name 实例化进 workdir/{op}/(只 agent 侧)。
+
+    打包件(CMakeLists/register.cpp/setup.py/model_new 加载逻辑)预生成且自洽,agent 只写
+    kernel 数学(op_kernel/{op}_kernel.cpp 的 Compute)和 forward 调用。打包类失败(名字
+    对不上 / 链接错 / loader 摸不到 .so)从根上不发生 —— 是给正确打包"保底",不是事后看护。
+    文件名与内容里的 {op_name}/{OpName} 占位符一并替换。已存在的文件不覆盖(agent 可能已写)。
+    """
+    skel = canonical / "workflows" / "templates" / "kernel_skeleton"
+    if not skel.is_dir():
+        return
+    camel = _camel(op)
+    for src in sorted(skel.rglob("*")):
+        if not src.is_file():
+            continue
+        rel = str(src.relative_to(skel)).replace("{op_name}", op).replace("{OpName}", camel)
+        if rel == "README.md":
+            continue  # README 是模板说明,不进工程(CLAUDE.md 已有规则)
+        dst = workdir / op / rel
+        if dst.exists():
+            continue
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        text = src.read_text(encoding="utf-8")
+        dst.write_text(text.replace("{op_name}", op).replace("{OpName}", camel), encoding="utf-8")
+
+
 def _forward_arg_names(task_path: Path) -> list[str]:
     try:
         tree = ast.parse(task_path.read_text())
@@ -241,6 +272,11 @@ def _prepare_ascendc_workdir(args) -> int:
     _copy_tree(canonical / "workflows", workdir / ".claude" / "workflows")
     _assert_upstream_paths(workdir)
     _copy_file(canonical / "CLAUDE.md", workdir / "CLAUDE.md")
+    # 预生成打包骨架(只 agent 侧): require_claude 是 agent prepare 的标记(judge 的
+    # eval_prepare 不带)。judge 侧绝不能铺 —— 否则 AGENT_SIDE 检测会把空骨架当提交物打包,
+    # 覆盖 agent 的真实提交。只在 agent 侧铺,agent 只写 kernel 数学。
+    if args.require_claude:
+        _instantiate_kernel_skeleton(canonical, workdir, op)
     off_names = _non_project_skills(canonical) if args.only_project_skills else []
     off_names += [
         n.strip()
