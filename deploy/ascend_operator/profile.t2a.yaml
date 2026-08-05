@@ -16,7 +16,7 @@ service:
   gateway_url: http://80.48.5.64:8200
   sglang_router_url: http://80.48.5.64:8011
   inference_engine: vllm
-  model_served: /home/docker/Qwen3.6-35B-A3B
+  model_served: /home/docker/Qwen3.6-35B-A3B-agentical-ascendc-hf-4t-bf16
 
 paths:
   output_dir: output/ascend_operator
@@ -41,7 +41,7 @@ operator_runtime:
     interval_seconds: 2
   npu_lease:
     enabled: true
-    pool: [8, 9, 10, 11]
+    pool: [0, 1, 2, 3, 4, 5, 6, 7]
     lock_dir: /dev/shm/npu-locks
 
 observer:
