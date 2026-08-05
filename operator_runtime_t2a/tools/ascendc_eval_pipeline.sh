@@ -91,7 +91,12 @@ def classify(t):
     if not t: return None
     l = t.lower(); c = l.replace(" ","")
     if "submission" in l and ("missing" in l or "untar" in l or "缺" in t or "布局" in t): return "submission_missing"
-    if "判分基准" in t or "get_input" in l or ("filenotfounderror" in l and ".json" in l):
+    # get_input 必须搭配失败上下文才算 input_load_failed —— benchmark/verify 日志里
+    # 常出现 get_inputs/get_input_groups(取输入的函数名),裸匹配会把 benchmark_failed
+    # 错标成 input_load_failed(本该得 T2 0.4 的被判成 infra 重试)。
+    if "判分基准" in t \
+        or ("get_input" in l and any(k in t for k in ("无法加载","无法写入","未就位","注入失败","缺失"))) \
+        or ("filenotfounderror" in l and ".json" in l):
         return "input_load_failed"
     if "aclinit" in c and ("invaliddeviceid" in c or "getdevicecntfailed" in c) or "invalid device id" in l: return "npu_runtime_unavailable"
     if "ast退化" in l or "ast_check" in l or "ast check" in l or "退化" in t or "degrad" in l:
