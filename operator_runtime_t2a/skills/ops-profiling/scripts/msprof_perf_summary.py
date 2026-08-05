@@ -814,29 +814,16 @@ def _move(v):
     return v
 inputs = _move(inputs)
 
-# ---- model construction (honour get_init_inputs if present) ----
-_init_args = []
-_init_kwargs = {{}}
+# ---- model construction (init 参数与对拍脚本 verification_ascendc.py 同一约定:扁平展开) ----
+# 能走到测速的模型都已被对拍用 cls(*get_init_inputs()) 成功建过,照抄该约定即对所有
+# 可测速算子兼容。init 来源先试实现模块(model_new 一般没有 get_init_inputs),没有再
+# 回落 model.py —— 构造参数属于任务定义,不属于实现。
 try:
-    ref_for_init = _load(out_dir / "{model_file}", "ref_for_init")
-    if hasattr(ref_for_init, "get_init_inputs"):
-        _all_init = ref_for_init.get_init_inputs()
-        _idx = {case_idx}
-        if isinstance(_all_init, list) and _idx < len(_all_init):
-            _entry = _all_init[_idx]
-            if isinstance(_entry, dict):
-                _init_kwargs = _entry
-            elif isinstance(_entry, (list, tuple)):
-                _init_args = list(_entry)
+    _init_src = mod if hasattr(mod, "get_init_inputs") else _load(out_dir / "model.py", "init_ref")
+    _init_vals = _init_src.get_init_inputs() if hasattr(_init_src, "get_init_inputs") else []
 except Exception:
-    pass
-
-if _init_kwargs:
-    model = cls(**_init_kwargs).to(device).eval()
-elif _init_args:
-    model = cls(*_init_args).to(device).eval()
-else:
-    model = cls().to(device).eval()
+    _init_vals = []
+model = cls(*_init_vals).to(device).eval()
 
 for _ in range({warmup}):
     with torch.no_grad():
@@ -876,15 +863,17 @@ def _generate_wrapper_script(cfg: _WrapperConfig):
         # 对齐 triton 的 resolve_inputs: get_input_groups 返回多组 case 直接用;
         # 只有 get_inputs(单组输入)时包一层成 [inputs],否则 input_groups[case_idx]
         # 会取到单个 tensor 而不是输入列表,model(*tensor) 直接 TypeError 崩掉。
+        # 注意: 这段代码会被嵌进 _WRAPPER_SCRIPT_TEMPLATE 的模块顶层,所以基础语句必须
+        # 0 缩进(if/elif/else 内部才用 4 空格相对缩进),否则生成脚本 IndentationError。
         inputs_code = f"""
-    ref_mod = _load(out_dir / "model.py", "ref_for_inputs")
-    if hasattr(ref_mod, "get_input_groups"):
-        input_groups = ref_mod.get_input_groups()
-    elif hasattr(ref_mod, "get_inputs"):
-        input_groups = [ref_mod.get_inputs()]
-    else:
-        raise AttributeError("model.py must provide get_inputs() or get_input_groups()")
-    inputs = input_groups[{cfg.case_idx}]
+ref_mod = _load(out_dir / "model.py", "ref_for_inputs")
+if hasattr(ref_mod, "get_input_groups"):
+    input_groups = ref_mod.get_input_groups()
+elif hasattr(ref_mod, "get_inputs"):
+    input_groups = [ref_mod.get_inputs()]
+else:
+    raise AttributeError("model.py must provide get_inputs() or get_input_groups()")
+inputs = input_groups[{cfg.case_idx}]
 """
     return _build_wrapper_script_content(cfg, model_file, cls_name, inputs_code)
 
@@ -948,10 +937,14 @@ def _run_msprof_quick(wrapper_script: str, output_dir: str, device_id: int, warm
 
     env = os.environ.copy()
 
-    # Warmup: 在 msprof 外部执行，不采集
+    # Warmup: 在 msprof 外部执行，不采集。wrapper 崩溃必须在此透出真实报错 ——
+    # 否则建模/取数阶段的 TypeError 被吞掉,下游只剩 "no task_time or api_statistic
+    # csv found",wrapper 级故障会被伪装成采集失败。
     for _ in range(warmup):
-        subprocess.run([sys.executable, wrapper_path],
-                       capture_output=True, text=True, env=env)
+        wr = subprocess.run([sys.executable, wrapper_path],
+                            capture_output=True, text=True, env=env)
+        if wr.returncode != 0:
+            return None, f"wrapper crashed: {(wr.stderr or wr.stdout or '')[-400:]}"
 
     # Measurement: msprof 只采集正式 timed run
     cmd = [
