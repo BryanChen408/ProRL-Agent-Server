@@ -657,6 +657,8 @@ def _load_cases_json(out_dir: Path):
 
 
 def _extract_shape_dtype_from_jsonl(case):
+    if not case:
+        return "?", "?"
     inputs = case.get("inputs", [])
     if not inputs:
         return "?", "?"
@@ -1522,11 +1524,39 @@ def _log_and_save_compare_reports(summary, out_dir, speedups, n_cases):
     LOGGER.info(f"[INFO] Markdown report saved to: {md_path}")
 
 
+def _load_cases_from_model(out_dir):
+    """数据集算子没有 case 文件(jsonl/json)时,从 model.py 枚举 case 数。
+
+    benchmark 的 case 枚举默认从文件读;但 RL 数据集算子只有 get_inputs/get_input_groups,
+    提交目录里没有 jsonl/json → 不 fallback 就会 n_cases=0,一行都不跑(空表 → benchmark_failed)。
+    这里回退到 model.py:get_input_groups 返回多组直接用其个数;get_inputs 是单组 → 1 个 case。
+    返回 [None]*n 占位 —— None 让 wrapper 走 get_inputs/get_input_groups fallback 取真实输入。"""
+    model_path = Path(out_dir) / "model.py"
+    if not model_path.is_file():
+        return [], None
+    try:
+        ref_mod = _load_module(str(model_path), "ref_for_cases")
+    except Exception:
+        return [], None
+    try:
+        if hasattr(ref_mod, "get_input_groups"):
+            n = len(ref_mod.get_input_groups())
+        elif hasattr(ref_mod, "get_inputs"):
+            n = 1
+        else:
+            return [], None
+    except Exception:
+        return [], None
+    return [None] * n, "model:get_inputs/get_input_groups"
+
+
 def _load_compare_cases(out_dir):
     """Load test cases from jsonl or json files in the output directory."""
     cases, case_source = _load_cases_jsonl(out_dir)
     if not cases:
         cases, case_source = _load_cases_json(out_dir)
+    if not cases:
+        cases, case_source = _load_cases_from_model(out_dir)
     return cases, case_source
 
 
