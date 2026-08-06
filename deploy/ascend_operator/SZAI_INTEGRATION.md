@@ -96,9 +96,21 @@ profile.t2a.yaml (跟踪,含 __TOKEN__)
 | `__VLLM_ROUTER_PORT__` | 训练侧 router | `8001` |
 | `__SOC_VERSION__` | 宿主是 A3 还是 A2 | `ascend910_9391`(A3;A2 填 `ascend910b1`) |
 | `__NPU_POOL__` | polar 宿主自己的卡 | `[0, 1, 2, 3]` |
-| `__MODEL_SERVED__` | 沙箱容器内路径 | `/home/docker/Qwen3.6-35B-A3B` |
-| `__TASK_ASSETS_DIR__` | 沙箱容器内路径 | 见第七节遗留待定 |
-| `__ASC_DEVKIT_DIR__` | 沙箱容器内路径 | `/home/docker/asc-devkit-9.0.0` |
+| `__MODEL_SERVED__` | **不是路径,是发给 vLLM 的模型名** | `/home/docker/Qwen3.6-35B-A3B` |
+| `__TASK_ASSETS_DIR__` | **polar 宿主上的路径** | 见第七节遗留待定 |
+| `__ASC_DEVKIT_DIR__` | **polar 宿主上的路径** | `/home/docker/asc-devkit-9.0.0` |
+
+后三项的语义容易搞错,逐条说明 `[对比]`:
+
+- `model_served` 最终落到 `openai_request["model"]`(`src/polar/gateway/server.py:730`),
+  是**发给 vime 那台 vLLM 的模型名**,必须和 vLLM 实际注册的名字逐字相同。填成宿主上
+  不存在的路径也不会报错 —— 它从不被当路径打开。
+- `asc_devkit_dir` 被 `load_polar_profile.py:58` 挂成 `-v <it>:/opt/asc-devkit:ro`,
+  **宿主上必须真实存在**,否则 Docker 会创建一个空目录,21 个 skill 里 46 处引用全部落空。
+- `task_assets_dir` 被 `load_polar_profile.py:113` 在**宿主上** `glob("*.json")`。
+  路径不存在时 `_has_case_json` 静默变 false,`.json` 上传动作被跳过,
+  失败点被推迟到 agent 跑起来后 `get_input_groups()` 找不到 `.json` `[推断]`。
+  这是本方案里最隐蔽的一处"看起来成功"。
 
 端口只在 profile 声明一份,launcher 显示的端口从渲染产物里读回来,不重复写死。
 
@@ -193,6 +205,38 @@ vime `feature/swe-tasks`:
 推送注意:`ascendc-szai` 跟踪的是 `origin/feat/ascendc-rl-t2a`,裸 `git push` 会推错分支,
 要 `git push -u origin ascendc-szai`。
 
-遗留待定:`task_assets_dir` 指向的 `op_assets_cudallm_filtered189` 在共享盘上不存在 `[实测]`;
-现有的只有 `/mnt/model/corlorlight_models/ljk/sft_workspace/benchmark\cudaLLM\level1\*`
-(字面反斜杠 = 压平的 Windows 路径,66 个文件,且在 `ljk` 名下不在 `mingchengzou` 名下)。
+## 八、真跑之前必须先做的事
+
+以下每条都不是代码问题,但缺一条就跑不起来或静默跑错。
+
+**1. push 两侧提交(硬阻塞)。** `Dockerfile.release:68-69` 是从**远端** GitHub
+clone `feature/swe-tasks`,不 COPY 本地目录 `[对比]`。远端现在停在 `dfcceb90`,
+我们 10 个提交全在本地。**不 push 就重建镜像,拿到的仍是旧 entrypoint**,
+代理豁免和原子写一条都进不去容器。
+
+**2. 数据集要在 polar 宿主上落成真目录。** 选定 cudaLLM 189 后仍有工作:
+现有素材在 `/mnt/model/corlorlight_models/ljk/sft_workspace/`,**413 个算子配对齐全**
+(413 个 `.py` + 413 个同名 `.json`)`[实测]`,但文件名里是**字面反斜杠**
+(`benchmark\cudaLLM\level1\189_squeeze.py`),是压平的 Windows 路径而非目录层级。
+loader 拼的是 `{task_assets_dir}/{op_name}.json`,对这种文件名**匹配不上** `[对比]`。
+所以要先把它摊成扁平目录、文件名为 `{op_name}.py` / `{op_name}.json`,
+再把 `TASK_ASSETS_DIR` 指过去。(注:`filtered189` 里的 189 是筛选后的条数;
+`189_squeeze` 只是恰好同名的算子,别混淆。)
+
+**3. `model_served` 要和 vime 的 vLLM 对齐。** 当前默认 `/home/docker/Qwen3.6-35B-A3B`,
+而 vime entrypoint 的 `HF_CKPT` 是 `/models/Qwen3.6-35B-A3B`(run 脚本里的默认值才是
+`/home/docker/...`)`[对比]`。vLLM 未显式指定 `served_model_name` 时以模型路径注册,
+**两者不一致会让 gateway 的请求被 vLLM 以未知模型拒掉** `[推断,未验证]`。
+起 run 后先 `curl <router>/v1/models` 看实际注册名,再回填这个 token。
+
+**4. 三个宿主路径要真实存在。** `asc_devkit_dir`(挂 volume)、数据集目录、
+以及模型权重。本机三个都缺 `[实测]`,但本机不是 polar 宿主,这条要在宿主上自查。
+
+**5. 镜像尚未构建。** `a3e9bc3e` 把 training 基座换成 py3.11 并改走域内镜像源,
+但本机 `docker images` 里没有任何 vime/ascendc 镜像 `[实测]`,该 Dockerfile
+**从未被构建验证过**。基座换版本是最容易在构建期炸的改动。
+
+**6. polar 侧的 `NO_PROXY` 注入是多余的。** `restart_polar_host.sh:4-7` 会把
+`http_proxy`/`https_proxy`/`HTTP_PROXY`/`HTTPS_PROXY` 全部 `unset` `[实测]`,
+比设 `NO_PROXY` 更彻底。`3f294644` 里那两行留着无害,但别以为是它在起作用。
+vime 侧(`ca0a8520`)不同 —— 那边没人 unset,豁免是真需要的。
