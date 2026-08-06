@@ -9,17 +9,20 @@
 #   POLAR_PROFILE=.../profile.t2a.yaml      新基座(21 skills,TileLang 单路径)
 #   POLAR_PROFILE=.../profile.ascendc.yaml  旧基座(11 skills,已实跑验证)
 # 改公共项时两份都要改(loader 不支持继承,与其余 6 个 profile 同样是整份复制)。
-# workflow=legacy(judge_command 驱动)、budget、npu_lease(0-3)、gateway、operator(timeout/max_turns)全部照 vime 不变。
-# Template: the __*_HOST__ tokens below are substituted by
+# workflow=legacy(judge_command 驱动)、budget、gateway、operator(timeout/max_turns)全部照 vime 不变。
+# npu_lease.pool 原为字面 0-3,上游后来改成 8-11;本分支改由 launcher 渲染(见 SZAI_INTEGRATION.md 第四节)。
+# Template: the double-underscore placeholders below are substituted by
 # launch_polar_and_guide.sh into /tmp/polar_profile_runtime.yaml at startup.
-# Ports and everything else stay as literal values here.
+# Defaults live in that script. Keep this comment free of the placeholder
+# pattern itself — the launcher's residual-placeholder check would trip on it.
+# Site values are never committed here — they'd conflict on every upstream rebase.
 service:
   bind_host: 0.0.0.0
-  rollout_url: http://__POLAR_HOST__:8180
-  gateway_url: http://__POLAR_HOST__:8200
-  sglang_router_url: http://__VIME_ROUTER_HOST__:8011
+  rollout_url: http://__POLAR_HOST__:__ROLLOUT_PORT__
+  gateway_url: http://__POLAR_HOST__:__GATEWAY_PORT__
+  sglang_router_url: http://__VIME_ROUTER_HOST__:__VLLM_ROUTER_PORT__
   inference_engine: vllm
-  model_served: /home/docker/Qwen3.6-35B-A3B
+  model_served: __MODEL_SERVED__
 
 paths:
   output_dir: output/ascend_operator
@@ -30,21 +33,22 @@ operator_runtime:
   backend: ascendc      # ← delta 5:prepare 走 input/{op}.py + --backend ascendc(triton 侧无此字段=默认 triton)
   # ← delta 6:算子同名 .json(NPUKernelBench 用例规格,get_input_groups() 要读)随 prepare 上传到 input/。
   #   {op}.py 走 vime task_source 内容寻址,.json 没有该通道 → 从数据集目录直传。triton 侧无此字段=不产生该动作。
-  task_assets_dir: /home/docker/datasets/op_tasks/op_assets_cudallm_filtered189/op_tasks
+  task_assets_dir: __TASK_ASSETS_DIR__
   # ← delta 11:asc-devkit(上游 init.sh Step 4 会 clone 的算子开发资料仓)。
   #   $ASC_DEVKIT_DIR 在 21 个 skill 文档里被引用 46 次,是出现最多的环境变量;
   #   ascendc-docs-search 整个 skill 就是查它。只读挂到 /opt/asc-devkit,不进 workdir 拷贝。
   #   钉 9.0.0 分支而非 init.sh 默认的 master:实测 API 名对本机 CANN 9.0.0 头文件的命中率
   #   9.0.0=95% / master=82%,master 独有的 548 个里 53% 本机没有,照着写会引入新的编译错误。
   #   路径映射:skill 写死 docs/zh/api,9.0.0 布局是 docs/api/context,已在仓内建相对软链。
-  asc_devkit_dir: /home/docker/asc-devkit-9.0.0
+  asc_devkit_dir: __ASC_DEVKIT_DIR__
   budget:
     generation_max: 10
     optimization_max: 4
     interval_seconds: 2
   npu_lease:
     enabled: true
-    pool: [8, 9, 10, 11]
+    # Polar host's own cards. Unrelated to vime's layout: different machine.
+    pool: __NPU_POOL__
     lock_dir: /dev/shm/npu-locks
 
 observer:
@@ -76,8 +80,8 @@ operator:
       #   禁止 npu-smi 这类 NPU 探针(多容器共享卡池,探测会干扰别人)。
       #   env.sh 只被固定入口 source,agent 自己的 shell 读不到 —— 不注入这里就必然
       #   落空到优先级 2。注入后永远命中第 1 级,降级路径不会被走到。
-      SOC_VERSION: "ascend910b1"
-      ASCENDC_SOC_VERSION: "ascend910b1"
+      SOC_VERSION: "__SOC_VERSION__"
+      ASCENDC_SOC_VERSION: "__SOC_VERSION__"
       ASC_DEVKIT_DIR: "/opt/asc-devkit"
       CLAUDE_CODE_MAX_CONTEXT_TOKENS: "262144"
 

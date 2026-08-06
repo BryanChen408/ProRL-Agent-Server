@@ -13,6 +13,20 @@ POLAR_REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd -P)"
 POLAR_VENV="${POLAR_VENV:-/mnt/model/corlorlight_models/mingchengzou/ProRL2/polar-venv}"
 POLAR_PROFILE_SRC="${POLAR_REPO}/deploy/ascend_operator/profile.t2a.yaml"
 POLAR_PROFILE_RUNTIME=/tmp/polar_profile_runtime.yaml
+
+# ─────── 站点值（profile 里只有 token，实际值在这里）──────────────────────────
+# Ports must match vime's start_vime_in_platform.sh: 8080 rollout, 8001 router.
+ROLLOUT_PORT="${ROLLOUT_PORT:-8080}"
+GATEWAY_PORT="${GATEWAY_PORT:-8200}"
+VLLM_ROUTER_PORT="${VLLM_ROUTER_PORT:-8001}"
+# A3 = ascend910_9391, A2 = ascend910b1. Kernels compile against this.
+SOC_VERSION="${SOC_VERSION:-ascend910_9391}"
+# Polar host's own cards, not vime's.
+NPU_POOL="${NPU_POOL:-[0, 1, 2, 3]}"
+# Paths as seen inside the sandbox container.
+MODEL_SERVED="${MODEL_SERVED:-/home/docker/Qwen3.6-35B-A3B}"
+TASK_ASSETS_DIR="${TASK_ASSETS_DIR:-/home/docker/datasets/op_tasks/op_assets_cudallm_filtered189/op_tasks}"
+ASC_DEVKIT_DIR="${ASC_DEVKIT_DIR:-/home/docker/asc-devkit-9.0.0}"
 # vime rollout/router 节点（worker）IP —— Polar 的推理端点主机部分。
 # master pod 在启动时把 worker IP 写到这个共享存储文件。
 VIME_ROUTER_IP_FILE="/mnt/model/corlorlight_models/mingchengzou/ProRL2/scratch/vime_router_ip.txt"
@@ -80,10 +94,18 @@ fi
 echo ""
 
 # ─────── 动态 patch profile ──────────────────────────────────────────────────
-# Substitute host tokens only; ports stay wherever the profile declares them.
+# Every site value the profile needs is substituted here.
 sed \
   -e "s|__POLAR_HOST__|${HOST_IP}|g" \
   -e "s|__VIME_ROUTER_HOST__|${VIME_NODE_IP}|g" \
+  -e "s|__ROLLOUT_PORT__|${ROLLOUT_PORT}|g" \
+  -e "s|__GATEWAY_PORT__|${GATEWAY_PORT}|g" \
+  -e "s|__VLLM_ROUTER_PORT__|${VLLM_ROUTER_PORT}|g" \
+  -e "s|__SOC_VERSION__|${SOC_VERSION}|g" \
+  -e "s|__NPU_POOL__|${NPU_POOL}|g" \
+  -e "s|__MODEL_SERVED__|${MODEL_SERVED}|g" \
+  -e "s|__TASK_ASSETS_DIR__|${TASK_ASSETS_DIR}|g" \
+  -e "s|__ASC_DEVKIT_DIR__|${ASC_DEVKIT_DIR}|g" \
   "${POLAR_PROFILE_SRC}" > "${POLAR_PROFILE_RUNTIME}"
 
 # Unsubstituted tokens would reach Polar as literal hostnames.
@@ -102,6 +124,8 @@ echo "  [启动] Polar"
 echo "         rollout : ${ROLLOUT_URL}"
 echo "         gateway : ${GATEWAY_URL}"
 echo "         推理端点: ${ROUTER_URL}"
+# Wrong SOC compiles silently against the other chip; show it before launch.
+echo "         SOC     : ${SOC_VERSION}   卡池: ${NPU_POOL}"
 echo ""
 
 source "${POLAR_VENV}/bin/activate"
