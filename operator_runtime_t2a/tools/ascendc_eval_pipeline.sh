@@ -172,6 +172,17 @@ load_failure = bool(first_exc) and any(k in first_exc for k in LOAD_EXC)
 if "_OpNamespace" in first_exc or "has no attribute" in first_exc:
     load_failure = True
 
+# kernel 崩溃/运行期错误:vector core exception / ACL 5070xx / segfault 等。
+# 这是 A类(代码错误),不是 D类(精度) —— 崩溃时拿精度手册调数值永远修不好,
+# 还会把 D 类 12 次预算烧在死路上(20260805_182741 run 里 90 个 session 踩中)。
+try:
+    _log_low = open(sys.argv[2], encoding="utf-8", errors="replace").read().lower()
+except Exception:
+    _log_low = ""
+crash_failure = bool(re.search(
+    r"vector core exception|vector core timeout|core dumped|segmentation fault|"
+    r"acl stream synchronize failed|error code: ?5070\d{2}", _log_low))
+
 INFRA = {"npu_runtime_unavailable", "input_load_failed", "judge_container_failed",
          "judge_metrics_unreadable", "judge_no_metrics", "task_missing",
          "submission_fetch_failed"}
@@ -179,6 +190,8 @@ if et in INFRA:
     label = "INFRA-环境故障(不是你的代码问题,不要迭代修复)"
 elif et in ("op_not_registered", "ascendc_load_failed"):
     label = "A类-算子未注册/加载失败(不是精度问题:改 setup.py 打包与 import,别调数值)"
+elif et == "correctness_failed" and crash_failure:
+    label = "A类-kernel崩溃/运行期错误(不是精度问题:查越界/非法访存/核间划分/对齐,别调数值)"
 elif et == "correctness_failed" and load_failure:
     label = "A类-算子未注册/加载失败(对拍未比较任何元素,不是精度问题:改 setup.py 打包与 import)"
 elif et == "correctness_failed":
