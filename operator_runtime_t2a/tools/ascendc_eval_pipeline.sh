@@ -81,7 +81,7 @@ write_metrics() {  # ast_ok corr_ok success fw impl speedup error [完整日志�
   AST_OK="$ast_ok" CORR_OK="$corr_ok" SUCCESS="$success" FW="$fw" IMPL="$impl" SP="$sp" \
   FORCE_TYPE="$force_type" \
   ERR_FILE="$OUT_DIR/metrics_error.log" OUT_DIR="$OUT_DIR" OP="$OP_NAME" python3 - <<'PY'
-import json, os, hashlib
+import json, os, hashlib, re
 from pathlib import Path
 out = Path(os.environ["OUT_DIR"])
 def b(x): return str(x).lower() in ("1","true","yes")
@@ -102,6 +102,14 @@ def classify(t):
     if "ast退化" in l or "ast_check" in l or "ast check" in l or "退化" in t or "degrad" in l:
         return "ast_check_failed"
     if "cmake" in l or "make error" in l or "ccec" in l or "bisheng" in l or "编译" in t or "compil" in l: return "ascendc_compile_failed"
+    # kernel 崩溃/超时(编译过、对拍阶段把核跑崩/跑死):是 A类不是精度 —— 独立
+    # error_type,别和真精度错(correctness_failed)混进同一个 reward 档。必须在
+    # 对拍分支之前 —— 崩溃日志里也带「对拍失败/result: fail」字样。
+    if "vector core exception" in l or "vector core timeout" in l \
+        or "segmentation fault" in l or "core dumped" in l \
+        or "acl stream synchronize failed" in l \
+        or re.search(r"error code: ?5070\d{2}", l):
+        return "ascendc_run_crashed"
     if "对拍" in t or "mare" in l or "mere" in l or "correctness" in l or "result: fail" in l: return "correctness_failed"
     if "speedup" in l or "performance" in l or "性能" in t: return "benchmark_failed"
     return "unknown"
@@ -190,7 +198,10 @@ if et in INFRA:
     label = "INFRA-环境故障(不是你的代码问题,不要迭代修复)"
 elif et in ("op_not_registered", "ascendc_load_failed"):
     label = "A类-算子未注册/加载失败(不是精度问题:改 setup.py 打包与 import,别调数值)"
+elif et == "ascendc_run_crashed":
+    label = "A类-kernel崩溃/运行期错误(不是精度问题:查越界/非法访存/核间划分/对齐,别调数值)"
 elif et == "correctness_failed" and crash_failure:
+    # 兜底:error_type 没被 classify 拆出 ascendc_run_crashed 时
     label = "A类-kernel崩溃/运行期错误(不是精度问题:查越界/非法访存/核间划分/对齐,别调数值)"
 elif et == "correctness_failed" and load_failure:
     label = "A类-算子未注册/加载失败(对拍未比较任何元素,不是精度问题:改 setup.py 打包与 import)"

@@ -395,7 +395,7 @@ def test_cannbot_judge_verify_failure_does_not_run_benchmark():
             task_id="t",
         ))
 
-    assert res.outcome_reward == 0.3
+    assert res.outcome_reward == 0.35   # 六档阶梯:跑完但精度错(correctness_failed)→ 0.35
     assert res.metadata["submission_used"] == "output/generated_code.py"
     assert len(judge.execs) == 2
     assert all("benchmark.py" not in command for command in judge.execs)

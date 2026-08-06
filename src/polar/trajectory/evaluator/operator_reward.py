@@ -69,15 +69,32 @@ def classify_infra_error_text(text: str | None) -> str | None:
 def reward_from_metrics(metrics: dict) -> float:
     """Authoritative ladder (mirrors openhands_agent._reward_from_metrics).
 
-    not success:  correctness_ok -> 0.4 | ast_check_ok -> 0.3 | else -> 0.2
+    not success:  correctness_ok -> 0.4
+                  ast_check_ok  -> 按 error_type 细分「编译→能跑→跑完」的进度:
+                      ascendc_compile_failed                 -> 0.25  (AST 过、编译没过)
+                      op_not_registered / ascendc_run_crashed -> 0.3   (编译过但没能有效跑完)
+                      correctness_failed                     -> 0.35  (跑完但精度错,真 D类)
+                      其他(阶段挂但类型未知)                 -> 0.3   (兜底中间档)
+                  else          -> 0.2  (AST 没过 / 没调真 op)
     success:      0.75 + 0.25*tanh(ln speedup)   # 0.5(<-0x) .. 0.75(1x hold) .. ->1.0(soft, no cap)
+
+    0.3 档的拆分动机:原 0.3 把「编译挂 / 注册挂 / 崩溃 / 精度错」混装,GRPO 组内方差=0
+    的 dead group 来源。拆成 0.25/0.3/0.35 后,中档题组内即可拉开;且崩溃(A类)不再和
+    精度错(D类)同分,与 fail_hint 的分类口径一致。
     """
     if not bool(metrics.get("success", False)):
         if bool(metrics.get("correctness_ok", False)):
             return 0.4
-        if bool(metrics.get("ast_check_ok", False)):
+        if not bool(metrics.get("ast_check_ok", False)):
+            return 0.2
+        et = str(metrics.get("error_type") or "")
+        if et == "ascendc_compile_failed":
+            return 0.25
+        if et in ("op_not_registered", "ascendc_run_crashed"):
             return 0.3
-        return 0.2
+        if et == "correctness_failed":
+            return 0.35
+        return 0.3
     try:
         speedup = float((metrics.get("perf_data") or {}).get("speedup_vs_torch", 1.0))
     except (TypeError, ValueError):
@@ -127,8 +144,13 @@ def judge_outcome(metrics: dict | None) -> dict:
 
 def test_ladder_not_success():
     assert reward_from_metrics({"success": False, "correctness_ok": True, "ast_check_ok": True}) == 0.4
-    assert reward_from_metrics({"success": False, "correctness_ok": False, "ast_check_ok": True}) == 0.3
     assert reward_from_metrics({"success": False, "correctness_ok": False, "ast_check_ok": False}) == 0.2
+    # ast 过后的 error_type 细分(六档阶梯)
+    assert reward_from_metrics({"success": False, "ast_check_ok": True, "error_type": "ascendc_compile_failed"}) == 0.25
+    assert reward_from_metrics({"success": False, "ast_check_ok": True, "error_type": "op_not_registered"}) == 0.3
+    assert reward_from_metrics({"success": False, "ast_check_ok": True, "error_type": "ascendc_run_crashed"}) == 0.3
+    assert reward_from_metrics({"success": False, "ast_check_ok": True, "error_type": "correctness_failed"}) == 0.35
+    assert reward_from_metrics({"success": False, "ast_check_ok": True, "error_type": None}) == 0.3  # 未知类型兜底中间档
 
 
 def test_ladder_success_speedup():
