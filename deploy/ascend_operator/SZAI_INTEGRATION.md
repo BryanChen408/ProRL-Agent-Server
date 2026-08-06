@@ -1,7 +1,7 @@
 # szai 拓扑集成契约(分支 `ascendc-szai`)
 
 分支:`ascendc-szai`,从 `feat/ascendc-rl-t2a` @ `2edd5caa` 拉出。
-对端:vime 仓 `feature/swe-tasks`(5 个提交未推)。
+对端:vime 仓 `feature/swe-tasks`(7 个提交未推,见第六节)。
 
 这份文档说明这套拓扑下 vime 与 polar 之间的接口、为什么需要运行期渲染、
 站点值放哪里,以及为什么没有合并同事在 `luoss-lzc` 上的那套方案。
@@ -85,23 +85,32 @@ profile.t2a.yaml (跟踪,含 __TOKEN__)
 理由:把站点值提交成字面值,每次 rebase 上游都要手工解一遍同样的冲突。
 反正渲染步骤本来就必需,扩展 token 覆盖面是零额外代价。
 
-| profile 里的 token | 性质 | 默认值来源 |
+十个 token,默认值全在 `launch_polar_and_guide.sh` 顶部,都可用同名环境变量覆盖:
+
+| profile 里的 token | 性质 | 默认值 |
 |---|---|---|
-| `__POLAR_HOST__` | 本机 IP | launcher 探测 |
-| `__VIME_ROUTER_HOST__` | 训练侧动态 IP | 交会文件 |
-| `__ROLLOUT_PORT__` / `__GATEWAY_PORT__` | 本地约定 | launcher,与 vime 侧同源 |
-| `__SOC_VERSION__` | 宿主是 A3 还是 A2 | launcher(A3=`ascend910_9391`,A2=`ascend910b1`) |
-| `__NPU_POOL__` | polar 宿主自己的卡 | launcher |
-| `__MODEL_SERVED__` / `__TASK_ASSETS_DIR__` / `__ASC_DEVKIT_DIR__` | 本地挂载路径 | launcher |
+| `__POLAR_HOST__` | 本机 IP | `hostname -I` 首个地址 |
+| `__VIME_ROUTER_HOST__` | 训练侧动态 IP | 交会文件(可用 `VIME_NODE_IP` 绕过) |
+| `__ROLLOUT_PORT__` | polar rollout | `8080` |
+| `__GATEWAY_PORT__` | polar gateway | `8200` |
+| `__VLLM_ROUTER_PORT__` | 训练侧 router | `8001` |
+| `__SOC_VERSION__` | 宿主是 A3 还是 A2 | `ascend910_9391`(A3;A2 填 `ascend910b1`) |
+| `__NPU_POOL__` | polar 宿主自己的卡 | `[0, 1, 2, 3]` |
+| `__MODEL_SERVED__` | 沙箱容器内路径 | `/home/docker/Qwen3.6-35B-A3B` |
+| `__TASK_ASSETS_DIR__` | 沙箱容器内路径 | 见第七节遗留待定 |
+| `__ASC_DEVKIT_DIR__` | 沙箱容器内路径 | `/home/docker/asc-devkit-9.0.0` |
 
 端口只在 profile 声明一份,launcher 显示的端口从渲染产物里读回来,不重复写死。
 
-### 已知的两处不一致(待随 token 化一并修掉)
+写这份模板的注释时**不要在注释里出现双下划线占位符样式的字面词** —— launcher 的残留
+占位符守卫是纯 `grep '__[A-Z_]*__'`,注释里的示例词也会被判成未替换而直接 `exit 1` `[实测]`。
 
-1. vime 的 `POLAR_ROLLOUT_URL` 等 `:8080/health`,而 profile 声明 `8180` `[对比]`
-   —— 不对齐会一直挂在那 600 秒。两侧端口要同源。
-2. `profile.t2a.yaml` 头部注释写"npu_lease(0-3)全部照 vime 不变",实际值是
-   `[8, 9, 10, 11]` `[对比]` —— 注释和值自相矛盾,token 化时这条注释要跟着改。
+### 已修掉的两处不一致(`fc32a1cc`)
+
+1. 端口错位,方向和最初判断的相反:vime 用 `8080`/`8001`,与上游 `restart_polar_host.sh`
+   的默认值一致;profile 的 `8180`/`8011` 才是离群值 `[对比]`。已把 polar 对齐到 vime。
+2. `profile.t2a.yaml` 头部注释写"npu_lease(0-3)全部照 vime 不变",实际值却是
+   `[8, 9, 10, 11]` `[对比]`。注释已改成说明上游变更史 + 现由 launcher 渲染。
 
 ---
 
@@ -125,12 +134,16 @@ polar 仓 `luoss-lzc` @ `f2c1d3e7`(1728 行新增,35 文件,**只在本地未推
    profile/topology 分离 + 159 行 `restart_polar_host.sh`;他是在 `f0e8343a`
    那个不带 ascend_operator 的基线上从零搭的平行实现 `[对比]`。合过来只会打架。
 
-**要取的两条:**
+**取了的两条(均已落):**
 
 1. **`no_proxy` / `NO_PROXY` 注入对端 IP**。环境里存在 `http_proxy` 时,
-   等 `/health` 的 curl 会走代理,失败得毫无线索 `[推断]`。这是本方案的真实缺口。
-2. **交会文件原子写**。当前是 `echo "$IP" > file`,共享盘上对端可能读到空文件或半截内容
-   `[推断]`。换 tempfile + `mv`。
+   等 `/health` 的 curl 和 Ray 流量会被送去代理,失败得毫无线索 `[推断]`。
+   polar 侧 `3f294644` 本来就有;缺的是 vime 侧,已由 `ca0a8520` 补上
+   (豁免 Ray 对端 + Polar 宿主,既有 `no_proxy` 保留追加)。
+2. **共享盘 IP 发布改原子写**。原先是 `echo "$IP" > file`,对端在另一台机器上轮询,
+   可能读到空文件或半截内容 `[推断]`。`7eaa30f4` 加了 `publish_atomic`
+   (同目录 tmp + `mv` rename)。**两处**都有这个暴露:router IP 文件和交会点
+   `${RDV_DIR}/${ROLE}_ip`,后者原先连写失败检查都没有,一并补上。
 
 **不取:** 他的时间戳容差带(`node_registry.py:197` 的 `age < -300`)。
 那是给"写方不受自己控制"准备的;本方案两侧写方都是自己的脚本,判存在性更硬。
@@ -139,25 +152,43 @@ polar 仓 `luoss-lzc` @ `f2c1d3e7`(1728 行新增,35 文件,**只在本地未推
 记录了这批机器上 NPU 门禁、`/dev/shm`(需 1024Gi 内存型 `emptyDir`)、bind 挂载的
 真实踩坑,碰到权限问题时值得翻。
 
-## 六、落地顺序
+## 六、提交清单
 
-在 `ascendc-szai` @ `3f294644` 上叠三个提交:
+polar `ascendc-szai`(从 `feat/ascendc-rl-t2a` @ `2edd5caa` 拉出):
 
-1. profile 四项站点值 token 化 + launcher 补默认值(含 A3 `ascend910_9391`、卡池、路径、端口)
-2. launcher 注入 `no_proxy` / `NO_PROXY`
-3. vime `start_vime_in_platform.sh`:交会文件改原子写,`POLAR_ROLLOUT_URL` 端口与 polar 侧对齐
+| 提交 | 内容 |
+|---|---|
+| `3f294644` | profile 主机部分改占位符 + 新增运行期渲染脚本(含 `NO_PROXY` 注入) |
+| `b0d6a2dd` | 本文档 |
+| `fc32a1cc` | 站点值全部 token 化,实际值收进 launcher 默认值;端口对齐 vime |
 
-做完后 `/tmp/polar-t2a-worktree.patch`(基线 `4f0e1a4e` 已死)即可丢弃 —— 它的内容
-以 launcher 默认值的形式重新落地。
+vime `feature/swe-tasks`:
+
+| 提交 | 内容 |
+|---|---|
+| `a3e9bc3e` | training 镜像:基座换 py3.11 + 域内镜像源 |
+| `7eb809a9` | run 脚本:polar 源码路径改共享盘 + 两个运行期开关 |
+| `18a7dff6` | resource layout:单机 8 卡切分 + single_agent 填实际训练机 IP |
+| `0e75acc4` | entrypoint:router IP 文件防陈旧 + 写失败不再静默 |
+| `3e716054` | resource layout:占位符统一 `__NODE_IP__` + entrypoint 兜住未替换 |
+| `ca0a8520` | entrypoint:Ray 对端和 Polar 宿主加入代理豁免 |
+| `7eaa30f4` | entrypoint:两处共享盘 IP 发布改原子写 |
+
+`/tmp/polar-t2a-worktree.patch`(基线 `4f0e1a4e` 已死)可以丢弃 —— 它的内容
+已以 launcher 默认值的形式重新落地。
+
+未纳入的两项,都是有意的:`RUNBOOK.md`(共享盘副本与本地的唯一差异是
+`Do`/`ckerRuntime` 断行损坏,本地那份本来是对的)、`start_polar_on_host.sh`
+(被 `launch_polar_and_guide.sh` 取代的早期迭代)。
 
 ## 七、当前状态
 
 | 项 | 状态 |
 |---|---|
-| vime 5 个提交 | 已落 `feature/swe-tasks`,**未 push** |
-| polar `3f294644` | 已落 `ascendc-szai`,**未 push** |
-| 上面三个提交 | 未做 |
-| 真实 run | 从未跑通 |
+| polar `ascendc-szai` | 3 个提交,**未 push** |
+| vime `feature/swe-tasks` | ahead 10,其中 7 个是本方案的,**未 push** |
+| 验证 | 全部静态:`bash -n`、渲染模拟、YAML 解析、helper 单元验证 |
+| 真实 run | **从未跑通** |
 
 推送注意:`ascendc-szai` 跟踪的是 `origin/feat/ascendc-rl-t2a`,裸 `git push` 会推错分支,
 要 `git push -u origin ascendc-szai`。
