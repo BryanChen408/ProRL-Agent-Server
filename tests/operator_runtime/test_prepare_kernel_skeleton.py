@@ -1,0 +1,328 @@
+"""prepare_operator_workdir 骨架签名生成的单元测试。
+
+覆盖签名提取/生成的关键特征(数据来自 cudallm189 / KernelBench / NPUKernelBench 三个
+数据集的实测分布):单 tensor、init 标量、双 tensor、tuple 返回、Optional、tensor_list、
+kwonly、*args 降级、不可解析 init 值降级、已存在不覆盖、解析失败回退模板。
+"""
+from __future__ import annotations
+
+import importlib.util
+import inspect
+import sys
+from pathlib import Path
+
+import pytest
+
+REPO = Path(__file__).resolve().parents[2]
+CANONICAL = REPO / "operator_runtime_t2a"
+
+spec = importlib.util.spec_from_file_location(
+    "prepare_operator_workdir", CANONICAL / "runtime" / "prepare_operator_workdir.py"
+)
+prep = importlib.util.module_from_spec(spec)
+sys.modules["prepare_operator_workdir"] = prep  # dataclass 解析注解时要查 sys.modules
+spec.loader.exec_module(prep)
+
+
+def _write_model(tmp_path: Path, src: str, case: dict | None = None) -> tuple[Path, Path]:
+    import json as _json
+    task = tmp_path / "input" / "my_op.py"
+    task.parent.mkdir(parents=True, exist_ok=True)
+    task.write_text(src, encoding="utf-8")
+    json_path = None
+    if case is not None:
+        json_path = tmp_path / "input" / "my_op.json"
+        json_path.write_text(_json.dumps(case) + "\n", encoding="utf-8")
+    return task, json_path
+
+
+def _instantiate(tmp_path: Path, task: Path, json_path, op: str = "my_op"):
+    workdir = tmp_path / "wd"
+    workdir.mkdir(exist_ok=True)
+    prep._instantiate_kernel_skeleton(CANONICAL, workdir, op, task, json_path)
+    return workdir / op
+
+
+def _construct(model_new_src: str, *init_args, **init_kwargs):
+    """执行生成的 model_new 源码并构造 ModelNew(校验 harness 契约的构造侧)。"""
+    import torch  # noqa: F401
+    ns: dict = {"__file__": "/tmp/fake_op/model_new_ascendc.py"}
+    exec(compile(model_new_src, "<model_new>", "exec"), ns)
+    return ns["ModelNew"](*init_args, **init_kwargs)
+
+
+# ---------------------------------------------------------------- fixtures
+
+SINGLE = """
+import torch
+class Model(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+    def forward(self, x):
+        return torch.abs(x)
+def get_inputs():
+    return [torch.randn(4)]
+def get_init_inputs():
+    return []
+"""
+
+INIT_INT = """
+import torch
+class Model(torch.nn.Module):
+    def __init__(self, subtract_value):
+        super().__init__()
+        self.subtract_value = subtract_value
+    def forward(self, x):
+        return torch.subtract(x, self.subtract_value)
+def get_inputs():
+    return [torch.tensor([1, 2])]
+def get_init_inputs():
+    return [5]
+"""
+
+INIT_FLOAT = """
+import torch
+import torch.nn as nn
+class Model(nn.Module):
+    def __init__(self, negative_slope):
+        super().__init__()
+        self.act = nn.LeakyReLU(negative_slope)
+    def forward(self, x):
+        return self.act(torch.sqrt(x))
+negative_slope = 0.2
+def get_init_inputs():
+    return [negative_slope]
+"""
+
+TWO_TENSOR = """
+import torch
+class Model(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+    def forward(self, x, y):
+        return torch.mul(x, y)
+def get_inputs():
+    return [torch.randn(4), torch.randn(4)]
+"""
+
+TUPLE_RET = """
+import torch
+class Model(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+    def forward(self, x):
+        return torch.ne(x, 0), torch.isinf(x)
+def get_inputs():
+    return [torch.randn(4)]
+"""
+
+LAYERNORM_LIKE = """
+import torch
+class Model(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+    def forward(self, x: torch.Tensor, normalized_shape: list,
+                weight: torch.Tensor = None, bias: torch.Tensor = None) -> torch.Tensor:
+        return torch.nn.functional.layer_norm(x, normalized_shape, weight, bias)
+"""
+
+LAYERNORM_CASE = {"inputs": [
+    {"name": "x", "type": "tensor", "required": True, "dtype": "float32"},
+    {"name": "normalized_shape", "type": "attr", "required": True, "dtype": "int", "value": [4]},
+    {"name": "weight", "type": "tensor", "required": False, "dtype": "float32"},
+    {"name": "bias", "type": "tensor", "required": False, "dtype": "float32"},
+]}
+
+CAT_LIKE = """
+import torch
+class Model(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+    def forward(self, tensors: list, dim: int = 0):
+        return torch.cat(tensors, dim=dim)
+"""
+
+CAT_CASE = {"inputs": [
+    {"name": "tensors", "type": "tensor_list", "required": True, "dtype": "float32"},
+    {"name": "dim", "type": "attr", "required": False, "dtype": "int", "value": 0},
+]}
+
+KWONLY = """
+import torch
+class Model(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+    def forward(self, x, *, keep_prob=1.0, sparse_mode=0):
+        return torch.dropout(x, 1 - keep_prob, True)
+"""
+
+VARARG_INIT = """
+import torch
+class Model(torch.nn.Module):
+    def __init__(self, *args, **kwargs):
+        super().__init__()
+    def forward(self, x):
+        return torch.abs(x)
+def get_inputs():
+    return [torch.randn(4)]
+"""
+
+UNPARSABLE_INIT = """
+import torch
+class Model(torch.nn.Module):
+    def __init__(self, dim_size):
+        super().__init__()
+        self.dim_size = dim_size
+    def forward(self, x):
+        return torch.sub(x, self.dim_size)
+def get_inputs():
+    return [torch.randn(4, 8)]
+def get_init_inputs():
+    return [get_inputs()[0].shape[1]]
+"""
+
+
+# ---------------------------------------------------------------- tests
+
+def test_single_tensor_no_init(tmp_path):
+    task, js = _write_model(tmp_path, SINGLE)
+    out = _instantiate(tmp_path, task, js)
+    reg = (out / "kernel" / "register.cpp").read_text()
+    assert 'm.def("my_op(Tensor x) -> Tensor")' in reg
+    mn = (out / "model_new_ascendc.py").read_text()
+    model = _construct(mn)                      # ModelNew() 可构造
+    assert list(inspect.signature(model.forward).parameters) == ["x"]
+    assert "torch.ops.npu.my_op(x)" in mn
+    host = (out / "kernel" / "op_host" / "my_op.cpp").read_text()
+    assert "at::Tensor my_op(const at::Tensor &x)" in host
+
+
+def test_init_scalar_int(tmp_path):
+    task, js = _write_model(tmp_path, INIT_INT)
+    out = _instantiate(tmp_path, task, js)
+    reg = (out / "kernel" / "register.cpp").read_text()
+    assert 'm.def("my_op(Tensor x, int subtract_value) -> Tensor")' in reg
+    mn = (out / "model_new_ascendc.py").read_text()
+    model = _construct(mn, 5)                   # cls(*get_init_inputs()) 契约
+    assert model.subtract_value == 5
+    assert "torch.ops.npu.my_op(x, self.subtract_value)" in mn
+    with pytest.raises(TypeError):              # 与 Model 一致:缺参要报错
+        _construct(mn)
+
+
+def test_init_float_from_module_const(tmp_path):
+    task, js = _write_model(tmp_path, INIT_FLOAT)
+    sig = prep._extract_op_signature(task, js)
+    assert sig.init[0].kind == "float"          # 模块常量 negative_slope=0.2 被解析
+    out = _instantiate(tmp_path, task, js)
+    reg = (out / "kernel" / "register.cpp").read_text()
+    assert "float negative_slope" in reg
+    kern = (out / "kernel" / "op_kernel" / "my_op_kernel.cpp").read_text()
+    assert "float negative_slope" in kern       # 标量接进 kernel 入口
+
+
+def test_two_tensor_forward(tmp_path):
+    task, js = _write_model(tmp_path, TWO_TENSOR)
+    out = _instantiate(tmp_path, task, js)
+    reg = (out / "kernel" / "register.cpp").read_text()
+    assert 'm.def("my_op(Tensor x, Tensor y) -> Tensor")' in reg
+    kern = (out / "kernel" / "op_kernel" / "my_op_kernel.cpp").read_text()
+    # kernel 内部按位置合成命名(in0/in1):输入叫 y 也不能撞输出 y/成员 yGm
+    gsig = next(l for l in kern.splitlines() if "GM_ADDR in0" in l)   # 入口签名行
+    assert gsig.count("GM_ADDR y") == 1 and "GM_ADDR in1" in gsig     # 输出唯一、双输入俱在
+    assert kern.count("in0Gm;") == 1 and kern.count("in1Gm;") == 1 and kern.count("yGm;") == 1
+    assert "inQueue0" in kern and "inQueue1" in kern     # 双输入各建 queue
+    host = (out / "kernel" / "op_host" / "my_op.cpp").read_text()
+    assert "x, y, _output" in host                       # EXEC_KERNEL_CMD 双输入都接
+
+
+def test_tuple_return(tmp_path):
+    task, js = _write_model(tmp_path, TUPLE_RET)
+    out = _instantiate(tmp_path, task, js)
+    reg = (out / "kernel" / "register.cpp").read_text()
+    assert "-> (Tensor, Tensor)" in reg
+    ops_h = (out / "kernel" / "ops.h").read_text()
+    assert "std::tuple<at::Tensor, at::Tensor>" in ops_h
+
+
+def test_optional_tensor_from_json(tmp_path):
+    task, js = _write_model(tmp_path, LAYERNORM_LIKE, LAYERNORM_CASE)
+    sig = prep._extract_op_signature(task, js)
+    kinds = {p.name: p.kind for p in sig.fwd}
+    assert kinds["x"] == "tensor"
+    assert kinds["normalized_shape"] == "int[]"
+    assert kinds["weight"] == "tensor?" and kinds["bias"] == "tensor?"
+    out = _instantiate(tmp_path, task, js)
+    reg = (out / "kernel" / "register.cpp").read_text()
+    assert "Tensor? weight" in reg
+    mn = (out / "model_new_ascendc.py").read_text()
+    model = _construct(mn)
+    sig_fwd = inspect.signature(model.forward)
+    assert list(sig_fwd.parameters)[:2] == ["x", "normalized_shape"]
+
+
+def test_tensor_list_from_json(tmp_path):
+    task, js = _write_model(tmp_path, CAT_LIKE, CAT_CASE)
+    sig = prep._extract_op_signature(task, js)
+    kinds = {p.name: p.kind for p in sig.fwd}
+    assert kinds["tensors"] == "tensor[]"
+    assert kinds["dim"] == "int"
+    out = _instantiate(tmp_path, task, js)
+    reg = (out / "kernel" / "register.cpp").read_text()
+    assert "Tensor[] tensors" in reg
+
+
+def test_kwonly_mirrored_with_defaults(tmp_path):
+    task, js = _write_model(tmp_path, KWONLY)
+    out = _instantiate(tmp_path, task, js)
+    reg = (out / "kernel" / "register.cpp").read_text()
+    assert "float keep_prob=1.0" in reg and "int sparse_mode=0" in reg
+    mn = (out / "model_new_ascendc.py").read_text()
+    model = _construct(mn)
+    sig_fwd = inspect.signature(model.forward)
+    assert sig_fwd.parameters["keep_prob"].kind == inspect.Parameter.KEYWORD_ONLY
+    assert sig_fwd.parameters["keep_prob"].default == 1.0
+    assert "keep_prob=keep_prob" in mn
+
+
+def test_vararg_init_loose_fallback(tmp_path):
+    task, js = _write_model(tmp_path, VARARG_INIT)
+    sig = prep._extract_op_signature(task, js)
+    assert sig.init_storage == "args_kwargs"
+    assert sig.notes                                 # 有降级说明
+    out = _instantiate(tmp_path, task, js)
+    mn = (out / "model_new_ascendc.py").read_text()
+    model = _construct(mn, 1, 2, k=3)                # 任意参数都能构造(放宽兜底)
+    assert model._init_args == (1, 2) and model._init_kwargs == {"k": 3}
+    assert "TODO" in mn
+
+
+def test_unparseable_init_value_excluded_with_todo(tmp_path):
+    task, js = _write_model(tmp_path, UNPARSABLE_INIT)
+    sig = prep._extract_op_signature(task, js)
+    assert sig.init[0].in_op is False                # 不进 op 签名
+    assert any("dim_size" in n for n in sig.notes)
+    out = _instantiate(tmp_path, task, js)
+    reg = (out / "kernel" / "register.cpp").read_text()
+    assert "dim_size" not in reg                     # 签名里没有它
+    mn = (out / "model_new_ascendc.py").read_text()
+    model = _construct(mn, 8)                        # 但构造仍满足 harness 契约
+    assert model.dim_size == 8
+    assert "TODO" in mn
+
+
+def test_existing_files_not_overwritten(tmp_path):
+    task, js = _write_model(tmp_path, INIT_INT)
+    out = _instantiate(tmp_path, task, js)
+    marker = "# agent 手改的内容"
+    (out / "model_new_ascendc.py").write_text(marker, encoding="utf-8")
+    prep._instantiate_kernel_skeleton(CANONICAL, tmp_path / "wd", "my_op", task, js)
+    assert (out / "model_new_ascendc.py").read_text() == marker
+
+
+def test_extraction_failure_falls_back_to_template(tmp_path):
+    task, js = _write_model(tmp_path, "import torch\n# 没有 Model 类\n")
+    out = _instantiate(tmp_path, task, js)
+    mn = (out / "model_new_ascendc.py").read_text()
+    assert "class ModelNew" in mn                    # 模板兜底(单 tensor 形态)
+    assert "def forward(self, x: torch.Tensor)" in mn

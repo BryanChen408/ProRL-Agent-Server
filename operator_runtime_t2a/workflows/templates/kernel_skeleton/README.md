@@ -1,5 +1,13 @@
 # AscendC 算子打包骨架（自包含，可复制即用)
 
+> **注意（签名生成化之后）**：骨架目录里的 `model_new_ascendc.py` / `register.cpp` /
+> `ops.h` / `op_host/{op_name}.cpp` / `op_kernel/{op_name}_kernel.cpp` 这 5 个**签名件**
+> 是「单 tensor 算子」的示例。prepare 铺骨架时**不会直接拷贝它们**，而是按本题
+> model.py 的 `__init__`/`forward` 签名（参数个数/类型/默认值/可选位/返回 arity）
+> **逐题生成**；只有解析整体失败时才回退拷贝这里的单 tensor 版本。
+> 所以这里的内容只作参考样例，实际工程以 workdir 里生成的为准。
+> 机制件(CMakeLists.txt / setup.py / utils/)仍是原样静态拷贝。
+
 这份骨架是**和判分链路（`ascendc_eval_pipeline.sh` + `build_ascendc.py` +
 `verification_ascendc.py`）实测兼容的打包契约**，结构取自已跑通的
 `archive_tasks/rms_norm` 与 output1 的 67 个算子。把它整份复制成你的算子目录，
