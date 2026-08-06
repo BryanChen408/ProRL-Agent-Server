@@ -102,15 +102,14 @@ def classify(t):
     if "ast退化" in l or "ast_check" in l or "ast check" in l or "退化" in t or "degrad" in l:
         return "ast_check_failed"
     if "cmake" in l or "make error" in l or "ccec" in l or "bisheng" in l or "编译" in t or "compil" in l: return "ascendc_compile_failed"
-    # kernel 崩溃/超时(编译过、对拍阶段把核跑崩/跑死):是 A类不是精度 —— 独立
-    # error_type,别和真精度错(correctness_failed)混进同一个 reward 档。必须在
-    # 对拍分支之前 —— 崩溃日志里也带「对拍失败/result: fail」字样。
-    if "vector core exception" in l or "vector core timeout" in l \
-        or "segmentation fault" in l or "core dumped" in l \
-        or "acl stream synchronize failed" in l \
-        or re.search(r"error code: ?5070\d{2}", l):
+    # 崩溃/异常 vs 真精度:不看错误文案(关键词白名单补不完),看「比较有没有跑完」。
+    # 对拍阶段失败且日志里有比较数值字段(max_abs_diff=/MERE=/matched_ratio=)→ 比较
+    # 跑完、数值不符 → 真精度错(D类);没有 → 比较没跑完(崩溃/超时/加载异常等),
+    # 与错误形态无关 —— 新报错不用补关键词,自动归入 ascendc_run_crashed(A类)。
+    if "对拍" in t or "mare" in l or "mere" in l or "correctness" in l or "result: fail" in l:
+        if re.search(r"(max_abs_diff|mere|matched_ratio)\s*=", l):
+            return "correctness_failed"
         return "ascendc_run_crashed"
-    if "对拍" in t or "mare" in l or "mere" in l or "correctness" in l or "result: fail" in l: return "correctness_failed"
     if "speedup" in l or "performance" in l or "性能" in t: return "benchmark_failed"
     return "unknown"
 perf = None
@@ -180,16 +179,14 @@ load_failure = bool(first_exc) and any(k in first_exc for k in LOAD_EXC)
 if "_OpNamespace" in first_exc or "has no attribute" in first_exc:
     load_failure = True
 
-# kernel 崩溃/运行期错误:vector core exception / ACL 5070xx / segfault 等。
-# 这是 A类(代码错误),不是 D类(精度) —— 崩溃时拿精度手册调数值永远修不好,
-# 还会把 D 类 12 次预算烧在死路上(20260805_182741 run 里 90 个 session 踩中)。
+# 崩溃/异常 vs 真精度:不看错误文案(关键词白名单补不完),看「比较有没有跑完」。
+# 日志里有比较数值字段 → 比较跑完(真精度,D类);没有 → 比较没跑完(崩溃/超时/异常,A类)。
+# 与错误形态无关,新报错不用补关键词。
 try:
     _log_low = open(sys.argv[2], encoding="utf-8", errors="replace").read().lower()
 except Exception:
     _log_low = ""
-crash_failure = bool(re.search(
-    r"vector core exception|vector core timeout|core dumped|segmentation fault|"
-    r"acl stream synchronize failed|error code: ?5070\d{2}", _log_low))
+crash_failure = not bool(re.search(r"(max_abs_diff|mere|matched_ratio)\s*=", _log_low))
 
 INFRA = {"npu_runtime_unavailable", "input_load_failed", "judge_container_failed",
          "judge_metrics_unreadable", "judge_no_metrics", "task_missing",
