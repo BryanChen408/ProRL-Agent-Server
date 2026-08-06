@@ -10,11 +10,14 @@
 #   POLAR_PROFILE=.../profile.ascendc.yaml  旧基座(11 skills,已实跑验证)
 # 改公共项时两份都要改(loader 不支持继承,与其余 6 个 profile 同样是整份复制)。
 # workflow=legacy(judge_command 驱动)、budget、npu_lease(0-3)、gateway、operator(timeout/max_turns)全部照 vime 不变。
+# Template: the __*_HOST__ tokens below are substituted by
+# launch_polar_and_guide.sh into /tmp/polar_profile_runtime.yaml at startup.
+# Ports and everything else stay as literal values here.
 service:
   bind_host: 0.0.0.0
-  rollout_url: http://80.48.5.64:8180
-  gateway_url: http://80.48.5.64:8200
-  sglang_router_url: http://80.48.5.64:8011
+  rollout_url: http://__POLAR_HOST__:8180
+  gateway_url: http://__POLAR_HOST__:8200
+  sglang_router_url: http://__VIME_ROUTER_HOST__:8011
   inference_engine: vllm
   model_served: /home/docker/Qwen3.6-35B-A3B
 
