@@ -107,8 +107,13 @@ def classify(t):
     # 跑完、数值不符 → 真精度错(D类);没有 → 比较没跑完(崩溃/超时/加载异常等),
     # 与错误形态无关 —— 新报错不用补关键词,自动归入 ascendc_run_crashed(A类)。
     if "对拍" in t or "mare" in l or "mere" in l or "correctness" in l or "result: fail" in l:
-        if re.search(r"(max_abs_diff|mere|matched_ratio)\s*=", l):
-            return "correctness_failed"
+        # 判据:对拍有没有给出结论(有 case[N]: 行)。上游无论什么措辞都带这个前缀,
+        # 加新的前置检查也自动归对,不用补词。有结论再分「数值差异」和「前置检查不通过」
+        # (形状/NaN/dtype —— 这类算不出逐元素差,但对拍确实跑完了)。
+        if re.search(r"case\[\d+\]:", l):
+            if re.search(r"(max_abs_diff|mere|matched_ratio)\s*=", l):
+                return "correctness_failed"
+            return "output_precheck_failed"
         return "ascendc_run_crashed"
     if "speedup" in l or "performance" in l or "性能" in t: return "benchmark_failed"
     return "unknown"
@@ -179,14 +184,15 @@ load_failure = bool(first_exc) and any(k in first_exc for k in LOAD_EXC)
 if "_OpNamespace" in first_exc or "has no attribute" in first_exc:
     load_failure = True
 
-# 崩溃/异常 vs 真精度:不看错误文案(关键词白名单补不完),看「比较有没有跑完」。
-# 日志里有比较数值字段 → 比较跑完(真精度,D类);没有 → 比较没跑完(崩溃/超时/异常,A类)。
-# 与错误形态无关,新报错不用补关键词。
+# 崩溃/异常 vs 对拍给出了结论:不看错误文案(关键词白名单补不完),看有没有 case[N]: 行。
+# 有 → 对拍跑完并给了结论(数值差异 或 形状/NaN/dtype 前置检查不通过);没有 → 中途崩了。
+# 不用「有没有 max_abs_diff」:形状/NaN 不符时上游前置检查早退、算不出逐元素差,那批
+# 会被误判成崩溃(实测 9/38),给 agent 的方向也就跟着错。
 try:
     _log_low = open(sys.argv[2], encoding="utf-8", errors="replace").read().lower()
 except Exception:
     _log_low = ""
-crash_failure = not bool(re.search(r"(max_abs_diff|mere|matched_ratio)\s*=", _log_low))
+crash_failure = not bool(re.search(r"case\[\d+\]:", _log_low))
 
 INFRA = {"npu_runtime_unavailable", "input_load_failed", "judge_container_failed",
          "judge_metrics_unreadable", "judge_no_metrics", "task_missing",
@@ -197,6 +203,11 @@ elif et in ("op_not_registered", "ascendc_load_failed"):
     label = "A类-算子未注册/加载失败(不是精度问题:改 setup.py 打包与 import,别调数值)"
 elif et == "ascendc_run_crashed":
     label = "A类-kernel崩溃/运行期错误(不是精度问题:查越界/非法访存/核间划分/对齐,别调数值)"
+elif et == "output_precheck_failed":
+    # 对拍跑完了,但输出连「可比较」都不满足(形状/dtype 不符、或算出了 NaN)。
+    # 这不是精度问题:调 tolerance/数值写法治不了形状算错,方向必须分开说。
+    label = ("D类-输出不可比较(形状/dtype/NaN;对拍已跑完但输出结构不对:"
+             "查输出 shape 推导、tiling 边界、是否产生 NaN/Inf,别调数值精度)")
 elif et == "correctness_failed" and crash_failure:
     # 兜底:error_type 没被 classify 拆出 ascendc_run_crashed 时
     label = "A类-kernel崩溃/运行期错误(不是精度问题:查越界/非法访存/核间划分/对齐,别调数值)"
@@ -451,13 +462,26 @@ VER="$SK/$TRANS_SKILL/scripts/verification_ascendc.py"
 if ! VER_OUT=$(cd "$WORK" && export WORKDIR="$WORK" PYTHONPATH="$SK/$TRANS_SKILL/scripts:${PYTHONPATH:-}" \
       && run_npu_phase verify "$PY_BIN" "$VER" "$OP_DIR_NAME" 2>&1); then
   printf "%s\n" "$VER_OUT" > "$OUT_DIR/verify.log"
-  # 崩溃 vs 真精度:在这里就判定,不交给 classify() 的文本推断 —— verify.log 里带
-  # PATH 环境 dump(含 ccec_compiler),classify() 的 "ccec"/"compil" 分支在 对拍
-  # 分支之前命中,会把真精度错(D类 0.35)/崩溃(A类 0.30)一律错标成
-  # ascendc_compile_failed(0.25)。判据与 classify() 一致:比较跑完(日志里有
-  # max_abs_diff/MERE/matched_ratio 数值字段)→ correctness_failed,否则 → 崩溃。
-  if grep -qEi "(max_abs_diff|mere|matched_ratio)[[:space:]]*=" "$OUT_DIR/verify.log"; then
-    _VER_TYPE="correctness_failed"
+  # 在这里就判定,不交给 classify() 的文本推断 —— verify.log 里带 PATH 环境 dump
+  # (含 ccec_compiler),classify() 的 "ccec"/"compil" 分支在 对拍 分支之前命中,
+  # 会把对拍阶段的失败一律错标成 ascendc_compile_failed(0.25)。
+  #
+  # 判据是「对拍有没有给出结论」,看有没有 case[N]: 行 —— 上游无论用什么措辞报结论
+  # (数值差异/形状不符/NaN 不符/dtype 不符/...)都会打 case[N]: output[M]: 前缀。
+  # 不用「有没有 max_abs_diff」:形状或 NaN 掩码不一致时上游走前置检查早退,压根算不出
+  # 逐元素差,那批本是「对拍跑完了、结果不对」,却会被误判成「对拍没跑完(崩溃)」
+  # (实测 195351:9/38 中招 —— 6 个形状不符 + 3 个 NaN 不符)。
+  #
+  #   有 case[N] 行 → 对拍给出结论了
+  #        ├─ 有 max_abs_diff/MERE/matched_ratio → 数值差异   correctness_failed
+  #        └─ 没有(形状/NaN/dtype 前置检查不通过) → output_precheck_failed
+  #   无 case[N] 行 → 对拍中途崩了 → ascendc_run_crashed(崩因让 agent 读日志)
+  if grep -qE "case\[[0-9]+\]:" "$OUT_DIR/verify.log"; then
+    if grep -qEi "(max_abs_diff|mere|matched_ratio)[[:space:]]*=" "$OUT_DIR/verify.log"; then
+      _VER_TYPE="correctness_failed"
+    else
+      _VER_TYPE="output_precheck_failed"
+    fi
   else
     _VER_TYPE="ascendc_run_crashed"
   fi

@@ -92,7 +92,10 @@ def reward_from_metrics(metrics: dict) -> float:
             return 0.25
         if et in ("op_not_registered", "ascendc_run_crashed"):
             return 0.3
-        if et == "correctness_failed":
+        # correctness_failed(数值差异)与 output_precheck_failed(形状/dtype/NaN 前置
+        # 检查不通过)同分:两者都是「对拍跑完了、结果不对」,只是给 agent 的修改方向
+        # 不同(调数值 vs 查输出形状推导),那个区分由 fail_hint 的 label 承担。
+        if et in ("correctness_failed", "output_precheck_failed"):
             return 0.35
         return 0.3
     try:
@@ -150,6 +153,9 @@ def test_ladder_not_success():
     assert reward_from_metrics({"success": False, "ast_check_ok": True, "error_type": "op_not_registered"}) == 0.3
     assert reward_from_metrics({"success": False, "ast_check_ok": True, "error_type": "ascendc_run_crashed"}) == 0.3
     assert reward_from_metrics({"success": False, "ast_check_ok": True, "error_type": "correctness_failed"}) == 0.35
+    # 形状/dtype/NaN 前置检查不通过:对拍跑完了、结果不对 -> 与数值差异同档 0.35,
+    # 不是崩溃的 0.30(实测 195351 有 9 个这类被旧判据误判成崩溃)。
+    assert reward_from_metrics({"success": False, "ast_check_ok": True, "error_type": "output_precheck_failed"}) == 0.35
     assert reward_from_metrics({"success": False, "ast_check_ok": True, "error_type": None}) == 0.3  # 未知类型兜底中间档
 
 
@@ -167,7 +173,8 @@ def test_is_infra_failure():
     assert is_infra_failure({"error_type": "task_missing"}) is True
     assert is_infra_failure({"error_type": "npu_runtime_unavailable"}) is True
     assert is_infra_failure({"error_type": "correctness_failed"}) is False    # operator
-    assert is_infra_failure({"error_type": "submission_missing"}) is False    # operator (agent didn't deliver)
+    assert is_infra_failure({"error_type": "submission_missing"}) is False    # operator
+    assert is_infra_failure({"error_type": "output_precheck_failed"}) is False  # operator(输出结构不对) (agent didn't deliver)
     assert is_infra_failure({"success": True, "error_type": None}) is False
 
 
