@@ -30,9 +30,10 @@ NPU_POOL="${NPU_POOL:-[0, 1, 2, 3]}"
 MODEL_SERVED="${MODEL_SERVED:-/models/Qwen3.6-35B-A3B}"
 # Host paths on this machine — read by the Polar process, not the sandbox:
 # task_assets_dir is globbed here, asc_devkit_dir is bind-mounted into sandboxes.
-# 与 vime 的 OPERATOR_TASKS_DIR 同一份，不需要第二份拷贝：polar 只从这里取
-# {op}.json（用例规格），{op}.py 走 vime 的 sample.task_source 传过来。
-TASK_ASSETS_DIR="${TASK_ASSETS_DIR:-/mnt/model/corlorlight_models/mingchengzou/ProRL1/data/ascendc-kernelgen-data/npu_benchmark/level1}"
+# 与 vime 的 OPERATOR_TASKS_DIR 同一份，不需要第二份拷贝：{op}.py 走 vime 的
+# sample.task_source 传过来。filtered189 用 get_inputs()（输入写在 py 里），没有
+# 同名 .json，所以 _has_case_json 为假、那条 upload 不生成 —— 这是预期的。
+TASK_ASSETS_DIR="${TASK_ASSETS_DIR:-/mnt/model/cbx/op_tasks/op_tasks/op_assets_cudallm_filtered189/op_tasks}"
 # 共享盘路径：clone 和软链一次落盘，换机器/重建容器都还在，不必每台重拉。
 ASC_DEVKIT_DIR="${ASC_DEVKIT_DIR:-/mnt/model/cbx/asc-devkit-9.0.0}"
 # vime rollout/router 节点（worker）IP —— Polar 的推理端点主机部分。
