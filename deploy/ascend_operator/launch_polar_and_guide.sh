@@ -85,14 +85,28 @@ echo ""
 
 # VIME_NODE_IP env var overrides the file (debugging).
 if [[ -z "${VIME_NODE_IP:-}" ]]; then
-  # Missing file = this run's vime master isn't ready. No interactive prompt:
-  # platform jobs have no tty, so read would hang until timeout.
+  # 文件由 vime master 交会完 IP 后原子写入（master 启动时先 rm 掉上一轮的）。
+  # 缺文件不再直接退出：等它出现，这样先起 polar 还是先起 vime 都行，
+  # 不用盯 vime 日志。vime 那侧本来就在轮询 polar:8080/health，两边对等。
+  # 不做 mtime 新鲜度判断：本地 NFS 时钟比宿主机快 ~30s，会把陈旧读成新鲜。
+  VIME_IP_WAIT_SECS="${VIME_IP_WAIT_SECS:-900}"
   if [[ ! -s "${VIME_ROUTER_IP_FILE}" ]]; then
-    echo "ERROR: 未找到 vime router IP 文件：${VIME_ROUTER_IP_FILE}" >&2
-    echo "  该文件由 vime master 完成 IP 交会后写入。请确认 vime 任务已提交、" >&2
-    echo "  master pod 已打印出 rollout 节点 IP、共享盘已挂载。" >&2
-    echo "  调试可绕过：VIME_NODE_IP=<worker IP> bash \$0" >&2
-    exit 1
+    echo "[polar-init] 等待 vime master 写入 router IP（最长 ${VIME_IP_WAIT_SECS}s）"
+    echo "             ${VIME_ROUTER_IP_FILE}"
+    _waited=0
+    while [[ ! -s "${VIME_ROUTER_IP_FILE}" ]]; do
+      if (( _waited >= VIME_IP_WAIT_SECS )); then
+        echo "ERROR: 等待 ${VIME_IP_WAIT_SECS}s 仍未出现：${VIME_ROUTER_IP_FILE}" >&2
+        echo "  该文件由 vime master 完成 IP 交会后写入。请确认 vime 任务已提交、" >&2
+        echo "  master pod 已打印出 rollout 节点 IP、共享盘已挂载。" >&2
+        echo "  调试可绕过：VIME_NODE_IP=<worker IP> bash \$0" >&2
+        exit 1
+      fi
+      sleep 5; _waited=$(( _waited + 5 ))
+      (( _waited % 60 )) || echo "[polar-init] 已等待 ${_waited}s ..."
+    done
+    echo "[polar-init] 文件已出现（等待 ${_waited}s）"
+    _IP_FRESHLY_WRITTEN=1   # 等出来的必然是本轮的，下面不必再让人肉核对
   fi
   VIME_NODE_IP="$(tr -d '[:space:]' < "${VIME_ROUTER_IP_FILE}")"
 fi
@@ -108,7 +122,10 @@ echo "  ────────────────────────
 echo "   vime rollout/router IP : ${VIME_NODE_IP}"
 echo "   写入时间       : $(date -r "${VIME_ROUTER_IP_FILE}" '+%F %T' 2>/dev/null || echo 未知)"
 echo "  ────────────────────────────────────────────"
-echo "  ↑ 确认是本次 vime 任务打印的 IP，不对就 Ctrl-C。"
+if [[ -z "${_IP_FRESHLY_WRITTEN:-}" ]]; then
+  echo "  ↑ 脚本启动时文件就已存在（不是等出来的）。确认是本次 vime 任务打印的 IP，"
+  echo "    不对就 Ctrl-C —— 上一轮的 IP 可能指向已被回收的节点。"
+fi
 
 echo ""
 echo "  vime worker（rollout/router）IP：${VIME_NODE_IP}"
