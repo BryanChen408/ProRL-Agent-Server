@@ -29,11 +29,35 @@ NPU_POOL="${NPU_POOL:-[0, 1, 2, 3]}"
 MODEL_SERVED="${MODEL_SERVED:-/models/Qwen3.6-35B-A3B}"
 # Host paths on this machine — read by the Polar process, not the sandbox:
 # task_assets_dir is globbed here, asc_devkit_dir is bind-mounted into sandboxes.
-TASK_ASSETS_DIR="${TASK_ASSETS_DIR:-/home/docker/datasets/op_tasks/op_assets_cudallm_filtered189/op_tasks}"
-ASC_DEVKIT_DIR="${ASC_DEVKIT_DIR:-/home/docker/asc-devkit-9.0.0}"
+# 与 vime 的 OPERATOR_TASKS_DIR 同一份，不需要第二份拷贝：polar 只从这里取
+# {op}.json（用例规格），{op}.py 走 vime 的 sample.task_source 传过来。
+TASK_ASSETS_DIR="${TASK_ASSETS_DIR:-/mnt/model/corlorlight_models/mingchengzou/ProRL1/data/ascendc-kernelgen-data/npu_benchmark/level1}"
+# 共享盘路径：clone 和软链一次落盘，换机器/重建容器都还在，不必每台重拉。
+ASC_DEVKIT_DIR="${ASC_DEVKIT_DIR:-/mnt/model/cbx/asc-devkit-9.0.0}"
 # vime rollout/router 节点（worker）IP —— Polar 的推理端点主机部分。
 # master pod 在启动时把 worker IP 写到这个共享存储文件。
 VIME_ROUTER_IP_FILE="/mnt/model/corlorlight_models/mingchengzou/ProRL2/scratch/vime_router_ip.txt"
+
+# ─────── asc-devkit 自举：缺了就拉，软链不对就补（幂等，每次启动过一遍）────────
+# 钉 9.0.0 而非 master：实测 API 名对本机 CANN 9.0.0 头文件命中率 95% vs 82%。
+# 软链把 skill 写死的 docs/zh/api 指到 9.0.0 实际布局 docs/api/context；相对路径，
+# 只读挂进 /opt/asc-devkit 后照样解析。已就绪时两块都是 no-op。
+ASC_DEVKIT_REPO="${ASC_DEVKIT_REPO:-https://gitcode.com/cann/asc-devkit.git}"
+ASC_DEVKIT_REF="${ASC_DEVKIT_REF:-9.0.0}"
+# gate 用 docs/api/context 而非目录本身：空目录会被 -d 误判成已就绪。
+if [[ ! -d "${ASC_DEVKIT_DIR}/docs/api/context" ]]; then
+  echo "[polar-init] asc-devkit 缺失，clone ${ASC_DEVKIT_REF} → ${ASC_DEVKIT_DIR}"
+  git clone --depth 1 --branch "${ASC_DEVKIT_REF}" \
+      "${ASC_DEVKIT_REPO}" "${ASC_DEVKIT_DIR}" \
+    || { echo "ERROR: asc-devkit clone 失败，请手动拉到 ${ASC_DEVKIT_DIR}" >&2; exit 1; }
+fi
+# 校验指向而非存在：布局变了或有人建错链时能自愈。-T 防 ln 把新链建到旧链目录里面。
+if [[ "$(readlink "${ASC_DEVKIT_DIR}/docs/zh/api" 2>/dev/null)" != "../api/context" ]]; then
+  mkdir -p "${ASC_DEVKIT_DIR}/docs/zh" \
+    && ln -sfnT ../api/context "${ASC_DEVKIT_DIR}/docs/zh/api" \
+    || { echo "ERROR: 建软链失败：${ASC_DEVKIT_DIR}/docs/zh/api" >&2; exit 1; }
+  echo "[polar-init] 已建软链 docs/zh/api → ../api/context"
+fi
 
 # ─────── 检查前置条件 ─────────────────────────────────────────────────────────
 if [[ ! -x "${POLAR_VENV}/bin/python" ]]; then
