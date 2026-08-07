@@ -409,7 +409,8 @@ if ! (
       || echo "[ascendc-eval] wheel 安装失败,已忽略(对拍从 kernel/build/ 直接 import)"
   fi
 ) >"$OUT_DIR/compile.log" 2>&1; then
-  write_metrics true false false "" "" "" "AscendC 编译失败(完整构建日志如下)" "$OUT_DIR/compile.log"
+  write_metrics true false false "" "" "" "AscendC 编译失败(完整构建日志如下)" "$OUT_DIR/compile.log" \
+    "ascendc_compile_failed"
   # 改动3: 编译失败时把首个错误 ±上下文直接打到 stderr(进工具结果),否则 agent 只能拿到
   # "完整错误在 metrics_error.log",38% 的 session 会跑去自编译 cmake 反推错误、白烧轮数。
   echo "--- compile.log 首个错误上下文(完整日志见 $OUT_DIR/compile.log) ---" >&2
@@ -450,7 +451,18 @@ VER="$SK/$TRANS_SKILL/scripts/verification_ascendc.py"
 if ! VER_OUT=$(cd "$WORK" && export WORKDIR="$WORK" PYTHONPATH="$SK/$TRANS_SKILL/scripts:${PYTHONPATH:-}" \
       && run_npu_phase verify "$PY_BIN" "$VER" "$OP_DIR_NAME" 2>&1); then
   printf "%s\n" "$VER_OUT" > "$OUT_DIR/verify.log"
-  write_metrics true false false "" "" "" "数值对拍失败(Result: fail;完整对拍输出如下)" "$OUT_DIR/verify.log"
+  # 崩溃 vs 真精度:在这里就判定,不交给 classify() 的文本推断 —— verify.log 里带
+  # PATH 环境 dump(含 ccec_compiler),classify() 的 "ccec"/"compil" 分支在 对拍
+  # 分支之前命中,会把真精度错(D类 0.35)/崩溃(A类 0.30)一律错标成
+  # ascendc_compile_failed(0.25)。判据与 classify() 一致:比较跑完(日志里有
+  # max_abs_diff/MERE/matched_ratio 数值字段)→ correctness_failed,否则 → 崩溃。
+  if grep -qEi "(max_abs_diff|mere|matched_ratio)[[:space:]]*=" "$OUT_DIR/verify.log"; then
+    _VER_TYPE="correctness_failed"
+  else
+    _VER_TYPE="ascendc_run_crashed"
+  fi
+  write_metrics true false false "" "" "" "数值对拍失败(Result: fail;完整对拍输出如下)" "$OUT_DIR/verify.log" \
+    "$_VER_TYPE"
   # 改动3扩展: 对拍失败把 Comparison 段直接打到 stderr(进工具结果)。否则 agent 只拿到
   # "D类-精度不匹配"一句,没有 max_abs_diff/tolerance/失配元素数,只能盲调数值。
   echo "--- verify 对拍失败详情(完整日志见 $OUT_DIR/verify.log) ---" >&2
