@@ -17,14 +17,18 @@ POLAR_PROFILE_RUNTIME=/tmp/polar_profile_runtime.yaml
 # ─────── 站点值（profile 里只有 token，实际值在这里）──────────────────────────
 # Ports must match vime's start_vime_in_platform.sh: 8080 rollout, 8001 router.
 ROLLOUT_PORT="${ROLLOUT_PORT:-8080}"
-GATEWAY_PORT="${GATEWAY_PORT:-8200}"
+GATEWAY_PORT="${GATEWAY_PORT:-8100}"
 VLLM_ROUTER_PORT="${VLLM_ROUTER_PORT:-8001}"
 # A3 = ascend910_9391, A2 = ascend910b1. Kernels compile against this.
 SOC_VERSION="${SOC_VERSION:-ascend910_9391}"
 # Polar host's own cards, not vime's.
 NPU_POOL="${NPU_POOL:-[0, 1, 2, 3]}"
-# Paths as seen inside the sandbox container.
-MODEL_SERVED="${MODEL_SERVED:-/home/docker/Qwen3.6-35B-A3B}"
+# Must equal vime's --hf-checkpoint: vLLM registers the model under that path,
+# and Polar sends this string as openai_request["model"]. A mismatch is a 404
+# per request, not a startup error. Platform path, not RUNBOOK's /home/docker.
+MODEL_SERVED="${MODEL_SERVED:-/models/Qwen3.6-35B-A3B}"
+# Host paths on this machine — read by the Polar process, not the sandbox:
+# task_assets_dir is globbed here, asc_devkit_dir is bind-mounted into sandboxes.
 TASK_ASSETS_DIR="${TASK_ASSETS_DIR:-/home/docker/datasets/op_tasks/op_assets_cudallm_filtered189/op_tasks}"
 ASC_DEVKIT_DIR="${ASC_DEVKIT_DIR:-/home/docker/asc-devkit-9.0.0}"
 # vime rollout/router 节点（worker）IP —— Polar 的推理端点主机部分。
