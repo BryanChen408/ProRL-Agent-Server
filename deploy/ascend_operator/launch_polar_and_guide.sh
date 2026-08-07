@@ -19,8 +19,9 @@ POLAR_PROFILE_RUNTIME=/tmp/polar_profile_runtime.yaml
 ROLLOUT_PORT="${ROLLOUT_PORT:-8080}"
 GATEWAY_PORT="${GATEWAY_PORT:-8100}"
 VLLM_ROUTER_PORT="${VLLM_ROUTER_PORT:-8001}"
-# A3 = ascend910_9391, A2 = ascend910b1. Kernels compile against this.
-SOC_VERSION="${SOC_VERSION:-ascend910_9391}"
+# Kernels compile against this. 本机实测 acl.get_soc_name() = Ascend910_9382；
+# A3 是 ascend910_9391，A2 是 ascend910b1，换机器时按 get_soc_name() 的返回值改。
+SOC_VERSION="${SOC_VERSION:-Ascend910_9382}"
 # Polar host's own cards, not vime's.
 NPU_POOL="${NPU_POOL:-[0, 1, 2, 3]}"
 # Must equal vime's --hf-checkpoint: vLLM registers the model under that path,
