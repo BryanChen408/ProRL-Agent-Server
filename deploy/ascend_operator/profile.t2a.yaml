@@ -12,9 +12,9 @@
 # workflow=legacy(judge_command 驱动)、budget、npu_lease(0-3)、gateway、operator(timeout/max_turns)全部照 vime 不变。
 service:
   bind_host: 0.0.0.0
-  rollout_url: http://80.48.5.64:8180
-  gateway_url: http://80.48.5.64:8200
-  sglang_router_url: http://80.48.5.64:8011
+  rollout_url: http://80.5.25.140:8180
+  gateway_url: http://80.5.25.140:8200
+  sglang_router_url: http://80.5.25.140:8011
   inference_engine: vllm
   model_served: /home/docker/Qwen3.6-35B-A3B-agentical-ascendc-hf-4t-bf16
 
@@ -27,7 +27,7 @@ operator_runtime:
   backend: ascendc      # ← delta 5:prepare 走 input/{op}.py + --backend ascendc(triton 侧无此字段=默认 triton)
   # ← delta 6:算子同名 .json(NPUKernelBench 用例规格,get_input_groups() 要读)随 prepare 上传到 input/。
   #   {op}.py 走 vime task_source 内容寻址,.json 没有该通道 → 从数据集目录直传。triton 侧无此字段=不产生该动作。
-  task_assets_dir: /home/docker/datasets/op_tasks/op_assets_cudallm_filtered189/op_tasks
+  task_assets_dir: /home/docker/datasets/op_tasks/op_assets_kernelbench_level1/op_tasks
   # ← delta 11:asc-devkit(上游 init.sh Step 4 会 clone 的算子开发资料仓)。
   #   $ASC_DEVKIT_DIR 在 21 个 skill 文档里被引用 46 次,是出现最多的环境变量;
   #   ascendc-docs-search 整个 skill 就是查它。只读挂到 /opt/asc-devkit,不进 workdir 拷贝。
@@ -41,7 +41,7 @@ operator_runtime:
     interval_seconds: 2
   npu_lease:
     enabled: true
-    pool: [0, 1, 2, 3, 4, 5, 6, 7]
+    pool: [4, 5, 6, 7]
     lock_dir: /dev/shm/npu-locks
 
 observer:
@@ -64,7 +64,7 @@ operator:
   #   8000s(133 min)会顶到上限。放到 4h。
   timeout_seconds: 14400.0
   runtime:
-    image: ascendc-tilelang:v1                          # ← delta 2
+    image: ascendc-tilelang:v1-aarch64                          # ← delta 2
     network: host
     workdir: /opt/workspace/agent_workdir
     env:
