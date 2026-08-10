@@ -12,6 +12,7 @@ import sys
 from pathlib import Path
 
 import pytest
+import torch
 
 REPO = Path(__file__).resolve().parents[2]
 CANONICAL = REPO / "operator_runtime_t2a"
@@ -326,3 +327,149 @@ def test_extraction_failure_falls_back_to_template(tmp_path):
     mn = (out / "model_new_ascendc.py").read_text()
     assert "class ModelNew" in mn                    # 模板兜底(单 tensor 形态)
     assert "def forward(self, x: torch.Tensor)" in mn
+
+
+# --------------------------------------------------------------------------
+# schema 字面量渲染回归(2026-08-10 实测:三类非法字面量 → dlopen 即崩,op 永不注册)
+#   bug#1 bool 默认值被小写成 false → torch 只认 True/False("invalid numeric default value")
+#   bug#2 __init__ 分支 None 默认值没包 optional → impl 非可选 int64_t 接 None 调用崩
+#   bug#3 list 默认值渲成 Python 元组 (1, 1)/(1,) → torch 只认方括号 [1, 1]/[1]
+# --------------------------------------------------------------------------
+
+def _mdef_schema(out: Path) -> str:
+    reg = (out / "kernel" / "register.cpp").read_text()
+    line = next(l for l in reg.splitlines() if "m.def(" in l)
+    return line.split('m.def("', 1)[1].split('")', 1)[0]
+
+
+def _assert_schema_parses(schema: str) -> None:
+    torch._C.parse_schema(schema)  # 抛异常即测试失败
+
+
+CONV_LIKE = """
+import torch
+class Model(torch.nn.Module):
+    def __init__(self, in_channels, out_channels, kernel_size, stride=1, padding=0, bias=False):
+        super().__init__()
+        self.conv = torch.nn.Conv2d(in_channels, out_channels, kernel_size, stride, padding, bias=bias)
+    def forward(self, x):
+        return self.conv(x)
+def get_inputs():
+    return [torch.randn(1, 2, 4, 4)]
+def get_init_inputs():
+    return [2, 4, 3, 1, 0, True]
+"""
+
+POOL_LIKE = """
+import torch
+class Model(torch.nn.Module):
+    def __init__(self, kernel_size, stride=None, padding=0, dilation=1, return_indices=False, ceil_mode=False):
+        super().__init__()
+        self.maxpool = torch.nn.MaxPool3d(kernel_size, stride, padding, dilation, return_indices, ceil_mode)
+    def forward(self, x):
+        return self.maxpool(x)
+def get_inputs():
+    return [torch.randn(1, 2, 4, 4, 4)]
+def get_init_inputs():
+    return [3, 2, 1, 1]
+"""
+
+CONV3D_TUPLE_LIKE = """
+import torch
+class Model(torch.nn.Module):
+    def __init__(self, in_channels, out_channels, kernel_size, stride=(1, 1, 1), padding=(0, 0, 0), groups=1, bias=False):
+        super().__init__()
+        self.conv = torch.nn.Conv3d(in_channels, out_channels, kernel_size, stride, padding,
+                                    groups=groups, bias=bias)
+    def forward(self, x):
+        return self.conv(x)
+def get_inputs():
+    return [torch.randn(1, 2, 4, 4, 4)]
+def get_init_inputs():
+    return [2, 4, 3]
+"""
+
+SINGLE_ELEM_TUPLE_LIKE = """
+import torch
+class Model(torch.nn.Module):
+    def __init__(self, num_parameters=1, init=0.25, alpha_shape=(1,)):
+        super().__init__()
+        self.act = torch.nn.PReLU(num_parameters, init)
+        self.alpha_shape = alpha_shape
+    def forward(self, x):
+        return self.act(x)
+def get_inputs():
+    return [torch.randn(1, 4)]
+def get_init_inputs():
+    return [1]
+"""
+
+
+def test_bool_default_renders_capitalized(tmp_path):
+    task, js = _write_model(tmp_path, CONV_LIKE)
+    out = _instantiate(tmp_path, task, js)
+    schema = _mdef_schema(out)
+    assert "bool bias=False" in schema
+    assert "=false" not in schema and "=true" not in schema
+    _assert_schema_parses(schema)
+
+
+def test_none_default_wrapped_optional(tmp_path):
+    task, js = _write_model(tmp_path, POOL_LIKE)
+    out = _instantiate(tmp_path, task, js)
+    schema = _mdef_schema(out)
+    assert schema == ("my_op(Tensor x, int kernel_size, int? stride=None, int padding=0, "
+                      "int dilation=1, bool return_indices=False, bool ceil_mode=False) -> Tensor")
+    _assert_schema_parses(schema)
+    ops_h = (out / "kernel" / "ops.h").read_text()
+    assert "const c10::optional<int64_t> &stride" in ops_h   # impl 侧同步 optional,传 None 不崩
+    mn = (out / "model_new_ascendc.py").read_text()
+    model = _construct(mn, 3, 2, 1, 1)                       # cls(*get_init_inputs()) 契约
+
+
+def test_list_default_renders_brackets(tmp_path):
+    task, js = _write_model(tmp_path, CONV3D_TUPLE_LIKE)
+    out = _instantiate(tmp_path, task, js)
+    schema = _mdef_schema(out)
+    assert "int[] stride=[1, 1, 1]" in schema and "int[] padding=[0, 0, 0]" in schema
+    assert "=false" not in schema
+    _assert_schema_parses(schema)
+
+
+def test_single_element_tuple_default_no_trailing_comma(tmp_path):
+    task, js = _write_model(tmp_path, SINGLE_ELEM_TUPLE_LIKE)
+    out = _instantiate(tmp_path, task, js)
+    schema = _mdef_schema(out)
+    assert "int[] alpha_shape=[1]" in schema                 # (1,) → [1],不是 [1,]
+    _assert_schema_parses(schema)
+
+
+_REAL_DATASETS = [
+    Path("/home/docker/datasets/op_tasks/op_assets_kernelbench_level1/op_tasks"),
+    Path("/home/docker/datasets/op_assets_cudallm_filtered189/op_tasks"),
+    Path("/home/docker/KernelBench/KernelBench"),
+]
+
+
+@pytest.mark.skipif(
+    not all(d.is_dir() for d in _REAL_DATASETS),
+    reason="三个真实数据集不在本机,跳过全量回归",
+)
+def test_real_datasets_schemas_all_parse():
+    """三数据集全量渲染 + torch parse_schema:0 失败(2026-08-10 修复前的实测是
+    36+2+51 个非法 schema,全是 dlopen 即崩、op 永不注册的必死题)。"""
+    bad = []
+    for root in _REAL_DATASETS:
+        for p in sorted(root.rglob("*.py")):
+            jp = p.with_suffix(".json")
+            sig = prep._extract_op_signature(p, jp if jp.exists() else None)
+            if sig is None:
+                continue
+            _, schema_args, _ = prep._ordered_params(sig)
+            ret = "Tensor" if sig.ret_arity <= 1 else "(" + ", ".join(["Tensor"] * sig.ret_arity) + ")"
+            schema = f"op_x({schema_args}) -> {ret}"
+            try:
+                torch._C.parse_schema(schema)
+            except Exception as exc:  # noqa: BLE001
+                bad.append(f"{p.name}: {schema}  <- {exc}")
+    assert not bad, "\n".join(bad[:20])

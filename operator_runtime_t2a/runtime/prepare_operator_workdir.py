@@ -367,6 +367,12 @@ def _extract_op_signature(task_path: Path, json_path: Path | None) -> _OpSig | N
                     if dv is not _UNKNOWN:
                         kind = _value_kind(dv)
                 in_op = kind != "unknown"
+                if in_op and isinstance(dflt, ast.Constant) and dflt.value is None:
+                    # None 默认值 → optional 形式(对齐 _fwd_kind)。不包的话 schema 写成
+                    # `int stride=None`(类型仍是非 optional int,schema 能解析),
+                    # 但生成的 C++ impl 是 int64_t 非可选,模型真传 None 时调用即崩
+                    # (实测 0046 Average_Pooling_3D,init 值就是 None)。
+                    kind = _opt_wrap(kind)
                 if not in_op:
                     notes.append(f"init 参数 {arg.arg} 的值无法静态解析,未纳入 op 签名;"
                                  f"若 kernel 需要请自行接线并同步 register.cpp/ops.h/op_host")
@@ -382,11 +388,23 @@ def _schema_default(p: _Param) -> str | None:
         return None
     d = p.default
     if p.kind == "bool":
-        return "true" if d == "True" else "false"
+        # torch schema 的 bool 默认值只认 Python 形式 True/False(及 0/1),
+        # 小写 true/false 会被 parse_schema 拒("invalid numeric default value")。
+        # d 来自 ast.unparse,本身就是 "True"/"False",原样透传。
+        return d
     if p.kind == "str":
         return json.dumps(d.strip("'\""))
     if d == "None":
         return "None"
+    if p.kind.endswith("[]"):
+        # list 默认值必须是 torch 的方括号语法 [1, 1];ast.unparse 给出的 Python
+        # 元组 (1, 1) / (1,) 直接被拒 —— 且单元素元组去尾逗号,(1,) → [1] 而非 [1,]。
+        try:
+            vals = ast.literal_eval(d)
+        except (ValueError, SyntaxError):
+            vals = None
+        if isinstance(vals, (tuple, list)):
+            return "[" + ", ".join(str(v) for v in vals) + "]"
     return d
 
 
