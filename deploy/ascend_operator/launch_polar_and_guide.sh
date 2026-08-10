@@ -27,7 +27,9 @@ NPU_POOL="${NPU_POOL:-[0, 1, 2, 3]}"
 # Must equal vime's --hf-checkpoint: vLLM registers the model under that path,
 # and Polar sends this string as openai_request["model"]. A mismatch is a 404
 # per request, not a startup error. Platform path, not RUNBOOK's /home/docker.
-MODEL_SERVED="${MODEL_SERVED:-/models/Qwen3.6-35B-A3B}"
+# 必须与 vime 的 HF_CKPT 逐字相同（vLLM 按权重路径注册模型名）。vime 侧是
+# ${VIME_SHARE_ROOT}/Qwen3.6-35B-A3B，本机共享盘挂在 /mnt/model 而非默认 /models。
+MODEL_SERVED="${MODEL_SERVED:-/mnt/model/Qwen3.6-35B-A3B}"
 # Host paths on this machine — read by the Polar process, not the sandbox:
 # task_assets_dir is globbed here, asc_devkit_dir is bind-mounted into sandboxes.
 # 与 vime 的 OPERATOR_TASKS_DIR 同一份，不需要第二份拷贝：{op}.py 走 vime 的
