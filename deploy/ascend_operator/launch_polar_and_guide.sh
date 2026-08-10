@@ -86,31 +86,35 @@ echo ""
 echo "  本机（Polar 宿主机）IP：${HOST_IP}"
 echo ""
 
-# VIME_NODE_IP env var overrides the file (debugging).
+# VIME_NODE_IP env var overrides the file (debugging / polar-only restart).
 if [[ -z "${VIME_NODE_IP:-}" ]]; then
-  # 文件由 vime master 交会完 IP 后原子写入（master 启动时先 rm 掉上一轮的）。
-  # 缺文件不再直接退出：等它出现，这样先起 polar 还是先起 vime 都行，
-  # 不用盯 vime 日志。vime 那侧本来就在轮询 polar:8080/health，两边对等。
-  # 不做 mtime 新鲜度判断：本地 NFS 时钟比宿主机快 ~30s，会把陈旧读成新鲜。
+  # 旧值一律不用：先删，再等。删完之后出现的文件必然是某个 vime master 在本次删除
+  # 之后跑到写入那一步产生的 —— 靠因果定新鲜，不看 mtime（本地 NFS 时钟比宿主机快
+  # ~30s，会把陈旧读成新鲜）。代价：vime 若已先写完，删掉后它不会重写，只能重启
+  # vime master；这比拿上一轮的 IP 去连已回收的节点好。
+  # vime 侧对称：master 启动时 rm（:198），交会完原子写入（:396）。
   VIME_IP_WAIT_SECS="${VIME_IP_WAIT_SECS:-900}"
-  if [[ ! -s "${VIME_ROUTER_IP_FILE}" ]]; then
-    echo "[polar-init] 等待 vime master 写入 router IP（最长 ${VIME_IP_WAIT_SECS}s）"
-    echo "             ${VIME_ROUTER_IP_FILE}"
-    _waited=0
-    while [[ ! -s "${VIME_ROUTER_IP_FILE}" ]]; do
-      if (( _waited >= VIME_IP_WAIT_SECS )); then
-        echo "ERROR: 等待 ${VIME_IP_WAIT_SECS}s 仍未出现：${VIME_ROUTER_IP_FILE}" >&2
-        echo "  该文件由 vime master 完成 IP 交会后写入。请确认 vime 任务已提交、" >&2
-        echo "  master pod 已打印出 rollout 节点 IP、共享盘已挂载。" >&2
-        echo "  调试可绕过：VIME_NODE_IP=<worker IP> bash \$0" >&2
-        exit 1
-      fi
-      sleep 5; _waited=$(( _waited + 5 ))
-      (( _waited % 60 )) || echo "[polar-init] 已等待 ${_waited}s ..."
-    done
-    echo "[polar-init] 文件已出现（等待 ${_waited}s）"
-    _IP_FRESHLY_WRITTEN=1   # 等出来的必然是本轮的，下面不必再让人肉核对
+  if [[ -e "${VIME_ROUTER_IP_FILE}" ]]; then
+    echo "[polar-init] 丢弃残留 router IP：$(tr -d '[:space:]' < "${VIME_ROUTER_IP_FILE}" 2>/dev/null)" \
+         "（写于 $(date -r "${VIME_ROUTER_IP_FILE}" '+%F %T' 2>/dev/null || echo 未知)）"
+    rm -f "${VIME_ROUTER_IP_FILE}"
   fi
+  echo "[polar-init] 等待 vime master 写入 router IP（最长 ${VIME_IP_WAIT_SECS}s）"
+  echo "             ${VIME_ROUTER_IP_FILE}"
+  _waited=0
+  while [[ ! -s "${VIME_ROUTER_IP_FILE}" ]]; do
+    if (( _waited >= VIME_IP_WAIT_SECS )); then
+      echo "ERROR: 等待 ${VIME_IP_WAIT_SECS}s 仍未出现：${VIME_ROUTER_IP_FILE}" >&2
+      echo "  该文件由 vime master 完成 IP 交会后写入。请确认 vime 任务已提交、" >&2
+      echo "  master pod 已打印出 rollout 节点 IP、共享盘已挂载。" >&2
+      echo "  若 vime 在本脚本删除残留文件之前就已写完，它不会重写 —— 重启 vime master。" >&2
+      echo "  只重启 polar、复用在跑的 vime：VIME_NODE_IP=<worker IP> bash \$0" >&2
+      exit 1
+    fi
+    sleep 5; _waited=$(( _waited + 5 ))
+    (( _waited % 60 )) || echo "[polar-init] 已等待 ${_waited}s ..."
+  done
+  echo "[polar-init] 文件已出现（等待 ${_waited}s）"
   VIME_NODE_IP="$(tr -d '[:space:]' < "${VIME_ROUTER_IP_FILE}")"
 fi
 
@@ -125,10 +129,7 @@ echo "  ────────────────────────
 echo "   vime rollout/router IP : ${VIME_NODE_IP}"
 echo "   写入时间       : $(date -r "${VIME_ROUTER_IP_FILE}" '+%F %T' 2>/dev/null || echo 未知)"
 echo "  ────────────────────────────────────────────"
-if [[ -z "${_IP_FRESHLY_WRITTEN:-}" ]]; then
-  echo "  ↑ 脚本启动时文件就已存在（不是等出来的）。确认是本次 vime 任务打印的 IP，"
-  echo "    不对就 Ctrl-C —— 上一轮的 IP 可能指向已被回收的节点。"
-fi
+# 不再有"文件已存在"分支：残留一律删掉重等，读到的必然是本轮的，无需人肉核对。
 
 echo ""
 echo "  vime worker（rollout/router）IP：${VIME_NODE_IP}"
