@@ -970,19 +970,51 @@ def _setup_paths(kernel_build_dir):
 
 
 def _execute_models(ref_model, cand_model, input_groups, device):
-    """Run both models on all input groups, returning normalized outputs and summaries."""
+    """Run both models on all input groups, returning normalized outputs and summaries.
+
+    参考模型(golden)在 NPU 上跑不起来时(平台不支持的参数组合,实测:
+    aclnnMaxPool3dWithArgmax 只支持 dilation=1,题目的 dilation=3 直接被 ACL 拒)
+    整体搬到 CPU 重跑 —— golden 在哪个设备算不影响对拍正确性(输出比较统一在
+    CPU 上进行),候选模型始终留在 NPU 上评估。候选崩了不做降级:那是 agent 的锅。
+    返回第 4 个值 ref_fallback_error:发生过降级时为 NPU 侧的报错文本,否则 None。
+    """
     ref_outputs = []
     cand_outputs = []
     input_summaries = []
+    ref_fallback_error: str | None = None
+
+    def _run_ref(dev):
+        outs = []
+        for inputs in input_groups:
+            ref_inputs = _move_to_device(_clone_value(inputs), dev)
+            with torch.no_grad():
+                outs.append(ref_model(*ref_inputs))
+        return outs
+
     for index, inputs in enumerate(input_groups):
         ref_inputs = _move_to_device(_clone_value(inputs), device)
-        cand_inputs = _move_to_device(_clone_value(inputs), device)
         input_summaries.extend(_summarize_value(ref_inputs, f"inputs[{index}]"))
 
-        with torch.no_grad():
-            ref_out = ref_model(*ref_inputs)
-            cand_out = cand_model(*cand_inputs)
+    try:
+        raw_ref_outputs = _run_ref(device)
+    except Exception as npu_exc:
+        ref_fallback_error = f"{type(npu_exc).__name__}: {npu_exc}"
+        try:
+            ref_model = ref_model.to("cpu")
+            raw_ref_outputs = _run_ref(torch.device("cpu"))
+        except Exception as cpu_exc:
+            raise RuntimeError(
+                "reference model failed on both NPU and CPU "
+                f"(NPU: {ref_fallback_error}; CPU: {type(cpu_exc).__name__}: {cpu_exc})"
+            ) from cpu_exc
 
+    raw_cand_outputs = []
+    for inputs in input_groups:
+        cand_inputs = _move_to_device(_clone_value(inputs), device)
+        with torch.no_grad():
+            raw_cand_outputs.append(cand_model(*cand_inputs))
+
+    for inputs, ref_out, cand_out in zip(input_groups, raw_ref_outputs, raw_cand_outputs):
         if hasattr(ref_model, "postprocess_output"):
             ref_out = ref_model.postprocess_output(ref_out, inputs)
             cand_out = ref_model.postprocess_output(cand_out, inputs)
@@ -990,14 +1022,14 @@ def _execute_models(ref_model, cand_model, input_groups, device):
         ref_outputs.append(_normalize_output(ref_out))
         cand_outputs.append(_normalize_output(cand_out))
 
-    return ref_outputs, cand_outputs, input_summaries
+    return ref_outputs, cand_outputs, input_summaries, ref_fallback_error
 
 
 def _run_comparisons(ref_model, cand_model, input_groups, device, non_compute=False):
     all_ok = True
     comparisons = []
     case_oks = []
-    ref_outputs, cand_outputs, input_summaries = _execute_models(
+    ref_outputs, cand_outputs, input_summaries, ref_fallback_error = _execute_models(
         ref_model, cand_model, input_groups, device)
     for index, (inputs, ref_out, cand_out) in enumerate(zip(input_groups, ref_outputs, cand_outputs)):
         input_type, _input_dtype = _infer_input_type(inputs)
@@ -1008,7 +1040,7 @@ def _run_comparisons(ref_model, cand_model, input_groups, device, non_compute=Fa
         comparisons.append(f"case[{index}]: {comparison}")
         case_oks.append(ok)
         all_ok = all_ok and ok
-    return all_ok, comparisons, input_summaries, case_oks
+    return all_ok, comparisons, input_summaries, case_oks, ref_fallback_error
 
 
 def _run_verification(op: str, non_compute: bool = False):
@@ -1050,9 +1082,13 @@ def _run_verification(op: str, non_compute: bool = False):
         ref_model = ref_cls(*_clone_value(init_inputs)).to(device).eval()
         cand_model = cand_cls(*_clone_value(init_inputs)).to(device).eval()
 
-        all_ok, comparisons, input_summaries, case_oks = _run_comparisons(
+        all_ok, comparisons, input_summaries, case_oks, ref_fallback_error = _run_comparisons(
             ref_model, cand_model, input_groups, device, non_compute=non_compute)
 
+        if ref_fallback_error is not None:
+            # 参考模型在 NPU 跑不了、已降级 CPU 跑完 —— 落进 report 两头打印,
+            # 让 verify.log 自带「参考崩过」的证据(区分「候选崩」不需要文本猜)。
+            report["ref_fallback"] = ref_fallback_error
         report["inputs"] = input_summaries
         report["comparisons"] = comparisons
         report["comparison"] = "\n".join(comparisons)
@@ -1085,6 +1121,8 @@ def _print_report(report, title="AscendC Verification Report",
     lines.append(f"Status       : {status}")
     lines.append(f"Operator     : {report['op']}")
     lines.append(f"Device       : {report['device']}")
+    if report.get("ref_fallback"):
+        lines.append(f"Ref Fallback : reference executed on CPU (NPU error: {report['ref_fallback']})")
     lines.append(f"Non-compute  : {report.get('non_compute', False)}")
     lines.append(f"Task Dir     : {report['task_dir']}")
     lines.append(f"Reference    : {report['reference']}")
@@ -1317,6 +1355,8 @@ def _write_single_report_to_file(f, report):
     f.write(f"Status       : {status}\n")
     f.write(f"Operator     : {report['op']}\n")
     f.write(f"Device       : {report['device']}\n")
+    if report.get('ref_fallback'):
+        f.write(f"Ref Fallback : reference executed on CPU (NPU error: {report['ref_fallback']})\n")
     f.write(f"NPU          : {report.get('_npu', '?')}\n")
     f.write(f"Time(s)      : {report.get('_elapsed', 0):.2f}\n")
     f.write(f"Task Dir     : {report['task_dir']}\n")
