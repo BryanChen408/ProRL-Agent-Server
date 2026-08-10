@@ -17,8 +17,9 @@ POLAR_PROFILE_RUNTIME=/tmp/polar_profile_runtime.yaml
 # ─────── 站点值（profile 里只有 token，实际值在这里）──────────────────────────
 # Ports must match vime's start_vime_in_platform.sh: 8080 rollout, 8001 router.
 ROLLOUT_PORT="${ROLLOUT_PORT:-8080}"
-GATEWAY_PORT="${GATEWAY_PORT:-8100}"
 VLLM_ROUTER_PORT="${VLLM_ROUTER_PORT:-8001}"
+# gateway / observer / stale_gateway 端口不在这里：它们纯 polar 内部，真源是
+# profile.t2a.yaml（gateway_url、observer.port、gateway.extra_stale_ports）。
 # Kernels compile against this. 本机实测 acl.get_soc_name() = Ascend910_9382；
 # A3 是 ascend910_9391，A2 是 ascend910b1，换机器时按 get_soc_name() 的返回值改。
 SOC_VERSION="${SOC_VERSION:-Ascend910_9382}"
@@ -148,7 +149,6 @@ sed \
   -e "s|__POLAR_HOST__|${HOST_IP}|g" \
   -e "s|__VIME_ROUTER_HOST__|${VIME_NODE_IP}|g" \
   -e "s|__ROLLOUT_PORT__|${ROLLOUT_PORT}|g" \
-  -e "s|__GATEWAY_PORT__|${GATEWAY_PORT}|g" \
   -e "s|__VLLM_ROUTER_PORT__|${VLLM_ROUTER_PORT}|g" \
   -e "s|__SOC_VERSION__|${SOC_VERSION}|g" \
   -e "s|__NPU_POOL__|${NPU_POOL}|g" \

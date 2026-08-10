@@ -19,7 +19,10 @@
 service:
   bind_host: 0.0.0.0
   rollout_url: http://__POLAR_HOST__:__ROLLOUT_PORT__
-  gateway_url: http://__POLAR_HOST__:__GATEWAY_PORT__
+  # gateway 端口写在这里而非 launcher：它纯 polar 内部，不跟 vime 对表，
+  # 同机跑第二个 polar 时改这一处就够（loader 反解出 gateway_port，watcher/
+  # hostctl/残留清理都从这里取）。rollout/router 端口保持占位符：要跟 vime 配对。
+  gateway_url: http://__POLAR_HOST__:8100
   sglang_router_url: http://__VIME_ROUTER_HOST__:__VLLM_ROUTER_PORT__
   inference_engine: vllm
   model_served: __MODEL_SERVED__
@@ -57,6 +60,9 @@ observer:
 
 gateway:
   node_id: ascend-node-01
+  # 重启时额外清理的历史 gateway 端口。同机有别的 polar 时务必清空（写 []），
+  # 否则 restart 会杀掉占这些端口的进程 —— 它只按端口找监听者，不认是谁的。
+  extra_stale_ports: [8110]
   max_init_workers: 8
   max_run_workers: 64
   max_postrun_workers: 64

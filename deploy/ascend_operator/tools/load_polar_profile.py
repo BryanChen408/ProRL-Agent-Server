@@ -400,6 +400,13 @@ def main() -> int:
         "SGLANG_ROUTER_URL": router_url,
         "POLAR_OBSERVER_HOST": str(observer.get("host", "0.0.0.0")),
         "POLAR_OBSERVER_PORT": str(observer.get("port", 18088)),
+        # 端口唯一真源是 profile。导出给 hostctl 和残留清理，免得它们各写一份默认值
+        # 后与 profile 漂移（observer 就漂过：hostctl 写 18088，profile 是 18189）。
+        "POLAR_ROLLOUT_PORT": str(rollout_port),
+        "POLAR_GATEWAY_PORT": str(gateway_port),
+        "POLAR_EXTRA_STALE_GATEWAY_PORTS": ",".join(
+            str(int(p)) for p in (gateway.get("extra_stale_ports") or [])
+        ),
         "POLAR_GEN_PIPELINE_MAX": gen_max,
         "POLAR_OPT_PIPELINE_MAX": opt_max,
         "POLAR_PIPELINE_WATCH_INTERVAL": watch_interval,

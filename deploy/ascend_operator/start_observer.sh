@@ -20,7 +20,8 @@ NOHUP_LOG="${LOG_DIR}/observer.nohup.log"
 OBSERVER_LOG="${LOG_DIR}/observer.log"
 GATEWAY_URL="${POLAR_GATEWAY_URL:-http://127.0.0.1:8100}"
 OBSERVER_HOST="${POLAR_OBSERVER_HOST:-0.0.0.0}"
-OBSERVER_PORT="${POLAR_OBSERVER_PORT:-18088}"
+# 不兜底 18088：真源是 profile 的 observer.port，兜底只会掩盖 loader 没跑。
+OBSERVER_PORT="${POLAR_OBSERVER_PORT:?POLAR_OBSERVER_PORT 未设置：应由 load_polar_profile.py 从 profile 的 observer.port 导出}"
 
 cd "${POLAR_DEPLOY_DIR}"
 mkdir -p "${LOG_DIR}"

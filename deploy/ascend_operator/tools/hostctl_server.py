@@ -15,12 +15,30 @@ from pathlib import Path
 from typing import Any
 
 
-PORTS = {
-    "polar_rollout": 8080,
-    "polar_gateway": 8100,
-    "observer": 18088,
-    "stale_gateway": 8110,
-}
+def _ports_from_env() -> dict[str, int]:
+    """Ports come from the profile via load_polar_profile.py's exports.
+
+    以前这里写死四个端口，与 profile 漂移后 cleanup/status 会打到不存在的端口上
+    （observer 就漂过：这里 18088，profile 里 18189）。start_hostctl.sh 已 source
+    loader，所以正常路径下环境变量都在；下面的字面量只是脱离该路径时的兜底。
+    """
+    ports = {
+        "polar_rollout": int(os.environ.get("POLAR_ROLLOUT_PORT") or 8080),
+        "polar_gateway": int(os.environ.get("POLAR_GATEWAY_PORT") or 8100),
+        "observer": int(os.environ.get("POLAR_OBSERVER_PORT") or 18088),
+    }
+    # stale_gateway 可以为空（同机有别的 polar 时 profile 里写 []），空则不注册该名字。
+    stale = [
+        p.strip()
+        for p in (os.environ.get("POLAR_EXTRA_STALE_GATEWAY_PORTS") or "").split(",")
+        if p.strip()
+    ]
+    if stale:
+        ports["stale_gateway"] = int(stale[0])
+    return ports
+
+
+PORTS = _ports_from_env()
 DEFAULT_SAFE_CMD_PATTERNS = (
     "polar_rollout_observer.py",
     "serve_gateway",

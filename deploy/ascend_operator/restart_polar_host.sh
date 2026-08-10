@@ -21,7 +21,9 @@ ROOT="${POLAR_OUTPUT_DIR}"
 TOPOLOGY="${POLAR_TOPOLOGY}"
 ROLLOUT_URL="${POLAR_ROLLOUT_URL}"
 GATEWAY_URL="${POLAR_GATEWAY_URL}"
-EXTRA_STALE_PORTS="${POLAR_EXTRA_STALE_GATEWAY_PORTS:-8110}"
+# 不再兜底 8110：loader 从 profile 的 gateway.extra_stale_ports 导出（可以是空串）。
+# 兜底会让 profile 里写 [] 失效，而这个列表是拿去杀监听进程的，不能猜。
+EXTRA_STALE_PORTS="${POLAR_EXTRA_STALE_GATEWAY_PORTS-}"
 SKIP_INTERNAL_PORT_CLEANUP="${POLAR_SKIP_INTERNAL_PORT_CLEANUP:-0}"
 
 if [[ -t 1 && -z "${NO_COLOR:-}" ]]; then
@@ -46,7 +48,7 @@ info "topology=${TOPOLOGY}"
 info "rollout=${ROLLOUT_URL}"
 info "gateway=${GATEWAY_URL}"
 info "stale_ports=${EXTRA_STALE_PORTS:-none}"
-info "observer=http://0.0.0.0:${POLAR_OBSERVER_PORT:-18088}"
+info "observer=http://0.0.0.0:${POLAR_OBSERVER_PORT:?POLAR_OBSERVER_PORT 未设置：应由 load_polar_profile.py 从 profile 的 observer.port 导出}"
 info "skip_internal_port_cleanup=${SKIP_INTERNAL_PORT_CLEANUP}"
 
 url_port() {
@@ -155,5 +157,5 @@ ok "nodes    ${ROLLOUT_URL%/}/nodes    ${nodes}"
 
 section "Summary"
 ok "Polar services restarted"
-info "observer: http://<host-ip>:${POLAR_OBSERVER_PORT:-18088}"
+info "observer: http://<host-ip>:${POLAR_OBSERVER_PORT:?POLAR_OBSERVER_PORT 未设置：应由 load_polar_profile.py 从 profile 的 observer.port 导出}"
 info "logs: ${POLAR_LOG_DIR}/{rollout,gateway,pipeline_budget_watcher,observer}.log"
