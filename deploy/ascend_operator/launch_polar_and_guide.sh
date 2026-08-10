@@ -16,7 +16,7 @@ POLAR_REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd -P)"
 # 换成本仓自己的 venv 后，代码与配置同源。建法：
 #   python3 -m venv /mnt/model/cbx/polar-venv
 #   /mnt/model/cbx/polar-venv/bin/pip install -e /mnt/model/cbx/ProRL-Agent-Server
-POLAR_VENV="${POLAR_VENV:-/mnt/model/corlorlight_models/mingchengzou/ProRL2/polar-venv}"
+POLAR_VENV="${POLAR_VENV:-/mnt/model/cbx/polar-venv}"
 POLAR_PROFILE_SRC="${POLAR_REPO}/deploy/ascend_operator/profile.t2a.yaml"
 POLAR_PROFILE_RUNTIME=/tmp/polar_profile_runtime.yaml
 
@@ -24,7 +24,7 @@ POLAR_PROFILE_RUNTIME=/tmp/polar_profile_runtime.yaml
 # 端口必须与 vime 对表：vime 侧同名变量是 POLAR_ROLLOUT_PORT（rollout）和
 # VLLM_ROUTER_PORT（router）。改任一处都要两边一起改 —— 不一致的表现是 vime 等满
 # health 超时，或每个生成请求打到没人监听的端口，而不是启动期报错。
-ROLLOUT_PORT="${ROLLOUT_PORT:-8080}"
+ROLLOUT_PORT="${ROLLOUT_PORT:-12345}"
 VLLM_ROUTER_PORT="${VLLM_ROUTER_PORT:-8001}"
 # gateway / observer / stale_gateway 端口不在这里：它们纯 polar 内部，真源是
 # profile.t2a.yaml（gateway_url、observer.port、gateway.extra_stale_ports）。
@@ -94,7 +94,25 @@ if [[ ! -x "${POLAR_VENV}/bin/python" ]]; then
 fi
 
 # ─────── 获取本机 IP ──────────────────────────────────────────────────────────
-HOST_IP="${HOST_IP:-$(hostname -I | awk '{print $1}')}"
+# 必须与 vime 的 http_utils.get_host_info() 同源：那边用「UDP 探 8.8.8.8 看路由表」，
+# 这里照抄。`hostname -I` 只是按内核顺序列全部地址取第一个，多网卡会分叉 —— 实测本机
+# 四张（bond4.3000=10.1.30.48 带默认路由、data0.100=10.1.50.95、data1.100、docker0），
+# hostname -I 头名是 .95 而 polar 实际该对外宣告 .48，于是 __POLAR_HOST__ 渲染成 .95、
+# gateway_url 挂在一张 vime 拨不通的网卡上。bind_host 是 0.0.0.0 所以本地 curl 照样通，
+# 故这个错法在单机自测时不暴露。
+if [[ -z "${HOST_IP:-}" ]]; then
+  HOST_IP="$(python3 -c '
+import socket
+s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+try:
+    s.connect(("8.8.8.8", 80))
+    print(s.getsockname()[0])
+finally:
+    s.close()
+' 2>/dev/null || true)"
+  # 落回 hostname -I：无 python3 或无出口路由时不能让启动死在取 IP 这步。
+  [[ -z "${HOST_IP}" || "${HOST_IP}" == "127.0.0.1" ]] && HOST_IP="$(hostname -I | awk '{print $1}')"
+fi
 
 # ─────── 获取 vime rollout/router 机器 IP（worker）───────────────────────────
 echo ""
