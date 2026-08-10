@@ -47,14 +47,17 @@ find_python() {
   command -v python3
 }
 
+# 按 --port 精确匹配，别动同机其他 polar 的 observer（见 stop_observer.sh 同段注释）。
+OBSERVER_PATTERN="polar_rollout_observer[.]py .*--port ${OBSERVER_PORT}([[:space:]]|\$)"
+
 stop_existing() {
   local pids
-  pids="$(pgrep -f "polar_rollout_observer.py" 2>/dev/null || true)"
+  pids="$(pgrep -f "${OBSERVER_PATTERN}" 2>/dev/null || true)"
   if [[ -n "${pids}" ]]; then
-    cleanup_log "observer" "residual pids ${pids//$'\n'/ }"
+    cleanup_log "observer" "residual pids ${pids//$'\n'/ } (port ${OBSERVER_PORT})"
     kill ${pids} 2>/dev/null || true
     sleep 1
-    pids="$(pgrep -f "polar_rollout_observer.py" 2>/dev/null || true)"
+    pids="$(pgrep -f "${OBSERVER_PATTERN}" 2>/dev/null || true)"
     if [[ -n "${pids}" ]]; then
       cleanup_log "observer" "force killing residual pids ${pids//$'\n'/ }"
       kill -9 ${pids} 2>/dev/null || true

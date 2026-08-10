@@ -17,7 +17,9 @@ LOG_DIR="${POLAR_LOG_DIR}"
 PID_FILE="${ROOT}/pipeline_budget_watcher.pid"
 NOHUP_LOG="${LOG_DIR}/pipeline_budget_watcher.nohup.log"
 WATCH_LOG="${LOG_DIR}/pipeline_budget_watcher.log"
-GATEWAY_URL="${POLAR_GATEWAY_URL:-http://127.0.0.1:8100}"
+# 不兜底 127.0.0.1:8100：真源是 profile 的 service.gateway_url。兜底会让 watcher 去盯
+# 一个错的 gateway，还会让下面按 --gateway 精确杀进程的 pattern 匹配错对象。
+GATEWAY_URL="${POLAR_GATEWAY_URL:?POLAR_GATEWAY_URL 未设置：应由 load_polar_profile.py 从 profile 的 service.gateway_url 导出}"
 GEN_MAX="${POLAR_GEN_PIPELINE_MAX:-6}"
 OPT_MAX="${POLAR_OPT_PIPELINE_MAX:-3}"
 INTERVAL="${POLAR_PIPELINE_WATCH_INTERVAL:-2}"
@@ -34,14 +36,18 @@ ok_log() { printf '%s[ok]%s %-9s %s\n' "${GREEN}" "${RESET}" "$1" "$2"; }
 fail_log() { printf '%s[fail]%s %-7s %s\n' "${RED}" "${RESET}" "$1" "$2"; }
 cleanup_log() { printf '%s[cleanup]%s %-6s %s\n' "${BLUE}" "${RESET}" "$1" "$2"; }
 
+# 按 --gateway 精确匹配，别动同机其他 polar 的 watcher
+# （见 stop_pipeline_budget_watcher.sh 同段注释）。
+WATCHER_PATTERN="polar_pipeline_budget_watcher[.]py .*--gateway $(printf '%s' "${GATEWAY_URL}" | sed -e 's/[.]/[.]/g' -e 's|/|[/]|g')([[:space:]]|\$)"
+
 stop_existing() {
   local pids
-  pids="$(pgrep -f "polar_pipeline_budget_watcher.py" 2>/dev/null || true)"
+  pids="$(pgrep -f "${WATCHER_PATTERN}" 2>/dev/null || true)"
   if [[ -n "${pids}" ]]; then
-    cleanup_log "watcher" "residual pids ${pids//$'\n'/ }"
+    cleanup_log "watcher" "residual pids ${pids//$'\n'/ } (gateway ${GATEWAY_URL})"
     kill ${pids} 2>/dev/null || true
     sleep 1
-    pids="$(pgrep -f "polar_pipeline_budget_watcher.py" 2>/dev/null || true)"
+    pids="$(pgrep -f "${WATCHER_PATTERN}" 2>/dev/null || true)"
     if [[ -n "${pids}" ]]; then
       cleanup_log "watcher" "force killing residual pids ${pids//$'\n'/ }"
       kill -9 ${pids} 2>/dev/null || true
