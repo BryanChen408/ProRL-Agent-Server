@@ -22,7 +22,7 @@ if [[ -n "${ASCEND_SETENV}" && -f "${ASCEND_SETENV}" ]]; then
 fi
 
 export ASCEND_HOME_PATH="${ASCEND_HOME_PATH:-/usr/local/Ascend/cann-9.0.0}"
-export SOC_VERSION="${SOC_VERSION:-ascend910b1}"
+export SOC_VERSION="${SOC_VERSION:-ascend910_9382}"
 export ASCENDC_SOC_VERSION="${ASCENDC_SOC_VERSION:-${SOC_VERSION}}"
 export BUILD_TYPE="${BUILD_TYPE:-Release}"
 
