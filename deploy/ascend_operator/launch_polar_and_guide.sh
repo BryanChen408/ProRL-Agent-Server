@@ -105,6 +105,22 @@ ASC_DEVKIT_DIR="${ASC_DEVKIT_DIR:-/mnt/model/cbx/asc-devkit-9.0.0}"
 VIME_SHARE_ROOT="${VIME_SHARE_ROOT:-/mnt/model}"
 VIME_SCRATCH_DIR="${VIME_SCRATCH_DIR:-${VIME_SHARE_ROOT}/cbx/scratch}"
 
+# ─────── 先停掉在跑的 polar（必须排在所有可能失败的步骤之前）──────────────────
+# 停旧实例原本只在最后的 restart_polar_host.sh 里做（它的 "Stop Existing Services" 段）。
+# 后果：本脚本前段任何一步失败退出，旧实例都会**继续活着**，而它拨的是上一轮的 router
+# 地址。vime 那边只轮询 rollout 的 /health，响应是 {"status":"ok","nodes":1} —— 不含拓扑
+# 信息，旧实例和本轮实例长得一模一样。于是 vime 认为 polar 就绪、开始训练，而旧 polar
+# 往上一轮那台机器的 :8001 拨（那儿没有本轮的 router）→ 每个 session 拿不到 trace →
+# 日志里全是 "0 usable tokens"，两边都不报错。
+#
+# 实测踩过两次：脚本在 `source ${POLAR_VENV}/bin/activate` 处失败退出（conda env 没有
+# 这个文件），停旧实例的代码根本没跑到，旧 polar 就一直骗过 vime 的就绪检查。
+#
+# 所以在这里先停一次。幂等：没有在跑的实例时 stop_polar.sh 只打 "no pid file" 就返回。
+# `|| true`：停不掉不该阻断启动 —— 后面 restart_polar_host.sh 还会再停一次并清端口。
+echo "[polar-init] 先停掉可能在跑的旧 polar（避免它骗过 vime 的就绪检查）..."
+bash "$(dirname "${BASH_SOURCE[0]}")/stop_polar.sh" 2>&1 | sed 's/^/[polar-init]   /' || true
+
 # ─────── asc-devkit 自举：缺了就拉，软链不对就补（幂等，每次启动过一遍）────────
 # 钉 9.0.0 而非 master：实测 API 名对本机 CANN 9.0.0 头文件命中率 95% vs 82%。
 # 软链把 skill 写死的 docs/zh/api 指到 9.0.0 实际布局 docs/api/context；相对路径，
