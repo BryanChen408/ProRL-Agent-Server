@@ -6,7 +6,6 @@ skills:
   - ascendc-api-best-practices
   - ascendc-docs-search
   - ascendc-tiling-design
-  - tilelang2ascend-operator-project-init
   - tilelang2ascend-translator
   - tilelang2ascend-case-simplifier
   - ops-profiling
@@ -126,7 +125,7 @@ Phase 7: Trace 记录            (tilelang2ascend-trace-recorder)
 │   │   └── <op_name>.cpp        # Host 端: tiling + EXEC_KERNEL_CMD 启动
 │   ├── op_kernel/
 │   │   └── <op_name>.cpp        # Device 端: CopyIn→Compute→CopyOut
-│   └── utils/                   # 固定工具文件（从 tilelang2ascend-operator-project-init 模板复制）
+│   └── utils/                   # 固定工具文件(骨架预生成时铺入)
 │       └── torch_kernel_helper.h   # EXEC_KERNEL_CMD 宏
 │
 │
@@ -196,8 +195,6 @@ Phase 7: Trace 记录            (tilelang2ascend-trace-recorder)
 - `ascendc-blaze-best-practice/assets/op_tiling/mx/quant_matmul_mx_tiling.h`
 - `ascendc-blaze-best-practice/assets/op_tiling/mx/quant_matmul_mx_tiling_data.h`
 - `ascendc-blaze-best-practice/` …(另有 25 项)
-- `ascendc-blaze-migration/references/migration-workflow.md`
-- `ascendc-blaze-migration/references/rotate-quant-pilot.md`
 - `ascendc-code-review/core/methodology.md`
 - `ascendc-code-review/references/ascendc-api.md`
 - `ascendc-code-review/references/ascendc-perf.md`
@@ -230,31 +227,6 @@ Phase 7: Trace 记录            (tilelang2ascend-trace-recorder)
 - `ascendc-crash-debug/scripts/memcheck_input.json.template`
 - `ascendc-crash-debug/scripts/parse_plog.py`
 - `ascendc-crash-debug/scripts/run_memcheck_pre.sh`
-- `ascendc-direct-invoke-template/references/add_custom/CMakeLists.txt`
-- `ascendc-direct-invoke-template/references/add_custom/README.md`
-- `ascendc-direct-invoke-template/references/add_custom/op_extension/add_custom_torch.cpp`
-- `ascendc-direct-invoke-template/references/add_custom/op_extension/ops.h`
-- `ascendc-direct-invoke-template/references/add_custom/op_extension/register.cpp`
-- `ascendc-direct-invoke-template/references/add_custom/op_host/add_custom.asc`
-- `ascendc-direct-invoke-template/references/add_custom/op_host/data_utils.h`
-- `ascendc-direct-invoke-template/references/add_custom/op_kernel/add_custom_kernel.asc`
-- `ascendc-direct-invoke-template/references/add_custom/op_kernel/add_custom_tiling.h`
-- `ascendc-direct-invoke-template/references/add_custom/run.sh`
-- `ascendc-direct-invoke-template/references/add_custom/scripts/gen_data.py`
-- `ascendc-direct-invoke-template/references/add_custom/scripts/golden.py`
-- `ascendc-direct-invoke-template/references/add_custom/scripts/test_torch.py`
-- `ascendc-direct-invoke-template/references/add_custom/scripts/verify_result.py`
-- `ascendc-direct-invoke-template/references/kernel_launch_details.md`
-- `ascendc-direct-invoke-template/references/kirin_add_template/CMakeLists.txt`
-- `ascendc-direct-invoke-template/references/kirin_add_template/README.md`
-- `ascendc-direct-invoke-template/references/kirin_add_template/UPSTREAM.md`
-- `ascendc-direct-invoke-template/references/kirin_add_template/add_custom.cpp`
-- `ascendc-direct-invoke-template/references/kirin_add_template/add_custom_tiling.h`
-- `ascendc-direct-invoke-template/references/kirin_add_template/cmake/Modules/CMakeCCECompiler.cmake.in`
-- `ascendc-direct-invoke-template/references/kirin_add_template/cmake/Modules/CMakeCCEInformation.cmake`
-- `ascendc-direct-invoke-template/references/kirin_add_template/cmake/Modules/CMakeDetermineCCECompiler.cmake`
-- `ascendc-direct-invoke-template/references/kirin_add_template/cmake/Modules/CMakeTestCCECompiler.cmake`
-- `ascendc-direct-invoke-template/` …(另有 30 项)
 - `ascendc-docs-search/references/api-index.md`
 - `ascendc-docs-search/references/compatibility.md`
 - `ascendc-docs-search/references/example-catalog.md`
@@ -264,15 +236,6 @@ Phase 7: Trace 记录            (tilelang2ascend-trace-recorder)
 - `ascendc-docs-search/scripts/ascend_search_skill.py`
 - `ascendc-docs-search/scripts/clean_markdown.py`
 - `ascendc-docs-search/scripts/find_api_doc.sh`
-- `ascendc-env-check/references/asys_commands.md`
-- `ascendc-env-check/references/env_config_guide.md`
-- `ascendc-env-check/references/kirin_platform_guide.md`
-- `ascendc-env-check/references/npu_commands.md`
-- `ascendc-env-check/references/troubleshooting.md`
-- `ascendc-env-check/scripts/_npu_info.py`
-- `ascendc-env-check/scripts/check_env.sh`
-- `ascendc-env-check/scripts/get_npu_arch.py`
-- `ascendc-env-check/scripts/npu_info.sh`
 - `ascendc-precision-debug/references/ascendc-dumptensor-refs/api-reference.md`
 - `ascendc-precision-debug/references/ascendc-dumptensor-refs/error-patterns.md`
 - `ascendc-precision-debug/references/ascendc-dumptensor.md`
@@ -362,8 +325,6 @@ Phase 7: Trace 记录            (tilelang2ascend-trace-recorder)
 - `ops-profiling/scripts/msprof_perf_summary.py`
 - `ops-profiling/scripts/msprof_profile_run.sh`
 - `ops-profiling/scripts/perf_summary.py`
-- `tilelang2ascend-operator-project-init/templates/(整棵目录)`
-- `tilelang2ascend-operator-project-init/scripts/detect_ascend_kernel_project.sh`
 - `tilelang2ascend-precision-tuning/references/api-reference.md`
 - `tilelang2ascend-precision-tuning/references/debug-workflow-complex.md`
 - `tilelang2ascend-precision-tuning/references/debug-workflow-simple.md`
@@ -405,10 +366,6 @@ Phase 7: Trace 记录            (tilelang2ascend-trace-recorder)
 - `tilelang2ascend-translator/scripts/evaluate_ascendc.sh`
 - `tilelang2ascend-translator/scripts/validate_ascendc_impl.py`
 - `tilelang2ascend-translator/scripts/verification_ascendc.py`
-- `torch-ascendc-op-extension/templates/(整棵目录)`
-- `torch-ascendc-op-extension/references/anti_patterns.md`
-- `torch-ascendc-op-extension/references/operation_checklist.md`
-- `torch-ascendc-op-extension/references/troubleshooting.md`
 
 <!-- END skill-reference -->
 
@@ -513,7 +470,7 @@ mkdir -p {output_dir}/kernel/op_host
 mkdir -p {output_dir}/kernel/op_kernel
 mkdir -p {output_dir}/kernel/utils
 # 从模板复制固定工具文件（不生成，内容固定）
-cp .claude/skills/tilelang2ascend-operator-project-init/templates/ascend-kernel/csrc/utils/torch_kernel_helper.h {output_dir}/kernel/utils/
+cp .claude/workflows/templates/kernel_skeleton/kernel/utils/torch_kernel_helper.h {output_dir}/kernel/utils/
 ```
 
 kernel 目录结构（后续 Phase 4 由 Developer / translator skill 填充）：
@@ -608,7 +565,7 @@ return torch.ops.npu.<op_name>(x, kernel_size, eps)
 1. 读取 `{output_dir}/model.py` 中 `get_input_groups()` 函数，从 `json_path` 赋值语句提取引用的 `.json` 文件名（如 `"8_QuantScatter.json"`），此文件即为目标 JSON
 2. Phase 1.1 已将动态路径（`os.path.splitext(os.path.basename(__file__))[0]`）修正为固定的算子 JSON 文件名，因此 `get_input_groups()` 指向的一定是 `{output_dir}` 内实际存在的 JSON 文件
 
-调用 `case-simplifier` skill，读取目标 `.json` 文件（JSON Lines 格式，每行一个 `{"inputs": [...]}` 对象），对其中的输入 cases 进行精简，使 case 数量尽量不超过 10 个，同时保证覆盖度。
+调用 `tilelang2ascend-case-simplifier` skill，读取目标 `.json` 文件（JSON Lines 格式，每行一个 `{"inputs": [...]}` 对象），对其中的输入 cases 进行精简，使 case 数量尽量不超过 10 个，同时保证覆盖度。
 
 **前置操作**：
 - 先将目标 `.json` 文件备份为同名 `.json.bak`（保留全量用例原件）

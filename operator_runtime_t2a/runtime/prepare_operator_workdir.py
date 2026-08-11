@@ -40,9 +40,9 @@ def _assert_upstream_paths(workdir: Path) -> None:
     upstream would otherwise only surface when a rollout trips over it.
     """
     probes = [
-        # Phase 1.2 的固定动作要 cp 的文件
-        workdir / ".claude/skills/tilelang2ascend-operator-project-init"
-        / "templates/ascend-kernel/csrc/utils/torch_kernel_helper.h",
+        # Phase 1.2 的固定动作要 cp 的文件(源已从 project-init skill 改为
+        # kernel_skeleton 模板;skill 已归档进 _archive/)
+        workdir / ".claude/workflows/templates/kernel_skeleton/kernel/utils/torch_kernel_helper.h",
     ]
     if (workdir / ".claude" / "workflows").is_dir():
         probes.append(workdir / ".claude/workflows/templates/archive_tasks")
