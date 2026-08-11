@@ -277,6 +277,45 @@ def _build_error_body(
     return {"error": {"message": message, "type": error_type}}
 
 
+_SALVAGE_PROMPT = (
+    "[系统]你上一轮输出达到长度上限被截断,未产生任何动作。\n"
+    "以下是你上一轮被截断的完整内部思考(作为你的笔记返还给你):\n"
+    "「{draft}」\n"
+    "要求:用一句话在正文开头写下你要做的下一个动作,然后立刻发出对应的一个小步 tool call"
+    "(例如先把 kernel 骨架和 Init 写进文件);不要重新完整规划,直接从笔记的最后状态继续。"
+)
+
+
+def _salvage_message_for(completions: list[dict[str, Any]]) -> dict[str, str] | None:
+    """截断续命注入:上轮是「空截断」(finish=length + content 空 + 无 tool_calls)时,
+    把被 CLI 丢弃的思考残稿作为 user 消息返还 —— 打破「同样上下文 → 同样大规划 →
+    再顶穿」的确定性死循环(4 连后 CLI 熔断、session 早夭)。残稿在,模型从
+    「已规划 90% 的现场」续写小动作,而不是从零重开一局。
+
+    只在零产出截断时注入:有 tool_calls 的截断(半截动作)和正常轮一律不碰。
+    注入进 original_request 落盘 → 训练可见,与 tool result 同性质(环境反馈)。
+    """
+    if not completions:
+        return None
+    response = completions[-1].get("response") or {}
+    choices = response.get("choices") or []
+    first = choices[0] if choices and isinstance(choices[0], dict) else {}
+    if first.get("finish_reason") != "length":
+        return None
+    message = first.get("message") or {}
+    content = message.get("content")
+    if isinstance(content, str) and content.strip():
+        return None
+    if message.get("tool_calls"):
+        return None
+    draft = (message.get("reasoning_content") or "").strip()
+    prompt = _SALVAGE_PROMPT.format(draft=draft) if draft else (
+        "[系统]你上一轮输出达到长度上限被截断,未产生任何动作。"
+        "请立刻发出一个小步 tool call(例如先把骨架写进文件);不要重新完整规划。"
+    )
+    return {"role": "user", "content": prompt}
+
+
 def _upstream_error_kind(exc: Exception) -> str:
     """Coarse bucket for an upstream failure, by exception type (not message text)."""
     if isinstance(exc, UpstreamHTTPError):
@@ -729,6 +768,17 @@ async def proxy_request(request: Request, path: str):
     openai_request = transformer.transform_request(transformed_body)
     openai_request["model"] = state.node.model_served
     is_streaming = openai_request.get("stream", False)
+
+    # 截断续命注入(POLAR_TRUNCATION_SALVAGE=0 关闭做 A/B):
+    # 上轮空截断时把残稿返还给模型,打破 4 连顶穿熔断的死循环。
+    if os.environ.get("POLAR_TRUNCATION_SALVAGE", "1") == "1":
+        salvage_msg = _salvage_message_for(state.storage.get_completions(session_id))
+        if salvage_msg is not None:
+            openai_request.setdefault("messages", []).append(salvage_msg)
+            logger.info(
+                "truncation salvage injected session=%s draft_chars=%d",
+                session_id, len(salvage_msg["content"]),
+            )
 
     if is_streaming:
         return await _handle_streaming(
