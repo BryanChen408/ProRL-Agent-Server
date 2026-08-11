@@ -3,7 +3,7 @@ set -uo pipefail
 
 WARMUP="${WARMUP:-5}"
 REPEATS="${REPEATS:-50}"
-export SOC_VERSION="${SOC_VERSION:-ascend910b1}"
+export SOC_VERSION="${SOC_VERSION:-ascend910_9382}"
 # 先 readlink -f 解掉软链接再取 dirname —— 直接 dirname 在脚本被软链接调用时会拿到
 # 软链接的目录而不是真脚本目录,导致 _SCRIPT_DIR/WORK_ROOT 全错。readlink -f 对非软链
 # 按原样返回,所以两种情况都安全。
@@ -425,12 +425,23 @@ if ! (
   # 改动3: 编译失败时把首个错误 ±上下文直接打到 stderr(进工具结果),否则 agent 只能拿到
   # "完整错误在 metrics_error.log",38% 的 session 会跑去自编译 cmake 反推错误、白烧轮数。
   echo "--- compile.log 首个错误上下文(完整日志见 $OUT_DIR/compile.log) ---" >&2
-  _ERR_LINE=$(grep -n -m1 -E "error:|CMake Error|undefined reference" "$OUT_DIR/compile.log" | cut -d: -f1)
-  if [[ -n "$_ERR_LINE" ]]; then
-    sed -n "$(( _ERR_LINE > 5 ? _ERR_LINE - 5 : 1 )),$(( _ERR_LINE + 25 ))p" "$OUT_DIR/compile.log" >&2
-  else
-    tail -30 "$OUT_DIR/compile.log" >&2
-  fi
+  # 单进程 awk 取代 grep|cut+sed 管道:① grep -E 只有三种错误形态,ccec/ld/Traceback 会漏到
+  #   tail 兜底拿错段;② grep -n|cut 行号解析脆。这里一次扫描、定位首个错误、打印前后文。
+  awk -v before=5 -v after=25 '
+    { lines[NR] = $0 }
+    !found && /error:|CMake Error|undefined reference|fatal error|FAILED:|ld: |Traceback|\[ERROR\]/ {
+      found = NR
+    }
+    END {
+      if (found) {
+        s = found - before; if (s < 1) s = 1
+        e = found + after;  if (e > NR) e = NR
+        for (i = s; i <= e; i++) print lines[i]
+      } else {
+        s = NR - 29; if (s < 1) s = 1
+        for (i = s; i <= NR; i++) print lines[i]
+      }
+    }' "$OUT_DIR/compile.log" >&2
   echo "[ascendc-eval] compile FAILED"; fail_hint; exit 1
 fi
 
