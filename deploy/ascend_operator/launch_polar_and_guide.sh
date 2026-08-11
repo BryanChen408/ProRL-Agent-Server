@@ -10,13 +10,21 @@ set -euo pipefail
 #   4. Polar 启动后，vime 自动检测到并开始训练
 
 POLAR_REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd -P)"
-# 本项目自己的 venv。原先指向 corlorlight_models/mingchengzou/ 下那个 —— 它是 editable
-# 安装且 .pth 指向**他的** src，于是 launcher 从本仓读、而 import polar 解析到他的代码
-# （两仓 git 历史互不相识，operator_runtime_t2a 与 src 共 6 个文件有实质差异）。
-# 换成本仓自己的 venv 后，代码与配置同源。建法：
-#   python3 -m venv /mnt/model/cbx/polar-venv
-#   /mnt/model/cbx/polar-venv/bin/pip install -e /mnt/model/cbx/ProRL-Agent-Server
-POLAR_VENV="${POLAR_VENV:-/mnt/model/cbx/polar-venv}"
+# 本项目自己的 venv。原先指向 corlorlight_models/mingchengzou/ 下那个（别人的目录）。
+#
+# 这个 venv **只提供第三方依赖**，polar 本身不需要装：start_polar_nohup.sh:128 在启动时
+# 注入 PYTHONPATH="${POLAR_ROOT}/src"，POLAR_ROOT 由 _paths.sh 从脚本自身位置往上两级推得
+# —— 也就是本仓。故 polar 代码来自本仓，与 venv 里有没有 polar 无关。
+# （旧 venv 里那个 editable .pth 指向别的仓，但 PYTHONPATH 排在 site-packages 之前，
+#   launcher 路径上不生效；只有绕过 launcher 直接 $POLAR_VENV/bin/python 才会命中它。）
+#
+# 建法（conda 默认 channel 要求先接受 ToS，用 conda-forge 绕过）：
+#   conda create -y --prefix /mnt/model/cbx/env/polar-env -c conda-forge \
+#     --override-channels python=3.11
+#   /mnt/model/cbx/env/polar-env/bin/python -m ensurepip --upgrade
+#   /mnt/model/cbx/env/polar-env/bin/python -m pip install \
+#     fastapi uvicorn httpx pydantic pyyaml
+POLAR_VENV="${POLAR_VENV:-/mnt/model/cbx/env/polar-env}"
 POLAR_PROFILE_SRC="${POLAR_REPO}/deploy/ascend_operator/profile.t2a.yaml"
 POLAR_PROFILE_RUNTIME=/tmp/polar_profile_runtime.yaml
 
@@ -86,10 +94,11 @@ fi
 # ─────── 检查前置条件 ─────────────────────────────────────────────────────────
 if [[ ! -x "${POLAR_VENV}/bin/python" ]]; then
   echo "ERROR: polar venv 不存在于 ${POLAR_VENV}" >&2
-  echo "  请先执行：" >&2
-  echo "    python3 -m venv ${POLAR_VENV}" >&2
-  echo "    source ${POLAR_VENV}/bin/activate" >&2
-  echo "    pip install -e ${POLAR_REPO}" >&2
+  echo "  该 venv 只提供第三方依赖，polar 本身无需安装（代码由 start_polar_nohup.sh" >&2
+  echo "  注入的 PYTHONPATH=${POLAR_REPO}/src 提供）。请先执行：" >&2
+  echo "    conda create -y --prefix ${POLAR_VENV} -c conda-forge --override-channels python=3.11" >&2
+  echo "    ${POLAR_VENV}/bin/python -m ensurepip --upgrade" >&2
+  echo "    ${POLAR_VENV}/bin/python -m pip install fastapi uvicorn httpx pydantic pyyaml" >&2
   exit 1
 fi
 
