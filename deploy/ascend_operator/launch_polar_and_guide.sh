@@ -25,8 +25,8 @@ POLAR_REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd -P)"
 #   /mnt/model/cbx/env/polar-env/bin/python -m pip install \
 #     fastapi uvicorn httpx pydantic pyyaml
 POLAR_VENV="${POLAR_VENV:-/mnt/model/cbx/env/polar-env}"
-POLAR_PROFILE_SRC="${POLAR_REPO}/deploy/ascend_operator/profile.t2a.yaml"
-POLAR_PROFILE_RUNTIME=/tmp/polar_profile_runtime.yaml
+POLAR_PROFILE_SRC="${POLAR_PROFILE_SRC:-${POLAR_REPO}/deploy/ascend_operator/profile.t2a.yaml}"
+POLAR_PROFILE_RUNTIME="${POLAR_PROFILE_RUNTIME:-/tmp/polar_profile_runtime.$(basename "${POLAR_PROFILE_SRC}" .yaml).yaml}"
 
 # ─────── 站点值（profile 里只有 token，实际值在这里）──────────────────────────
 # 端口必须与 vime 对表：vime 侧同名变量是 POLAR_ROLLOUT_PORT（rollout）和
@@ -118,8 +118,29 @@ VIME_SCRATCH_DIR="${VIME_SCRATCH_DIR:-${VIME_SHARE_ROOT}/cbx/scratch}"
 #
 # 所以在这里先停一次。幂等：没有在跑的实例时 stop_polar.sh 只打 "no pid file" 就返回。
 # `|| true`：停不掉不该阻断启动 —— 后面 restart_polar_host.sh 还会再停一次并清端口。
+#
+# 这个 stop 必须按**当前 profile** 来停，否则同机并存第二个 polar 时会互相误杀（或者
+# 什么都没停）。隔离边界是 profile 的 paths.output_dir：每份 profile 有自己的 output root，
+# pid / 日志 / topology 都落在它下面。
+#
+# 不能在这里把 POLAR_PROFILE 指向 POLAR_PROFILE_SRC 让 stop 自己去解析：**source profile
+# 还没渲染**，profile.t2a.yaml 里 rollout_url 的端口是 __ROLLOUT_PORT__ 占位符，而
+# load_polar_profile.py:218 用 urlparse().port，非数字端口直接 ValueError（实测）。
+# 于是 loader 崩掉、POLAR_OUTPUT_ROOT 为空，stop 退回默认目录 —— 这正是之前"四个服务全打
+# no pid file、端口上却还有 polar 在跑"的原因。
+#
+# 所以这里只取 paths.output_dir（纯字符串、无占位符），自己拼出 output root 传给 stop。
+# stop_polar.sh 的 loader 即使崩掉，这个外部 export 的值也会保留，pid 扫描照样正确。
+_out_dir="$(sed -n 's|^[[:space:]]*output_dir:[[:space:]]*||p' "${POLAR_PROFILE_SRC}" | head -1)"
+if [[ -n "${_out_dir}" ]]; then
+  [[ "${_out_dir}" == /* ]] || _out_dir="${POLAR_REPO}/${_out_dir}"
+  echo "[polar-init] 本 profile 的 output root：${_out_dir}"
+else
+  echo "[polar-init] WARN: 从 ${POLAR_PROFILE_SRC} 取不到 paths.output_dir，stop 将退回默认目录。" >&2
+fi
 echo "[polar-init] 先停掉可能在跑的旧 polar（避免它骗过 vime 的就绪检查）..."
-bash "$(dirname "${BASH_SOURCE[0]}")/stop_polar.sh" 2>&1 | sed 's/^/[polar-init]   /' || true
+POLAR_OUTPUT_ROOT="${_out_dir}" \
+  bash "$(dirname "${BASH_SOURCE[0]}")/stop_polar.sh" 2>&1 | sed 's/^/[polar-init]   /' || true
 
 # ─────── asc-devkit 自举：缺了就拉，软链不对就补（幂等，每次启动过一遍）────────
 # 钉 9.0.0 而非 master：实测 API 名对本机 CANN 9.0.0 头文件命中率 95% vs 82%。
