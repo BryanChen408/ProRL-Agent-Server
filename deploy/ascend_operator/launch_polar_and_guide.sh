@@ -36,17 +36,46 @@ ROLLOUT_PORT="${ROLLOUT_PORT:-12345}"
 VLLM_ROUTER_PORT="${VLLM_ROUTER_PORT:-8001}"
 # gateway / observer / stale_gateway 端口不在这里：它们纯 polar 内部，真源是
 # profile.t2a.yaml（gateway_url、observer.port、gateway.extra_stale_ports）。
-# Kernels compile against this. 本机实测 acl.get_soc_name() = Ascend910_9382；
-# A3 是 ascend910_9391，A2 是 ascend910b1，换机器时按 get_soc_name() 的返回值改。
-SOC_VERSION="${SOC_VERSION:-Ascend910_9382}"
+# Kernel 按这个值编译，编错芯片的表现是 sandbox 里编译失败或产物不对。
+#
+# 不读继承来的 SOC_VERSION：**实测它会是错的** —— 训练镜像里带着
+# SOC_VERSION=ascend910_9391（A3），而本机 acl.get_soc_name() 是 Ascend910_9382。
+# 原先写 "${SOC_VERSION:-Ascend910_9382}"，环境变量优先 → 默认值形同虚设。
+# 改为实测优先，显式覆盖走独立的 POLAR_SOC_VERSION（跟继承值区分开）。
+#
+# acl 只在带 CANN 的 python 里可用（polar 的 venv 没有），故显式给 CANN 的 site-packages。
+if [[ -n "${POLAR_SOC_VERSION:-}" ]]; then
+  SOC_VERSION="${POLAR_SOC_VERSION}"
+  echo "[polar-init] SOC 由 POLAR_SOC_VERSION 指定：${SOC_VERSION}"
+else
+  _soc_detected=""
+  for _cann in /usr/local/Ascend/cann-9.0.0/python/site-packages \
+               /usr/local/Ascend/ascend-toolkit/latest/python/site-packages; do
+    [[ -d "${_cann}" ]] || continue
+    _soc_detected="$(PYTHONPATH="${_cann}" python3 -c 'import acl; print(acl.get_soc_name())' 2>/dev/null || true)"
+    [[ -n "${_soc_detected}" ]] && break
+  done
+  if [[ -n "${_soc_detected}" ]]; then
+    SOC_VERSION="${_soc_detected}"
+    echo "[polar-init] SOC 实测：${SOC_VERSION}（acl.get_soc_name）"
+  else
+    SOC_VERSION="Ascend910_9382"
+    echo "[polar-init] WARN: acl.get_soc_name() 不可用，兜底 SOC=${SOC_VERSION}。" >&2
+    echo "  与本机芯片不符时 kernel 会编错，用 POLAR_SOC_VERSION 显式指定。" >&2
+    echo "  参考：A3=ascend910_9391，A2=ascend910b1。" >&2
+  fi
+fi
 # Polar host's own cards. 默认由 vime 的 resolved layout 推出（roles.polar_reserved），
 # 见下面的交接段 —— 手写会和 vime 侧的卡位分叉。NPU_POOL 显式设置时仍然优先。
 # Must equal vime's --hf-checkpoint: vLLM registers the model under that path,
 # and Polar sends this string as openai_request["model"]. A mismatch is a 404
-# per request, not a startup error. Platform path, not RUNBOOK's /home/docker.
-# 必须与 vime 的 HF_CKPT 逐字相同（vLLM 按权重路径注册模型名）。vime 侧是
-# ${VIME_SHARE_ROOT}/Qwen3.6-35B-A3B，本机共享盘挂在 /mnt/model 而非默认 /models。
-MODEL_SERVED="${MODEL_SERVED:-/mnt/model/Qwen3.6-35B-A3B}"
+# per request, not a startup error.
+#
+# 默认由 vime 的交接文件提供（VIME_HF_CKPT，见下面的交接段）—— 不再手写。
+# 手写过不去的原因：这个字符串跟着**vime 那台机器**的共享盘挂载点变（A 上 /mnt/model、
+# 平台节点上 /mnt/host-model），而它不是给 polar 打开文件用的、是模型名，所以必须填
+# vime 的路径而不是本机的路径。这点反直觉，是异机拓扑最容易填错的一处。
+# MODEL_SERVED 显式设置时仍然优先。
 # Host paths on this machine — read by the Polar process, not the sandbox:
 # task_assets_dir is globbed here, asc_devkit_dir is bind-mounted into sandboxes.
 # 与 vime 的 OPERATOR_TASKS_DIR 同一份，不需要第二份拷贝：{op}.py 走 vime 的
@@ -169,6 +198,11 @@ if [[ -z "${VIME_NODE_IP:-}" ]]; then
   if [[ -z "${NPU_POOL:-}" && -n "${POLAR_NPU_POOL:-}" ]]; then
     NPU_POOL="[$(printf '%s' "${POLAR_NPU_POOL}" | sed 's/,/, /g')]"
   fi
+  # 模型名同源自 vime 的 HF_CKPT。显式 MODEL_SERVED 仍优先。
+  if [[ -z "${MODEL_SERVED:-}" && -n "${VIME_HF_CKPT:-}" ]]; then
+    MODEL_SERVED="${VIME_HF_CKPT}"
+    echo "[polar-init] 模型名取自 vime 交接：${MODEL_SERVED}"
+  fi
   if [[ -f "${HANDOFF_LAYOUT}" ]]; then
     echo "[polar-init] vime 本轮 resource layout："
     sed 's/^/[polar-init]   /' "${HANDOFF_LAYOUT}"
@@ -178,6 +212,13 @@ fi
 if [[ -z "${NPU_POOL:-}" ]]; then
   echo "ERROR: 未取到 NPU_POOL（vime handoff 无 polar_reserved，且未显式设置）。" >&2
   echo "  在拓扑模板里给 roles.polar_reserved 加本机卡段，或显式设 NPU_POOL='[0, 1, 2, 3]'。" >&2
+  exit 1
+fi
+if [[ -z "${MODEL_SERVED:-}" ]]; then
+  echo "ERROR: 未取到 MODEL_SERVED（vime handoff 无 VIME_HF_CKPT，且未显式设置）。" >&2
+  echo "  它必须与 vime 的 HF_CKPT 逐字相同 —— 填 **vime 那台机器** 上的权重路径，" >&2
+  echo "  不是本机路径（它是 vLLM 注册的模型名，不用于打开文件）。" >&2
+  echo "  走 VIME_NODE_IP 逃生舱时没有交接文件可读，须显式给。" >&2
   exit 1
 fi
 
