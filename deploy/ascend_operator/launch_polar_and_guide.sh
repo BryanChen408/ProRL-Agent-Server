@@ -48,13 +48,19 @@ if [[ -n "${POLAR_SOC_VERSION:-}" ]]; then
   SOC_VERSION="${POLAR_SOC_VERSION}"
   echo "[polar-init] SOC 由 POLAR_SOC_VERSION 指定：${SOC_VERSION}"
 else
+  # 候选用 glob 而非写死版本号：宿主机与训练容器的 CANN 安装路径不同（实测宿主机上
+  # 前两个固定路径都不命中，探测失败走了兜底）。先试继承的 PYTHONPATH（shell 里
+  # source 过 set_env.sh 时最省事），再扫 /usr/local/Ascend 下所有 python/site-packages。
   _soc_detected=""
-  for _cann in /usr/local/Ascend/cann-9.0.0/python/site-packages \
-               /usr/local/Ascend/ascend-toolkit/latest/python/site-packages; do
-    [[ -d "${_cann}" ]] || continue
-    _soc_detected="$(PYTHONPATH="${_cann}" python3 -c 'import acl; print(acl.get_soc_name())' 2>/dev/null || true)"
-    [[ -n "${_soc_detected}" ]] && break
-  done
+  _soc_detected="$(python3 -c 'import acl; print(acl.get_soc_name())' 2>/dev/null || true)"
+  if [[ -z "${_soc_detected}" ]]; then
+    for _cann in /usr/local/Ascend/*/python/site-packages \
+                 /usr/local/Ascend/*/*/python/site-packages; do
+      [[ -d "${_cann}" ]] || continue
+      _soc_detected="$(PYTHONPATH="${_cann}" python3 -c 'import acl; print(acl.get_soc_name())' 2>/dev/null || true)"
+      [[ -n "${_soc_detected}" ]] && break
+    done
+  fi
   if [[ -n "${_soc_detected}" ]]; then
     SOC_VERSION="${_soc_detected}"
     echo "[polar-init] SOC 实测：${SOC_VERSION}（acl.get_soc_name）"
@@ -279,7 +285,11 @@ echo "         推理端点: ${ROUTER_URL}"
 echo "         SOC     : ${SOC_VERSION}   卡池: ${NPU_POOL}"
 echo ""
 
-source "${POLAR_VENV}/bin/activate"
+# 不 source bin/activate：那是 venv 的产物，conda env 没有这个文件（conda 用
+# `conda activate`，要先 shell hook）。而 activate 本质上只做三件事——改 PATH、设
+# VIRTUAL_ENV、改提示符——这里真正需要的只有 PATH，且下面已经用绝对路径把
+# POLAR_PYTHON 传下去了。所以直接前置 PATH，venv 和 conda env 都适用。
+export PATH="${POLAR_VENV}/bin:${PATH}"
 cd "${POLAR_REPO}"
 
 POLAR_PROFILE="${POLAR_PROFILE_RUNTIME}" \
