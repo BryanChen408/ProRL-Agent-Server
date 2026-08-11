@@ -1,6 +1,6 @@
 ---
 name: ops-precision-standard
-description: 算子精度标准。描述 Ascend C 算子各种 dtype 输出对应的精度比对标准(混合容差 atol/rtol)。当需要(1)评估算子精度是否达标,(2)编写 ST 测试验证精度,(3)处理 FP16/FP32/BF16 等不同数据类型精度问题,(4)确认算子精度验收标准时触发。
+description: 算子精度标准。描述 Ascend C 算子各种 dtype 输出对应的精度比对标准(混合容差 atol/rtol)。当需要(1)评估算子精度是否达标,(2)编写 ST 测试验证精度,(3)处理 FP16/FP32/BF16 等不同数据类型精度问题,(4)确认算子精度验收标准时触发。评测固定入口输出「错误分类: D类-精度不匹配」时先用本技能对容差表,再按 ascendc-precision-debug 的指引修。
 ---
 
 # 选择精度标准

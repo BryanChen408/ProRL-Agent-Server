@@ -194,6 +194,15 @@ except Exception:
     _log_low = ""
 crash_failure = not bool(re.search(r"case\[\d+\]:", _log_low))
 
+# 错误分类行内嵌路由:agent 必读此行,把「下一步去哪查」直接写在这里。
+# 目标全部是现有 skill 的现有小文档,无新增内容;词表与分类行原话对齐(agent 能逐字命中)。
+_CRASH_ROUTE = (";下一步:先 Read .claude/skills/ascendc-crash-debug/references/crash_workflow.md 再改代码"
+                "(acl 错误码查 ascendc-runtime-debug/references/error_codes.md)")
+_PRECISION_ROUTE = (";下一步:先 Read .claude/skills/ops-precision-standard/SKILL.md 对容差表,"
+                    "再按 .claude/skills/ascendc-precision-debug/SKILL.md 的指引修")
+_COMPILE_ROUTE = (";下一步:符号/API 错 → 拿错误里的符号名查 ascendc-docs-search 或 "
+                  "ascendc-api-best-practices;级联错误 → compile.log 里搜下一个 \"error:\"")
+
 INFRA = {"npu_runtime_unavailable", "input_load_failed", "judge_container_failed",
          "judge_metrics_unreadable", "judge_no_metrics", "task_missing",
          "submission_fetch_failed"}
@@ -202,7 +211,7 @@ if et in INFRA:
 elif et in ("op_not_registered", "ascendc_load_failed"):
     label = "A类-算子未注册/加载失败(不是精度问题:改 setup.py 打包与 import,别调数值)"
 elif et == "ascendc_run_crashed":
-    label = "A类-kernel崩溃/运行期错误(不是精度问题:查越界/非法访存/核间划分/对齐,别调数值)"
+    label = "A类-kernel崩溃/运行期错误(不是精度问题:查越界/非法访存/核间划分/对齐,别调数值)" + _CRASH_ROUTE
 elif et == "output_precheck_failed":
     # 对拍跑完了,但输出连「可比较」都不满足(形状/dtype 不符、或算出了 NaN)。
     # 这不是精度问题:调 tolerance/数值写法治不了形状算错,方向必须分开说。
@@ -210,16 +219,16 @@ elif et == "output_precheck_failed":
              "查输出 shape 推导、tiling 边界、是否产生 NaN/Inf,别调数值精度)")
 elif et == "correctness_failed" and crash_failure:
     # 兜底:error_type 没被 classify 拆出 ascendc_run_crashed 时
-    label = "A类-kernel崩溃/运行期错误(不是精度问题:查越界/非法访存/核间划分/对齐,别调数值)"
+    label = "A类-kernel崩溃/运行期错误(不是精度问题:查越界/非法访存/核间划分/对齐,别调数值)" + _CRASH_ROUTE
 elif et == "correctness_failed" and load_failure:
     label = "A类-算子未注册/加载失败(对拍未比较任何元素,不是精度问题:改 setup.py 打包与 import)"
 elif et == "correctness_failed":
-    label = "D类-精度不匹配"
+    label = "D类-精度不匹配" + _PRECISION_ROUTE
 elif et in ("ascendc_compile_failed", "ast_check_failed", "submission_missing",
             "benchmark_failed"):
-    label = "A类-代码/编译错误"
+    label = "A类-代码/编译错误" + _COMPILE_ROUTE
 else:
-    label = "A类-代码/编译错误"
+    label = "A类-代码/编译错误" + _COMPILE_ROUTE
 print(f"[ascendc-eval] 错误分类: {label}")
 if first_exc:
     print(f"[ascendc-eval] 首个异常: {first_exc}")

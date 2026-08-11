@@ -1,6 +1,6 @@
 ---
 name: ascendc-runtime-debug
-description: Ascend C 算子运行时错误调试技能。用于处理算子运行时问题：(1) aclnn 返回错误码（161xxx/361xxx/561xxx，包括环境配置、Tiling、Kernel 查找等错误），(2) 需要解析 plog 日志定位问题。触发关键词：运行时错误、错误码、Tiling错误、Kernel查找失败、环境变量、plog。
+description: Ascend C 算子运行时错误调试技能。用于处理算子运行时问题：(1) aclnn 返回错误码（161xxx/361xxx/561xxx，包括环境配置、Tiling、Kernel 查找等错误），(2) 需要解析 plog 日志定位问题。触发关键词：运行时错误、错误码、Tiling错误、Kernel查找失败、环境变量、plog。评测固定入口输出「错误分类: A类」且错误含 aclnn/aclnnMaxPool/aclnnConv 等 aclnn 调用失败(error code 161002/5070xx)时用本技能(入口 references/error_codes.md)。
 ---
 
 # Ascend C 算子运行时错误调试
