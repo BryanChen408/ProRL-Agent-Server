@@ -391,6 +391,15 @@ class AnthropicTransformer(BaseTransformer):
         }:
             chat_template_kwargs = dict(result.get("chat_template_kwargs") or {})
             chat_template_kwargs["enable_thinking"] = True
+            # preserve_thinking:让 chat template 对历史 assistant 轮也渲染 <think> 块
+            # (模板默认只保留 last_query_index 之后的思考)。不加的话,任何纯 user 注入
+            # (截断 resume/skill 注入)都会把查询点前移、丢弃历史 thinking 的渲染 → 老内容
+            # token 化改变 → prefix merge 拆链(实测占拆链 ~88%),且训练链上有 thinking、
+            # 推理上下文没有 → 训推不一致。渲染保留后:不拆链 + 训推一致。
+            # 代价:上下文变长(thinking 全程驻留)+ 推理行为分布变化,已评估可接受。
+            # 设 POLAR_PRESERVE_THINKING=0 回退旧行为。
+            if os.environ.get("POLAR_PRESERVE_THINKING", "1") == "1":
+                chat_template_kwargs["preserve_thinking"] = True
             result["chat_template_kwargs"] = chat_template_kwargs
 
         # Tools. Claude Code sometimes sends tools=[] on compaction/summary

@@ -325,3 +325,35 @@ def test_responses_streaming_emits_reasoning_item_events() -> None:
     output_types = [it["type"] for it in completed["response"]["output"]]
     assert output_types[0] == "reasoning"
     assert "message" in output_types
+
+
+def test_anthropic_thinking_also_sets_preserve_thinking(monkeypatch) -> None:
+    # preserve_thinking 默认开:历史 assistant 轮的 <think> 块在 chat template 渲染时
+    # 保留 → user 注入(截断 resume/skill)不再引起拆链,训推一致。
+    monkeypatch.delenv("POLAR_PRESERVE_THINKING", raising=False)
+    t = AnthropicTransformer()
+    out = t.transform_request(
+        {
+            "_polar_model_served": "Qwen3.6",
+            "thinking": {"type": "enabled", "budget_tokens": 1024},
+            "messages": [{"role": "user", "content": "hi"}],
+            "max_tokens": 10,
+        }
+    )
+    assert out["chat_template_kwargs"]["enable_thinking"] is True
+    assert out["chat_template_kwargs"]["preserve_thinking"] is True
+
+
+def test_anthropic_preserve_thinking_gate_off(monkeypatch) -> None:
+    monkeypatch.setenv("POLAR_PRESERVE_THINKING", "0")
+    t = AnthropicTransformer()
+    out = t.transform_request(
+        {
+            "_polar_model_served": "Qwen3.6",
+            "thinking": {"type": "enabled", "budget_tokens": 1024},
+            "messages": [{"role": "user", "content": "hi"}],
+            "max_tokens": 10,
+        }
+    )
+    assert out["chat_template_kwargs"]["enable_thinking"] is True
+    assert "preserve_thinking" not in out["chat_template_kwargs"]
