@@ -94,6 +94,21 @@ def _response_loss_mask(
     if not mask or not isinstance(response_message, dict):
         return mask, {}
 
+    # [truncation gate] finish_reason=="length" = 生成被 max_tokens 掐断:这段是没收尾的
+    # 输出(实测几乎全是整段没写完的 deliberation,content 为空)。整段置 0 不进梯度 ——
+    # 否则 session 级广播的奖励会把「写不完的思考」染进训练:run 104827 实测 55% 的梯度
+    # token 来自截断段,其中 0.4M 还带 reward≥0.4(正奖励的截断段毒性最大)。
+    # 段内 token 仍留在序列里当上下文(不改条件分布),只是不算 loss。
+    # 默认开;POLAR_MASK_TRUNCATED=0 回退旧行为(截断段照常训练)。
+    if (
+        os.environ.get("POLAR_MASK_TRUNCATED", "1") == "1"
+        and choice.get("finish_reason") == "length"
+    ):
+        return [0] * len(mask), {
+            "truncated_tokens": len(mask),
+            "reason": "finish_reason_length",
+        }
+
     reasoning_content = response_message.get("reasoning_content")
     if not reasoning_content:
         return mask, {}

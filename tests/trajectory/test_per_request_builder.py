@@ -314,3 +314,64 @@ def _empty_record(completion_id: str) -> CompletionRecord:
         request={"messages": [{"role": "user", "content": completion_id}]},
         response={"id": "r1", "choices": []},
     )
+
+
+def _length_record(completion_id: str, prompt_ids: list[int], response_ids: list[int]) -> CompletionRecord:
+    """finish_reason=length 的截断 completion(思考被 max_tokens 掐断,content 为空)。"""
+    return CompletionRecord(
+        completion_id=completion_id,
+        timestamp="2026-01-01T00:00:00+00:00",
+        request={"system": "harness", "messages": [{"role": "user", "content": completion_id}]},
+        response={
+            "choices": [
+                {
+                    "input_token_ids": prompt_ids,
+                    "message": {
+                        "role": "assistant",
+                        "content": None,
+                        "reasoning_content": "没写完的 deliberation……",
+                    },
+                    "finish_reason": "length",
+                    "logprobs": {
+                        "content": [
+                            {"token_id": token_id, "logprob": -0.1}
+                            for token_id in response_ids
+                        ]
+                    },
+                }
+            ]
+        },
+    )
+
+
+def test_length_truncated_completion_is_masked_out(monkeypatch) -> None:
+    # 截断段(finish_reason=length)默认整段 loss_mask=0:不进梯度,防止训练奖励
+    # 「写不完的思考」(带正奖励的截断段毒性最大)。
+    monkeypatch.delenv("POLAR_MASK_TRUNCATED", raising=False)
+    monkeypatch.setenv("POLAR_MASK_REASONING", "0")  # 隔离 reasoning mask 的干扰
+    session = CompletionSession(
+        session_id="session-1",
+        completions=[_length_record("len-1", [1, 2], [10, 11, 12])],
+    )
+
+    trajectory = asyncio.run(PerRequestBuilder().build(session))
+
+    trace = trajectory.traces[0]
+    assert trace.finish_reason == "length"
+    assert trace.loss_mask == [0, 0, 0]
+    note = (trace.metadata or {}).get("reasoning_loss_mask") or {}
+    assert note.get("reason") == "finish_reason_length"
+    assert note.get("truncated_tokens") == 3
+
+
+def test_length_truncated_mask_gate_can_be_disabled(monkeypatch) -> None:
+    monkeypatch.setenv("POLAR_MASK_TRUNCATED", "0")
+    monkeypatch.setenv("POLAR_MASK_REASONING", "0")
+    session = CompletionSession(
+        session_id="session-1",
+        completions=[_length_record("len-1", [1, 2], [10, 11, 12])],
+    )
+
+    trajectory = asyncio.run(PerRequestBuilder().build(session))
+
+    assert trajectory.traces[0].loss_mask == [1, 1, 1]

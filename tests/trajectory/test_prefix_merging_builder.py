@@ -309,3 +309,55 @@ def _empty_record(completion_id: str) -> CompletionRecord:
         request={"messages": [{"role": "user", "content": completion_id}]},
         response={"id": "r1", "choices": []},
     )
+
+
+def test_prefix_merge_masks_length_segment_but_keeps_normal_segments(monkeypatch) -> None:
+    # 链内混排:正常段继续训练,截断段(finish_reason=length)整段置 0。
+    monkeypatch.delenv("POLAR_MASK_TRUNCATED", raising=False)
+    monkeypatch.setenv("POLAR_MASK_REASONING", "0")
+    records = [
+        _record("00-main1", [1, 2], [10, EOT], finish_reason="tool_calls"),
+        _record(
+            "01-main2-length",
+            [1, 2, 10, EOT, 50, 51],
+            [20, 21],  # 截断段:无 EOT,finish_reason=length
+            finish_reason="length",
+            prompt_messages=[
+                {"role": "user", "content": "q"},
+                {"role": "assistant", "content": "main1"},
+                {"role": "tool", "content": "tool-result"},
+            ],
+        ),
+    ]
+
+    trajectory = _build(records)
+
+    assert len(trajectory.traces) == 1
+    trace = trajectory.traces[0]
+    assert trace.response_ids == [10, EOT, 50, 51, 20, 21]
+    assert trace.loss_mask == [1, 1, 0, 0, 0, 0]
+    assert trace.metadata["kept_completion_count"] == 2
+
+
+def test_prefix_merge_length_mask_gate_off_restores_old_behavior(monkeypatch) -> None:
+    monkeypatch.setenv("POLAR_MASK_TRUNCATED", "0")
+    monkeypatch.setenv("POLAR_MASK_REASONING", "0")
+    records = [
+        _record("00-main1", [1, 2], [10, EOT], finish_reason="tool_calls"),
+        _record(
+            "01-main2-length",
+            [1, 2, 10, EOT, 50, 51],
+            [20, 21],
+            finish_reason="length",
+            prompt_messages=[
+                {"role": "user", "content": "q"},
+                {"role": "assistant", "content": "main1"},
+                {"role": "tool", "content": "tool-result"},
+            ],
+        ),
+    ]
+
+    trajectory = _build(records)
+
+    trace = trajectory.traces[0]
+    assert trace.loss_mask == [1, 1, 0, 0, 1, 1]  # 截断段照常训练(旧行为)
