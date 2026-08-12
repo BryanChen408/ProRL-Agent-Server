@@ -43,6 +43,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from polar.trajectory.builder.base import BaseTrajectoryBuilder
+from polar.trajectory.builder import attempt_spans as _attempt_spans
 from polar.trajectory.builder.record_filters import filter_trainable_completions
 from polar.trajectory.builder.record_utils import build_trace_from_completion
 from polar.trajectory.models import CompletionRecord, CompletionSession, Trace, Trajectory
@@ -51,6 +52,58 @@ logger = logging.getLogger(__name__)
 
 # finish_reasons where the model emitted the natural end-of-turn token itself.
 _NATURAL_STOP_REASONS = frozenset({"stop", "tool_calls", "stop_sequence"})
+
+
+def _pipeline_call_id(messages: list[dict[str, Any]]) -> str | None:
+    """First whitelisted-pipeline tool-call id among a completion's response messages."""
+    for m in messages or []:
+        cid = _attempt_spans.pipeline_tool_call_id(m)
+        if cid:
+            return cid
+    return None
+
+
+def _prepare_attempt_span_state(kept: list[CompletionRecord]) -> dict[str, Any]:
+    """Session-wide pre-pass for P3 attempt spans (plan §6.2/§6.3).
+
+    Both products are derived ONLY from server-side records:
+      - verdict_by_call_id: every tool result in every kept completion's prompt.
+        Session-wide (not per-chain), so a verdict is still found when a chain
+        break walls it off from the chain that issued the call — notably a
+        break right after the calling turn (its verdict lands in the next
+        chain's first prompt).
+      - ordinal_by_completion_id: executed-attempt ordinals assigned in session
+        time order AT DETECTION time — independent of verdict parsing and of any
+        agent-visible counter (the printed ``[pipeline-budget] attempt=N`` comes
+        from an agent-writable file and must never be used for group alignment).
+      - prev_ordinal_by_completion_id: last event ordinal strictly before each
+        completion (-1 when none) — resolves a no-event trace/segment's leading
+        span: -1 = segment 0 (trace0), k = continuation of event k's segment.
+    """
+    verdict_by_call_id: dict[str, Any] = {}
+    ordinal_by_completion_id: dict[str, tuple[int, str]] = {}
+    prev_ordinal_by_completion_id: dict[str, int] = {}
+    next_ordinal = 0
+    for completion in kept:
+        trace = build_trace_from_completion(completion)
+        for message in trace.prompt_messages:
+            if (
+                isinstance(message, dict)
+                and message.get("role") == "tool"
+                and message.get("tool_call_id")
+            ):
+                verdict_by_call_id[message["tool_call_id"]] = message.get("content")
+        prev_ordinal_by_completion_id[completion.completion_id] = next_ordinal - 1
+        call_id = _pipeline_call_id(trace.response_messages)
+        if call_id:
+            ordinal_by_completion_id[completion.completion_id] = (next_ordinal, call_id)
+            next_ordinal += 1
+    return {
+        "verdict_by_call_id": verdict_by_call_id,
+        "ordinal_by_completion_id": ordinal_by_completion_id,
+        "prev_ordinal_by_completion_id": prev_ordinal_by_completion_id,
+        "total_events": next_ordinal,
+    }
 
 
 def _completion_finish_reason(completion: CompletionRecord) -> str | None:
@@ -193,6 +246,15 @@ class PrefixMergingBuilder(BaseTrajectoryBuilder):
             "break_reasons": {},
         }
         final_traces: list[Trace] = []
+        # P3 stage-2: session-wide attempt-span state (env-gated,默认开;
+        # POLAR_ATTEMPT_CREDIT=0 关). Created ONCE per trajectory and shared by
+        # every chain/segment finalization so event ordinals are trajectory-level
+        # and verdicts pair across chain breaks.
+        span_state = (
+            _prepare_attempt_span_state(filter_result.kept)
+            if _attempt_spans.env_on()
+            else None
+        )
         for chain_index, chain in enumerate(chains):
             start = 0
             segment_index = 0
@@ -204,6 +266,7 @@ class PrefixMergingBuilder(BaseTrajectoryBuilder):
                     chain_length=len(chain),
                     segment_index=segment_index,
                     segment_start=start,
+                    span_state=span_state,
                 )
                 final_traces.append(finalized.trace)
                 stats["completions_preserved"] += finalized.kept_count
@@ -275,6 +338,7 @@ class PrefixMergingBuilder(BaseTrajectoryBuilder):
         chain_length: int,
         segment_index: int,
         segment_start: int,
+        span_state: dict | None = None,
     ) -> _FinalizedChain:
         # Everything in C_1.prompt_ids is the non-trainable
         # prompt; C_1.response_ids plus every subsequent raw response +
@@ -299,7 +363,19 @@ class PrefixMergingBuilder(BaseTrajectoryBuilder):
         # Running count of messages consumed = prompt_messages + all response_messages emitted.
         msg_acc = len(first_trace.prompt_messages)
 
+        # P3 stage-2: per-attempt segment spans (env-gated; additive metadata only).
+        # Detection + verdicts come from the session-wide pre-pass (span_state);
+        # here we only map kept events to their response-token offsets — anchored
+        # at the CALLING turn's response start (事件段从发起调用的那一轮开始).
+        _want_spans = span_state is not None
+        event_records: list[tuple[int, int, str]] = []
+
+        _rs = len(stream_ids) - len(prompt_ids)
         self._append_response_tokens(first_trace, stream_ids, response_slots, loss_mask)
+        if _want_spans:
+            _ev = span_state["ordinal_by_completion_id"].get(chain[0].completion_id)
+            if _ev is not None:
+                event_records.append((_rs, _ev[0], _ev[1]))
         response_messages.extend(deepcopy(m) for m in first_trace.response_messages)
         msg_acc += len(first_trace.response_messages)
         kept = 1
@@ -362,7 +438,12 @@ class PrefixMergingBuilder(BaseTrajectoryBuilder):
                 response_messages.extend(deepcopy(m) for m in interstitial_msgs)
                 msg_acc += len(interstitial_msgs)
 
+            _rs = len(stream_ids) - len(prompt_ids)
             self._append_response_tokens(Ci_trace, stream_ids, response_slots, loss_mask)
+            if _want_spans:
+                _ev = span_state["ordinal_by_completion_id"].get(chain[i].completion_id)
+                if _ev is not None:
+                    event_records.append((_rs, _ev[0], _ev[1]))
             response_messages.extend(deepcopy(m) for m in Ci_trace.response_messages)
             msg_acc += len(Ci_trace.response_messages)
 
@@ -374,6 +455,40 @@ class PrefixMergingBuilder(BaseTrajectoryBuilder):
         response_logprobs = self._finalize_logprobs(response_slots)
         last_kept_trace = build_trace_from_completion(chain[kept - 1])
 
+        _metadata = self._chain_metadata(
+            chain[:kept],
+            chain_index=chain_index,
+            chain_length=chain_length,
+            segment_index=segment_index,
+            segment_start=segment_start,
+            kept_completion_count=kept,
+            break_reason=break_reason,
+        )
+        if _want_spans:
+            # Segment spans (plan §6.2): the opening span covers everything before
+            # this trace's first event — idx -1 = segment 0 (e.g. the Skill-dispatch
+            # trace0), idx k = continuation of event k's segment after a break.
+            # Each event's span extends to the next event's start / trace end, so
+            # every response token belongs to exactly one segment. Trajectories
+            # with zero events keep no key -> trajectory-level fallback downstream.
+            chain_resp_end = len(stream_ids) - len(prompt_ids)
+            if event_records:
+                _leading = -1 if event_records[0][1] == 0 else event_records[0][1] - 1
+            elif span_state["total_events"] > 0:
+                _leading = span_state["prev_ordinal_by_completion_id"].get(
+                    chain[0].completion_id, -1
+                )
+            else:
+                _leading = None
+            _spans = _attempt_spans.build_spans(
+                event_records,
+                span_state["verdict_by_call_id"],
+                _leading,
+                chain_resp_end,
+            )
+            if _spans:
+                _metadata["attempt_spans"] = _spans
+
         trace = Trace(
             prompt_ids=prompt_ids,
             response_ids=response_ids,
@@ -383,15 +498,7 @@ class PrefixMergingBuilder(BaseTrajectoryBuilder):
             tools=deepcopy(first_trace.tools),
             finish_reason=last_kept_trace.finish_reason,
             response_logprobs=response_logprobs,
-            metadata=self._chain_metadata(
-                chain[:kept],
-                chain_index=chain_index,
-                chain_length=chain_length,
-                segment_index=segment_index,
-                segment_start=segment_start,
-                kept_completion_count=kept,
-                break_reason=break_reason,
-            ),
+            metadata=_metadata,
         )
         return _FinalizedChain(trace=trace, kept_count=kept, break_reason=break_reason)
 
