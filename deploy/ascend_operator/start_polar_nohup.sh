@@ -154,24 +154,6 @@ if [[ -n "${POLAR_OUTPUT_ROOT:-}" && -n "${POLAR_RUN_ID:-}" ]]; then
   fi
 fi
 
-# 把本次实际使用的 profile 存进 run 目录。它原先只存在于 /tmp（launcher 渲染出来的那份），
-# 于是想知道"在跑的服务用的什么端口"只能去猜那个固定文件名 —— start_hostctl.sh 就是这么
-# 做的，而两个并存实例会抢同一个 /tmp 文件。
-#
-# 存进 run 目录后，配置随实例走：<output_root>/current 给出 run id，run 目录里就有那一份
-# profile。run_artifacts 下已经有 effective_topology.yaml，这里补上它的来源。
-if [[ -s "${POLAR_PROFILE}" ]]; then
-  mkdir -p "${ROOT}/run_artifacts"
-  _prof_tmp="${ROOT}/run_artifacts/.effective_profile.tmp.$$"
-  if cp -f "${POLAR_PROFILE}" "${_prof_tmp}" \
-     && mv -f "${_prof_tmp}" "${ROOT}/run_artifacts/effective_profile.yaml"; then
-    info_log "effective profile -> ${ROOT}/run_artifacts/effective_profile.yaml"
-  else
-    rm -f "${_prof_tmp}"
-    echo "[warn] 无法保存 effective profile 到 ${ROOT}/run_artifacts/" >&2
-  fi
-fi
-
 start_one rollout serve_rollout -c "${TOPOLOGY}"
 start_one gateway serve_gateway -c "${TOPOLOGY}" --node-id ascend-node-01
 
