@@ -3,7 +3,18 @@ set -euo pipefail
 
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)/_paths.sh"
 
-PID_FILE="${POLAR_OUTPUT_DIR}/observer.pid"
+# pid 落在 <output_root>/runs/<run_id>/ 下，而 POLAR_OUTPUT_DIR 指向的是**本次调用**推导出的
+# run 目录：run_id 只存在于启动那次的进程环境里，之后 load_polar_profile.py 会再生成一个新
+# 时间戳。所以直接用它找 pid 必然落空（表现是 "[skip] observer no pid file"，而 observer
+# 还在跑）。start_polar_nohup.sh 会把真正在跑的 run id 写进 <output_root>/current，这里读它。
+# 与 stop_polar.sh 的做法一致；读不到就保持原行为。
+_pid_root="${POLAR_OUTPUT_DIR}"
+if [[ -n "${POLAR_OUTPUT_ROOT:-}" && -s "${POLAR_OUTPUT_ROOT}/current" ]]; then
+  _cur_run="$(tr -d '[:space:]' < "${POLAR_OUTPUT_ROOT}/current")"
+  [[ -n "${_cur_run}" && -d "${POLAR_OUTPUT_ROOT}/runs/${_cur_run}" ]] \
+    && _pid_root="${POLAR_OUTPUT_ROOT}/runs/${_cur_run}"
+fi
+PID_FILE="${_pid_root}/observer.pid"
 
 if [[ -t 1 && -z "${NO_COLOR:-}" ]]; then
   RESET=$'\033[0m'; GREEN=$'\033[32m'; YELLOW=$'\033[33m'; BLUE=$'\033[34m'

@@ -3,7 +3,15 @@ set -euo pipefail
 
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)/_paths.sh"
 
-PID_FILE="${POLAR_OUTPUT_DIR}/pipeline_budget_watcher.pid"
+# 同 stop_observer.sh：POLAR_OUTPUT_DIR 是本次调用推导出的 run 目录（run_id 每次重新生成），
+# 里面永远没有 pid。读 <output_root>/current 拿到真正在跑的那个 run；读不到保持原行为。
+_pid_root="${POLAR_OUTPUT_DIR}"
+if [[ -n "${POLAR_OUTPUT_ROOT:-}" && -s "${POLAR_OUTPUT_ROOT}/current" ]]; then
+  _cur_run="$(tr -d '[:space:]' < "${POLAR_OUTPUT_ROOT}/current")"
+  [[ -n "${_cur_run}" && -d "${POLAR_OUTPUT_ROOT}/runs/${_cur_run}" ]] \
+    && _pid_root="${POLAR_OUTPUT_ROOT}/runs/${_cur_run}"
+fi
+PID_FILE="${_pid_root}/pipeline_budget_watcher.pid"
 
 if [[ -t 1 && -z "${NO_COLOR:-}" ]]; then
   RESET=$'\033[0m'; GREEN=$'\033[32m'; YELLOW=$'\033[33m'; BLUE=$'\033[34m'
