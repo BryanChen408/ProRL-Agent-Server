@@ -25,8 +25,15 @@ POLAR_REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd -P)"
 #   /mnt/model/cbx/env/polar-env/bin/python -m pip install \
 #     fastapi uvicorn httpx pydantic pyyaml
 POLAR_VENV="${POLAR_VENV:-/mnt/model/cbx/env/polar-env}"
-POLAR_PROFILE_SRC="${POLAR_REPO}/deploy/ascend_operator/profile.t2a.yaml"
-POLAR_PROFILE_RUNTIME=/tmp/polar_profile_runtime.yaml
+# 这两个可覆盖，用来在同机并存第二个 polar 实例（profile 即实例身份：端口、卡池、
+# 输出目录全由它决定）。**默认值一字不改** —— start_hostctl.sh 硬编码读
+# /tmp/polar_profile_runtime.yaml 拿在跑服务的端口表，改默认值会让它退回 profile.yaml
+# （别的站点配置，端口对不上）。
+#
+# 起第二个实例时这两个都要给：POLAR_PROFILE_RUNTIME 不给会覆盖默认实例的渲染产物。
+# 用法见 profile.bak.yaml 头部。
+POLAR_PROFILE_SRC="${POLAR_PROFILE_SRC:-${POLAR_REPO}/deploy/ascend_operator/profile.t2a.yaml}"
+POLAR_PROFILE_RUNTIME="${POLAR_PROFILE_RUNTIME:-/tmp/polar_profile_runtime.yaml}"
 
 # ─────── 站点值（profile 里只有 token，实际值在这里）──────────────────────────
 # 端口必须与 vime 对表：vime 侧同名变量是 POLAR_ROLLOUT_PORT（rollout）和
@@ -196,7 +203,7 @@ if [[ -z "${VIME_NODE_IP:-}" ]]; then
   HANDOFF_DIR="${VIME_SCRATCH_DIR}/rendezvous/${VIME_RDV_KEY}"
   HANDOFF_ENV="${HANDOFF_DIR}/polar_handoff.env"
   HANDOFF_LAYOUT="${HANDOFF_DIR}/resolved_layout.yaml"
-  VIME_IP_WAIT_SECS="${VIME_IP_WAIT_SECS:-900}"
+  VIME_IP_WAIT_SECS="${VIME_IP_WAIT_SECS:-9000}"
   echo "[polar-init] 等待 vime rank0 发布本轮拓扑（最长 ${VIME_IP_WAIT_SECS}s）"
   echo "             ${HANDOFF_ENV}"
   _waited=0

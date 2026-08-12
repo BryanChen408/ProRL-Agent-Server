@@ -1,0 +1,139 @@
+# 第二个并存 polar 实例（默认跑卡 4-7）。派生自 profile.t2a.yaml，只改 4 行：
+#   gateway_url 端口  9100  → 9102
+#   paths.output_dir  ascend_operator → ascend_operator_bak_4678
+#   observer.port     19088 → 19092
+#   gateway.node_id   加 -bak 后缀（仅为日志可辨，功能上只需实例内唯一）
+# 其余逐字与 t2a 相同 —— 改 t2a 的公共项时这份也要跟（loader 不支持继承）。
+#
+# 设计前提：**profile 就是实例身份**。一个实例占用的五类资源全部由 profile 决定 ——
+# rollout / gateway / observer 三个端口、NPU 卡池、输出目录（pid / 日志 / topology /
+# session 都在它下面）。所以并存不需要 instance id、也不需要跳过启动时的 stop：
+# 隔离边界就是 output_dir，stop 通过 <output_root>/current 只会停自己那个实例。
+#
+# 唯一**故意共用**的是 npu_lease.lock_dir(/dev/shm/npu-locks)：卡池不重叠靠下面的 pool
+# 声明，但"谁真的占了哪张卡"要靠这个锁目录全机可见。拆开就等于两个实例互相看不见对方
+# 持卡，会同时抢同一张。
+#
+# 起法（四个变量都要给）：
+#   POLAR_PROFILE_SRC=<本文件绝对路径> \
+#   POLAR_PROFILE_RUNTIME=/tmp/polar_profile_bak.yaml \
+#   ROLLOUT_PORT=12347 \
+#   NPU_POOL='[4, 5, 6, 7]' \
+#     bash deploy/ascend_operator/launch_polar_and_guide.sh
+#
+# 为什么这四个都不能省：
+#   POLAR_PROFILE_RUNTIME 不给会覆盖默认实例的渲染产物（默认值是那个固定路径，
+#     start_hostctl.sh 硬编码读它）。
+#   ROLLOUT_PORT 不给会渲染成 12345，与默认实例撞端口。
+#   NPU_POOL 不给会从 vime 交接文件读，那是**默认实例**的卡池，对本实例是错的。
+# rollout 端口与卡池保持占位符而非写字面值，是沿用 t2a 的约定：这两项要跟 vime 对表，
+# 由 launcher 渲染；gateway / observer 端口纯 polar 内部，t2a 里本来就是字面值。
+#
+# Template: the double-underscore placeholders below are substituted by
+# launch_polar_and_guide.sh at startup. Keep this comment free of the placeholder
+# pattern itself — the launcher's residual-placeholder check would trip on it.
+service:
+  bind_host: 0.0.0.0
+  rollout_url: http://__POLAR_HOST__:__ROLLOUT_PORT__
+  # gateway 端口写在这里而非 launcher：它纯 polar 内部，不跟 vime 对表，
+  # 同机跑第二个 polar 时改这一处就够（loader 反解出 gateway_port，watcher/
+  # hostctl/残留清理都从这里取）。rollout/router 端口保持占位符：要跟 vime 配对。
+  gateway_url: http://__POLAR_HOST__:9102
+  sglang_router_url: http://__VIME_ROUTER_HOST__:__VLLM_ROUTER_PORT__
+  inference_engine: vllm
+  model_served: __MODEL_SERVED__
+
+paths:
+  output_dir: output/ascend_operator_bak_4678
+  operator_runtime_dir: operator_runtime_t2a      # ← delta 1
+
+operator_runtime:
+  workflow: legacy
+  backend: ascendc      # ← delta 5:prepare 走 input/{op}.py + --backend ascendc(triton 侧无此字段=默认 triton)
+  # ← delta 6:算子同名 .json(NPUKernelBench 用例规格,get_input_groups() 要读)随 prepare 上传到 input/。
+  #   {op}.py 走 vime task_source 内容寻址,.json 没有该通道 → 从数据集目录直传。triton 侧无此字段=不产生该动作。
+  task_assets_dir: __TASK_ASSETS_DIR__
+  # ← delta 11:asc-devkit(上游 init.sh Step 4 会 clone 的算子开发资料仓)。
+  #   $ASC_DEVKIT_DIR 在 21 个 skill 文档里被引用 46 次,是出现最多的环境变量;
+  #   ascendc-docs-search 整个 skill 就是查它。只读挂到 /opt/asc-devkit,不进 workdir 拷贝。
+  #   钉 9.0.0 分支而非 init.sh 默认的 master:实测 API 名对本机 CANN 9.0.0 头文件的命中率
+  #   9.0.0=95% / master=82%,master 独有的 548 个里 53% 本机没有,照着写会引入新的编译错误。
+  #   路径映射:skill 写死 docs/zh/api,9.0.0 布局是 docs/api/context,已在仓内建相对软链。
+  asc_devkit_dir: __ASC_DEVKIT_DIR__
+  budget:
+    generation_max: 10
+    optimization_max: 4
+    interval_seconds: 2
+  npu_lease:
+    enabled: true
+    # Polar host's own cards. Unrelated to vime's layout: different machine.
+    pool: __NPU_POOL__
+    lock_dir: /dev/shm/npu-locks
+
+observer:
+  host: 0.0.0.0
+  port: 19092
+
+gateway:
+  node_id: ascend-node-01-bak
+  # 重启时额外清理的历史 gateway 端口。同机有别的 polar 时务必清空（写 []），
+  # 否则 restart 会杀掉占这些端口的进程 —— 它只按端口找监听者，不认是谁的。
+  extra_stale_ports: []
+  max_init_workers: 8
+  max_run_workers: 64
+  max_postrun_workers: 64
+  completion_persistence:
+    enabled: true
+    max_field_bytes: 67108864
+    queue_size: 4096
+
+operator:
+  profile: operator_npu
+  # ← delta 13:17 次评测,每次含编译(数分钟)+ 对拍 + 测速,约 60-90 min;加 Phase 0-3 探索,
+  #   8000s(133 min)会顶到上限。放到 4h。
+  timeout_seconds: 14400.0
+  runtime:
+    image: ascendc-tilelang:v1                          # ← delta 2
+    network: host
+    workdir: /opt/workspace/agent_workdir
+    env:
+      # ← delta 10:SOC_VERSION 注入容器 env。CLAUDE.md 的 Phase 0「硬件信息查询」按
+      #   优先级 1(读 $SOC_VERSION)→ 2(npu-smi)→ 3(CANN 安装信息)降级,而本环境
+      #   禁止 npu-smi 这类 NPU 探针(多容器共享卡池,探测会干扰别人)。
+      #   env.sh 只被固定入口 source,agent 自己的 shell 读不到 —— 不注入这里就必然
+      #   落空到优先级 2。注入后永远命中第 1 级,降级路径不会被走到。
+      SOC_VERSION: "__SOC_VERSION__"
+      ASCENDC_SOC_VERSION: "__SOC_VERSION__"
+      ASC_DEVKIT_DIR: "/opt/asc-devkit"
+      CLAUDE_CODE_MAX_CONTEXT_TOKENS: "262144"
+
+  agent:
+    model_name: claude-opus-4-5
+    # ← delta 14:17 次评测 × 每次至少「读日志→调 Skill→改代码→跑评测」4 轮 = 68 轮,
+    #   加实测 30-40 轮的 Phase 0-3 探索,100 不够。
+    max_turns: 250
+    # ← delta 8:规则 —— 只保留本项目(canonical/skills)提供的 skill,CLI 自带的一律关掉
+    #   (每个 session 白占 4,327 字符 prompt,还可能被误调白烧 turn)。
+    #   prepare 按 canonical/skills 的实际内容取补集,写 .claude/settings.json 的
+    #   skillOverrides={name:"off"}(既不列进 prompt 也不许模型调用)。名单只能落在 prepare 里:
+    #   CLI 的 skillOverrides 是精确名字查表,无通配符;唯一的 allowlist(sessionSkillAllowlist)
+    #   只对 Agent SDK 开放,`claude -p` 够不到。
+    only_project_skills: true
+    # ← delta 9(B 去重):skills 只装项目级一份。polar 的 claude_code harness 会把 skills_path
+    #   拷进 agent HOME(用户级),而 prepare 已经把同一份拷进 workdir/.claude/skills(项目级);
+    #   两处都装 → 同一 skill 在 prompt 里列两遍(会话无 MCP 时 CLI 不按 name 去重)。
+    #   项目级那份不能省:CLAUDE.md 和任务 prompt 里的命令都走相对路径 `.claude/skills/...`。
+    #   triton 侧无此字段 = 保持 /opt/canonical/skills(它的 prepare 不拷 skills,必须靠用户级)。
+    skills_path: ""
+    max_output_tokens: 12288
+    inference_timeout_ms: 14400000
+    disallowed_tools: "AskUserQuestion CronCreate CronDelete CronList EnterPlanMode EnterWorktree ExitPlanMode ExitWorktree NotebookEdit ScheduleWakeup TaskCreate TaskGet TaskList TaskOutput TaskStop TaskUpdate TodoWrite WebFetch WebSearch"
+    append_system_prompt: "Follow ./CLAUDE.md. The user instruction provides the concrete operator name; reference is at input/{op_name}.py. 产出 {op_name}/ 工程并打成单个 tarball 到 output/submission/{op_name}_impl.tar.gz。Do not ask user questions in this non-interactive run. Run the fixed validation entry in the foreground with a long Bash timeout (600000 ms), never run_in_background; if it still gets auto-backgrounded, read the output file it prints to fetch the verdict and error output."
+  evaluator:
+    # ← delta 3+4:AscendC 判分入口 + tarball 提交(golden model.py 在 tarball 内,无需 --task)
+    judge_command: "bash tools/ascendc_eval_pipeline.sh --op_name {op_name} --impl output/submission/{op_name}_impl.tar.gz --out_dir judge_out"
+    submission_path: output/submission/{op_name}_impl.tar.gz
+    submission_candidates:
+      - output/submission/{op_name}_impl.best.tar.gz
+      - output/submission/{op_name}_impl.tar.gz
+    metrics_path: judge_out/metrics.json
