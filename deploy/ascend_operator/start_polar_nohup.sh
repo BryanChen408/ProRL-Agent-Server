@@ -132,6 +132,28 @@ start_one() {
   start_log "${name}" "$(cat "${pid_file}")" "${log_file}"
 }
 
+# 当前实例指针。pid 落在 <output_root>/runs/<run_id>/ 下，而 run_id 只存在于本次启动的
+# 进程环境里（launcher 是行内前缀赋值 POLAR_RUN_ID=...，load_polar_profile.py 只从环境变量
+# 读，没有任何一处落盘）。于是之后在别的 shell 里跑 stop / hostctl 时，run_id 已经消失，
+# load_polar_profile.py 会**再生成一个新的**，指向刚 mkdir 出来的空目录 —— 表现就是
+# "no pid file" 而实际服务还在跑。
+#
+# 所以这里把 run id 记到 <output_root>/current。output_root 由 profile 的 paths.output_dir
+# 推得、每份 profile 一个，所以这个指针天然是 per-instance 的，不需要额外的实例 id 概念。
+#
+# 写在启动之前：即使下面 start_one 中途失败，指针也指向本次 run，stop 仍能找到残留 pid。
+# 原子写：stop 可能正在并发读。
+if [[ -n "${POLAR_OUTPUT_ROOT:-}" && -n "${POLAR_RUN_ID:-}" ]]; then
+  mkdir -p "${POLAR_OUTPUT_ROOT}"
+  _cur_tmp="${POLAR_OUTPUT_ROOT}/.current.tmp.$$"
+  if printf '%s\n' "${POLAR_RUN_ID}" > "${_cur_tmp}" && mv -f "${_cur_tmp}" "${POLAR_OUTPUT_ROOT}/current"; then
+    info_log "current run pointer -> ${POLAR_OUTPUT_ROOT}/current (${POLAR_RUN_ID})"
+  else
+    rm -f "${_cur_tmp}"
+    echo "[warn] 无法写当前实例指针 ${POLAR_OUTPUT_ROOT}/current；stop 将退回扫描历史 run" >&2
+  fi
+fi
+
 start_one rollout serve_rollout -c "${TOPOLOGY}"
 start_one gateway serve_gateway -c "${TOPOLOGY}" --node-id ascend-node-01
 
