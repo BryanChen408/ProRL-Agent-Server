@@ -5,11 +5,37 @@ source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)/_paths.sh"
 
 # hostctl 的端口表来自 profile（POLAR_*_PORT）。它常被单独手动拉起，不像
 # start_observer.sh 那样必然有 restart_polar_host.sh 的环境，所以这里自己 source 一次。
+#
+# 挑哪份 profile：默认的 profile.yaml 是别的站点配置（observer 18088、别的 host），
+# 直接用会拿到与在跑的服务不符的端口表。原先的做法是硬编码读 /tmp/polar_profile_runtime.yaml
+# —— 那是 launcher 的渲染产物，两个并存实例会抢同一个文件，且它跟 run 目录没有关联。
+#
+# 现在改为按实例发现：每个在跑的实例都在 <output_root>/current 记着自己的 run id，
+# 而那个 run 目录里存着它实际使用的 profile（run_artifacts/effective_profile.yaml）。
+# 扫 output/*/current 就能列出所有活实例。
+#   恰好一个 → 直接用它
+#   多于一个 → 明确报错要求显式给 POLAR_PROFILE，而不是静默挑一个挑错
+# 显式给了 POLAR_PROFILE 就完全跳过发现逻辑。
 if [[ -z "${POLAR_GATEWAY_PORT:-}" ]]; then
-  # 优先用 launcher 渲染的运行时 profile。默认的 profile.yaml 是别的站点配置
-  # （observer 18088、别的 host），手动拉 hostctl 时会拿到与在跑的服务不符的端口表。
-  if [[ -z "${POLAR_PROFILE:-}" && -s /tmp/polar_profile_runtime.yaml ]]; then
-    POLAR_PROFILE=/tmp/polar_profile_runtime.yaml
+  if [[ -z "${POLAR_PROFILE:-}" ]]; then
+    _found=()
+    for _cur in "${POLAR_REPO_ROOT}"/output/*/current; do
+      [[ -s "${_cur}" ]] || continue
+      _root="$(dirname "${_cur}")"
+      _rid="$(tr -d '[:space:]' < "${_cur}")"
+      _prof="${_root}/runs/${_rid}/run_artifacts/effective_profile.yaml"
+      [[ -s "${_prof}" ]] && _found+=("${_prof}")
+    done
+
+    if [[ ${#_found[@]} -eq 1 ]]; then
+      POLAR_PROFILE="${_found[0]}"
+      echo "[hostctl] 发现唯一在跑实例，使用其 profile：${POLAR_PROFILE}"
+    elif [[ ${#_found[@]} -gt 1 ]]; then
+      echo "ERROR: 发现 ${#_found[@]} 个在跑的 polar 实例，无法判断要给哪个拉 hostctl。" >&2
+      printf '  %s\n' "${_found[@]}" >&2
+      echo "  请显式指定：POLAR_PROFILE=<上面之一，或对应的源 profile> bash $0" >&2
+      exit 1
+    fi
   fi
   POLAR_PROFILE="${POLAR_PROFILE:-${POLAR_DEPLOY_DIR}/profile.yaml}"
   source <("${POLAR_PYTHON:-python3}" "${POLAR_DEPLOY_DIR}/tools/load_polar_profile.py" \
