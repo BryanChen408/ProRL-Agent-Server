@@ -16,6 +16,7 @@ The Polar `operator_judge` evaluator imports `judge_outcome` to turn judge metri
 from __future__ import annotations
 
 import math
+import os
 
 # error_type values that mean the eval COULDN'T RUN for infra/setup reasons (retry, do not score).
 # Everything else (ast_check_failed / correctness_failed / *compile* / *lowering* / ub_overflow /
@@ -143,6 +144,50 @@ def judge_outcome(metrics: dict | None) -> dict:
             "error_type": metrics.get("error_type"), "reason": "scored"}
 
 
+# --------------------- 截断事件惩罚(训练信号)---------------------
+#
+# 空截断(思考打满 max_output、零产出被 CLI 丢弃)在 outcome 阶梯里原本零成本:salvage 把
+# session 救回后与干净 session 同分(run 205655 实测:截断>=3 的 session 均 0.313,零截断
+# 0.323)——组内无差异 -> 没有负方向 -> 截断永不收敛。这里按截断「事件数」从标量 reward
+# 轻扣:adjusted = max(reward - min(λ·T, cap), floor)。GRPO 只看组内相对排名,小额扣分即
+# 产生学习压力;截断段 token 本体仍不过梯度(loss_mask 闸不动),12K 负梯度力度失控与
+# 内容误伤的风险都不引入。
+#
+# 口径按「次」不按 token 长度:目标是「顶到帽之前必须产出」,不是「想得短」——长而有效
+# 的思考不受罚。λ 来自 205655 场离线回放:0.01 -> 17% 组内对子翻转 / 9% 跨档(温和起效);
+# 0.03 -> 42% 跨档(过激)。POLAR_TRUNCATION_PENALTY=0 整体回退。
+
+POLAR_TRUNCATION_PENALTY_ENV = "POLAR_TRUNCATION_PENALTY"
+POLAR_TRUNCATION_PENALTY_CAP_ENV = "POLAR_TRUNCATION_PENALTY_CAP"
+POLAR_TRUNCATION_PENALTY_FLOOR_ENV = "POLAR_TRUNCATION_PENALTY_FLOOR"
+
+
+def truncation_penalty_knobs(env: dict | None = None) -> tuple[float, float, float]:
+    """(每次截断扣分 λ, 总扣分封顶 cap, 总分下限 floor)。λ<=0 即整体关闭。"""
+    source = os.environ if env is None else env
+
+    def _f(key: str, default: str) -> float:
+        try:
+            return float(source.get(key, default) or default)
+        except (TypeError, ValueError):
+            return float(default)
+
+    return (
+        _f(POLAR_TRUNCATION_PENALTY_ENV, "0.01"),
+        _f(POLAR_TRUNCATION_PENALTY_CAP_ENV, "0.05"),
+        _f(POLAR_TRUNCATION_PENALTY_FLOOR_ENV, "0.15"),
+    )
+
+
+def apply_truncation_penalty(reward: float, truncation_events: int) -> tuple[float, float]:
+    """reward -> (调整后 reward, 扣掉的分)。扣 0.0 = 未启用或无截断事件。"""
+    lam, cap, floor = truncation_penalty_knobs()
+    if lam <= 0.0 or truncation_events <= 0:
+        return reward, 0.0
+    deducted = min(lam * truncation_events, cap)
+    return max(reward - deducted, floor), deducted
+
+
 # --------------------------------- tests ---------------------------------
 
 def test_ladder_not_success():
@@ -213,6 +258,40 @@ def test_malformed_speedup_is_infra_not_nan_reward():
     for bad in (float("nan"), float("inf"), -1.0, "oops"):
         o = judge_outcome({"success": True, "perf_data": {"speedup_vs_torch": bad}, "error_type": None})
         assert o["status"] == "ERROR" and o["retry"] is True and o["reward"] is None, bad
+
+
+def test_truncation_penalty_deduct_cap_floor():
+    saved = {k: os.environ.pop(k, None) for k in (
+        POLAR_TRUNCATION_PENALTY_ENV, POLAR_TRUNCATION_PENALTY_CAP_ENV, POLAR_TRUNCATION_PENALTY_FLOOR_ENV)}
+    try:
+        # 默认 λ=0.01:2 次截断扣 0.02
+        adj, ded = apply_truncation_penalty(0.35, 2)
+        assert abs(adj - 0.33) < 1e-9 and abs(ded - 0.02) < 1e-9
+        # cap=0.05:10 次截断只扣 0.05
+        adj, ded = apply_truncation_penalty(0.35, 10)
+        assert abs(adj - 0.30) < 1e-9 and abs(ded - 0.05) < 1e-9
+        # floor=0.15:0.2 档重截断最多压到 0.15,不穿到 0
+        adj, ded = apply_truncation_penalty(0.2, 10)
+        assert abs(adj - 0.15) < 1e-9 and abs(ded - 0.05) < 1e-9
+        # 无截断不动
+        assert apply_truncation_penalty(0.35, 0) == (0.35, 0.0)
+        # env=0 整体回退
+        os.environ[POLAR_TRUNCATION_PENALTY_ENV] = "0"
+        assert apply_truncation_penalty(0.35, 3) == (0.35, 0.0)
+        # env 自定义 λ/cap/floor
+        os.environ[POLAR_TRUNCATION_PENALTY_ENV] = "0.02"
+        os.environ[POLAR_TRUNCATION_PENALTY_CAP_ENV] = "0.03"
+        os.environ[POLAR_TRUNCATION_PENALTY_FLOOR_ENV] = "0.1"
+        adj, ded = apply_truncation_penalty(0.35, 5)
+        assert abs(adj - 0.32) < 1e-9 and abs(ded - 0.03) < 1e-9  # 0.02*5=0.10 被 cap 到 0.03
+        # 显式 env dict(测试/调用方隔离)
+        assert truncation_penalty_knobs({POLAR_TRUNCATION_PENALTY_ENV: "x"})[0] == 0.01  # 垃圾值回落默认
+    finally:
+        for k, v in saved.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
 
 
 if __name__ == "__main__":

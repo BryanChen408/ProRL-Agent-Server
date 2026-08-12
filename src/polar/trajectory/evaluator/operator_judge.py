@@ -43,6 +43,7 @@ from typing import Any
 from polar.runtime.base import BaseRuntime
 from polar.trajectory.evaluator.base import BaseTrajectoryEvaluator
 from polar.trajectory.evaluator.operator_reward import (
+    apply_truncation_penalty,
     classify_infra_error_text,
     judge_outcome,
 )
@@ -177,12 +178,21 @@ class OperatorJudgeEvaluator(BaseTrajectoryEvaluator):
         timeout_cap = runtime.get("timeout_seconds")
         timeout = self.judge_timeout if timeout_cap is None else min(self.judge_timeout, float(timeout_cap))
 
+        # 截断事件计数(训练信号,见 operator_reward.apply_truncation_penalty)。node.py 先
+        # _build_trajectory 后 _run_eval,此处 traces 已全。用 finish_reason=length 的 trace 数
+        # 近似空截断次数:coalesce 合并会让它略小于 completion 级真实值(实测 117 vs 133),
+        # 惩罚略偏弱,方向不错。
+        truncation_events = sum(
+            1 for t in (trajectory.traces or []) if t.finish_reason == "length"
+        )
+
         if submission_missing:
             return self._scored(
                 {"success": False, "ast_check_ok": False, "correctness_ok": False,
                  "error_type": "submission_missing",
                  "error": f"no submission in candidates: {self.submission_candidates}"},
                 artifacts_dir, submission_used=None,
+                truncation_events=truncation_events,
             )
 
         # 1) pull the submitted kernel out of the AGENT runtime. R1 anti-regression (mirrors
@@ -200,6 +210,7 @@ class OperatorJudgeEvaluator(BaseTrajectoryEvaluator):
                      "error_type": "submission_missing",
                      "error": f"host submission artifact is missing: {local_impl}"},
                     artifacts_dir, submission_used=None,
+                    truncation_events=truncation_events,
                 )
             picked_value = runtime.get("submission_used")
             picked = str(picked_value) if picked_value else str(local_impl)
@@ -236,6 +247,7 @@ class OperatorJudgeEvaluator(BaseTrajectoryEvaluator):
                      "error_type": "submission_fetch_failed" if transport else "submission_missing",
                      "error": f"no submission in candidates: {self.submission_candidates} | {detail}"},
                     artifacts_dir, submission_used=None,
+                    truncation_events=truncation_events,
                 )
 
         # 2) place ONLY the impl into the judge runtime (canonical pipeline comes from eval_prepare).
@@ -250,6 +262,7 @@ class OperatorJudgeEvaluator(BaseTrajectoryEvaluator):
                 env,
                 timeout,
                 submission_used=picked,
+                truncation_events=truncation_events,
             )
 
         # 3) run the canonical eval pipeline inside the judge runtime -> metrics.json.
@@ -285,6 +298,7 @@ class OperatorJudgeEvaluator(BaseTrajectoryEvaluator):
             artifacts_dir,
             submission_used=picked,
             metrics_error_path=str(local_metrics_error) if local_metrics_error is not None else None,
+            truncation_events=truncation_events,
         )
 
     async def _evaluate_cannbot(
@@ -295,6 +309,7 @@ class OperatorJudgeEvaluator(BaseTrajectoryEvaluator):
         timeout: float,
         *,
         submission_used: str | None,
+        truncation_events: int = 0,
     ) -> EvalResult:
         verify_dir = self._abs(self.verify_dir)
         verify_result_path = posixpath.join(verify_dir, "verify_result.json")
@@ -350,6 +365,7 @@ class OperatorJudgeEvaluator(BaseTrajectoryEvaluator):
                 },
                 artifacts_dir,
                 submission_used=submission_used,
+                truncation_events=truncation_events,
             )
         if not self._cannbot_verify_ok(verify_data):
             (artifacts_dir / "judge.stdout.log").write_text("".join(logs))
@@ -357,6 +373,7 @@ class OperatorJudgeEvaluator(BaseTrajectoryEvaluator):
                 self._cannbot_metrics(verify_data=verify_data, perf_data=None, verify_rc=verify_rc),
                 artifacts_dir,
                 submission_used=submission_used,
+                truncation_events=truncation_events,
             )
 
         benchmark_command = self._cannbot_benchmark_command(verify_dir, perf_result_path)
@@ -381,6 +398,7 @@ class OperatorJudgeEvaluator(BaseTrajectoryEvaluator):
             ),
             artifacts_dir,
             submission_used=submission_used,
+            truncation_events=truncation_events,
         )
 
     def _cannbot_stage_command(self, verify_dir: str) -> str:
@@ -553,6 +571,7 @@ class OperatorJudgeEvaluator(BaseTrajectoryEvaluator):
         *,
         submission_used: str | None = None,
         metrics_error_path: str | None = None,
+        truncation_events: int = 0,
     ) -> EvalResult:
         """metrics -> EvalResult; infra failures raise (=> session ERROR => retry)."""
         (artifacts_dir / "metrics.json").write_text(json.dumps(metrics, ensure_ascii=False, indent=2))
@@ -562,15 +581,21 @@ class OperatorJudgeEvaluator(BaseTrajectoryEvaluator):
                 f"operator_judge infra failure ({outcome['error_type']}) -> retry; "
                 f"metrics at {artifacts_dir / 'metrics.json'}"
             )
+        # 截断事件轻扣(空截断在阶梯里原本零成本,salvage 救回后与干净 session 同分 -> 无负
+        # 方向 -> 永不收敛;见 operator_reward.apply_truncation_penalty)。截断段 token 本体
+        # 仍不过梯度。扣量写进 metadata,原 reward 可还原(reward + truncation_penalty)。
+        reward, truncated_deduction = apply_truncation_penalty(outcome["reward"], truncation_events)
         return EvalResult(
-            outcome_reward=outcome["reward"],
+            outcome_reward=reward,
             metadata={
                 "mode": self.MODE,
                 "op_name": self.op_name,
-                "reward": outcome["reward"],
+                "reward": reward,
                 "success": bool(metrics.get("success", False)),
                 "error_type": outcome["error_type"],
                 "speedup_vs_torch": (metrics.get("perf_data") or {}).get("speedup_vs_torch"),
+                "truncation_events": truncation_events,
+                "truncation_penalty": truncated_deduction,
                 "submission_used": submission_used,  # which impl scored (best-so-far vs final)
                 "metrics_path": str(artifacts_dir / "metrics.json"),
                 "metrics_error_path": metrics_error_path,

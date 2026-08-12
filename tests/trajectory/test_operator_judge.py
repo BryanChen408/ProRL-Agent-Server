@@ -22,7 +22,7 @@ try:
     from polar.runtime.base import BaseRuntime
     from polar.runtime.models import ExecResult
     from polar.trajectory.evaluator.operator_judge import OperatorJudgeEvaluator
-    from polar.trajectory.models import Trajectory
+    from polar.trajectory.models import Trace, Trajectory
     _DEPS = True
 except Exception as _exc:  # noqa: BLE001 — polar/pydantic not importable on a bare host
     _DEPS = False
@@ -71,7 +71,7 @@ if _DEPS:
 
         async def download_dir(self, remote_path: str, local_path: str) -> None: ...
 
-    def _run(metrics, *, impl=True, exec_rc=0, refresh=True, with_fresh=True, agent_files=None):
+    def _run(metrics, *, impl=True, exec_rc=0, refresh=True, with_fresh=True, agent_files=None, traces=None):
         ev = OperatorJudgeEvaluator(op_name=OP, judge_command="bash pipeline.sh", metrics_path=METRICS)
         if agent_files is None:
             agent_files = {SUB: "# kernel"} if impl else {}
@@ -80,7 +80,7 @@ if _DEPS:
                             exec_rc=exec_rc)
         with tempfile.TemporaryDirectory() as d:
             return asyncio.run(ev.evaluate(
-                Trajectory(status="COMPLETED", traces=[]),
+                Trajectory(status="COMPLETED", traces=list(traces or [])),
                 runtime=agent,
                 fresh_eval_runtime=(judge if with_fresh else None),
                 refresh_runtime=refresh,
@@ -94,6 +94,74 @@ def test_success_speedup_reward():
     assert res.outcome_reward == 0.9   # 0.75+0.25*(s^2-1)/(s^2+1), s=2 -> 0.9
     assert res.metadata["success"] is True and res.metadata["error_type"] is None
     assert len(judge.uploaded) == 1 and len(judge.execs) == 1  # impl crossed + judge ran
+
+
+_PENALTY_ENVS = ("POLAR_TRUNCATION_PENALTY", "POLAR_TRUNCATION_PENALTY_CAP", "POLAR_TRUNCATION_PENALTY_FLOOR")
+
+
+def _penalty_env_saved():
+    return {k: os.environ.pop(k, None) for k in _PENALTY_ENVS}
+
+
+def _penalty_env_restore(saved):
+    for k, v in saved.items():
+        if v is None:
+            os.environ.pop(k, None)
+        else:
+            os.environ[k] = v
+
+
+def test_truncation_events_penalize_reward():
+    # finish_reason=length 的 trace 按次轻扣(默认 λ=0.01):0.35 档 2 次截断 -> 0.33
+    saved = _penalty_env_saved()
+    try:
+        res, *_ = _run({"success": False, "ast_check_ok": True, "correctness_ok": False,
+                        "error_type": "correctness_failed"},
+                       traces=[Trace(finish_reason="length"), Trace(finish_reason="length"),
+                               Trace(finish_reason="tool_calls")])
+        assert abs(res.outcome_reward - 0.33) < 1e-9, res.outcome_reward
+        assert res.metadata["truncation_events"] == 2
+        assert abs(res.metadata["truncation_penalty"] - 0.02) < 1e-9
+        # 无截断 trace:不扣,审计字段在
+        res2, *_ = _run({"success": False, "ast_check_ok": True, "correctness_ok": False,
+                         "error_type": "correctness_failed"},
+                        traces=[Trace(finish_reason="stop")])
+        assert res2.outcome_reward == 0.35
+        assert res2.metadata["truncation_events"] == 0
+        assert res2.metadata["truncation_penalty"] == 0.0
+    finally:
+        _penalty_env_restore(saved)
+
+
+def test_truncation_penalty_cap_and_floor():
+    saved = _penalty_env_saved()
+    try:
+        # 总扣分封顶 0.05:0.35 档 10 次截断 -> 0.30(不无限叠加)
+        many = [Trace(finish_reason="length") for _ in range(10)]
+        res, *_ = _run({"success": False, "ast_check_ok": True, "correctness_ok": False,
+                        "error_type": "correctness_failed"}, traces=many)
+        assert abs(res.outcome_reward - 0.30) < 1e-9, res.outcome_reward
+        # 下限 0.15:submission_missing 的 0.2 档重压不穿到 0
+        res2, *_ = _run(None, impl=False, traces=many)
+        assert abs(res2.outcome_reward - 0.15) < 1e-9, res2.outcome_reward
+        assert res2.metadata["error_type"] == "submission_missing"
+    finally:
+        _penalty_env_restore(saved)
+
+
+def test_truncation_penalty_env_off():
+    # POLAR_TRUNCATION_PENALTY=0 整体回退:截断 trace 在场也不扣
+    saved = _penalty_env_saved()
+    try:
+        os.environ["POLAR_TRUNCATION_PENALTY"] = "0"
+        res, *_ = _run({"success": False, "ast_check_ok": True, "correctness_ok": False,
+                        "error_type": "correctness_failed"},
+                       traces=[Trace(finish_reason="length") for _ in range(3)])
+        assert res.outcome_reward == 0.35
+        assert res.metadata["truncation_events"] == 3
+        assert res.metadata["truncation_penalty"] == 0.0
+    finally:
+        _penalty_env_restore(saved)
 
 
 def test_operator_failure_scored_not_raised():
