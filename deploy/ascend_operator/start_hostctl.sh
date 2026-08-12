@@ -36,15 +36,24 @@ find_python() {
   command -v python3
 }
 
+# 只清本实例的 hostctl 残留。裸 pgrep -f "<deploy_dir>/tools/hostctl_server.py" 是全机匹配
+# ——POLAR_DEPLOY_DIR 由脚本位置推得，同机并存的两个 polar 共用同一个仓，那个 pattern 会
+# 连对方的 hostctl 一起杀。用 output root 区分（不是完整 --root 值：那里含 run_id，每次启动
+# 都变，会漏掉同实例上一轮的残留）。与 stop_hostctl.sh 里同名 pattern 保持一致。
+_out_root="${POLAR_OUTPUT_ROOT:-${POLAR_OUTPUT_DIR%%/runs/*}}"
+_root_re="$(printf '%s' "${_out_root}" | sed -e 's/[.]/[.]/g' -e 's|/|[/]|g')"
+HOSTCTL_PATTERN="hostctl_server[.]py .*--root ${_root_re}([[:space:]]|[/])"
+
 stop_residual() {
   local pids
-  pids="$(pgrep -f "${POLAR_DEPLOY_DIR}/tools/hostctl_server.py" 2>/dev/null || true)"
+  pids="$(pgrep -f "${HOSTCTL_PATTERN}" 2>/dev/null || true)"
   if [[ -z "${pids}" ]]; then
     return 0
   fi
+  echo "[cleanup] hostctl residual pids ${pids//$'\n'/ } (root ${_out_root})"
   kill ${pids} 2>/dev/null || true
   sleep 1
-  pids="$(pgrep -f "${POLAR_DEPLOY_DIR}/tools/hostctl_server.py" 2>/dev/null || true)"
+  pids="$(pgrep -f "${HOSTCTL_PATTERN}" 2>/dev/null || true)"
   if [[ -n "${pids}" ]]; then
     kill -9 ${pids} 2>/dev/null || true
   fi
