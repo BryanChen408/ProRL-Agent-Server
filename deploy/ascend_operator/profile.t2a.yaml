@@ -27,7 +27,7 @@ operator_runtime:
   backend: ascendc      # ← delta 5:prepare 走 input/{op}.py + --backend ascendc(triton 侧无此字段=默认 triton)
   # ← delta 6:算子同名 .json(NPUKernelBench 用例规格,get_input_groups() 要读)随 prepare 上传到 input/。
   #   {op}.py 走 vime task_source 内容寻址,.json 没有该通道 → 从数据集目录直传。triton 侧无此字段=不产生该动作。
-  task_assets_dir: /home/docker/datasets/op_tasks/op_assets_kernelbench_level1/op_tasks
+  task_assets_dir: /home/docker/polar_can/ProRL-Agent-Server/datasets/op_tasks/op_assets_kernelbench_level1/op_tasks
   # ← delta 11:asc-devkit(上游 init.sh Step 4 会 clone 的算子开发资料仓)。
   #   $ASC_DEVKIT_DIR 在 21 个 skill 文档里被引用 46 次,是出现最多的环境变量;
   #   ascendc-docs-search 整个 skill 就是查它。只读挂到 /opt/asc-devkit,不进 workdir 拷贝。
@@ -36,8 +36,8 @@ operator_runtime:
   #   路径映射:skill 写死 docs/zh/api,9.0.0 布局是 docs/api/context,已在仓内建相对软链。
   asc_devkit_dir: /home/docker/asc-devkit-9.0.0
   budget:
-    generation_max: 10
-    optimization_max: 5
+    generation_max: 8
+    optimization_max: 4
     interval_seconds: 2
   npu_lease:
     enabled: true
@@ -73,16 +73,16 @@ operator:
       #   禁止 npu-smi 这类 NPU 探针(多容器共享卡池,探测会干扰别人)。
       #   env.sh 只被固定入口 source,agent 自己的 shell 读不到 —— 不注入这里就必然
       #   落空到优先级 2。注入后永远命中第 1 级,降级路径不会被走到。
-      SOC_VERSION: "ascend910b1"
-      ASCENDC_SOC_VERSION: "ascend910b1"
+      SOC_VERSION: "ascend910_9382"
+      ASCENDC_SOC_VERSION: "ascend910_9382"
       ASC_DEVKIT_DIR: "/opt/asc-devkit"
-      CLAUDE_CODE_MAX_CONTEXT_TOKENS: "262144"
+      CLAUDE_CODE_MAX_CONTEXT_TOKENS: "245000"
 
   agent:
     model_name: claude-opus-4-5
     # ← delta 14:17 次评测 × 每次至少「读日志→调 Skill→改代码→跑评测」4 轮 = 68 轮,
     #   加实测 30-40 轮的 Phase 0-3 探索,100 不够。
-    max_turns: 250
+    max_turns: 200
     # ← delta 8:规则 —— 只保留本项目(canonical/skills)提供的 skill,CLI 自带的一律关掉
     #   (每个 session 白占 4,327 字符 prompt,还可能被误调白烧 turn)。
     #   prepare 按 canonical/skills 的实际内容取补集,写 .claude/settings.json 的
@@ -96,7 +96,7 @@ operator:
     #   项目级那份不能省:CLAUDE.md 和任务 prompt 里的命令都走相对路径 `.claude/skills/...`。
     #   triton 侧无此字段 = 保持 /opt/canonical/skills(它的 prepare 不拷 skills,必须靠用户级)。
     skills_path: ""
-    max_output_tokens: 24576
+    max_output_tokens: 12288
     inference_timeout_ms: 14400000
     disallowed_tools: "AskUserQuestion CronCreate CronDelete CronList EnterPlanMode EnterWorktree ExitPlanMode ExitWorktree NotebookEdit ScheduleWakeup TaskCreate TaskGet TaskList TaskOutput TaskStop TaskUpdate TodoWrite WebFetch WebSearch"
     append_system_prompt: "Follow ./CLAUDE.md. The user instruction provides the concrete operator name; reference is at input/{op_name}.py. 产出 {op_name}/ 工程并打成单个 tarball 到 output/submission/{op_name}_impl.tar.gz。Do not ask user questions in this non-interactive run. Run the fixed validation entry in the foreground with a long Bash timeout (600000 ms), never run_in_background; if it still gets auto-backgrounded, read the output file it prints to fetch the verdict and error output. 输出纪律(硬规则,违反会直接判死本会话):思考占输出预算,写太长会顶穿预算、本轮 content 为空,连续几轮会话就被终止 —— 每轮只想「下一步动作」并立刻输出一个 tool call;不要把完整方案设计或整份文件草稿写进思考。写代码分小块:先写能编译的粗版(每个 Write/Edit 只写一段或一个函数),再逐段补全;拿不准的地方先写出代码跑出真实报错再对着改,不要在思考里预解决所有问题。如果收到「Output token limit hit」提示:不要重新规划、不要从头再想,立即用更小的块直接重试输出。"
