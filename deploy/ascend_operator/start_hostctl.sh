@@ -11,7 +11,7 @@ if [[ -z "${POLAR_GATEWAY_PORT:-}" ]]; then
   if [[ -z "${POLAR_PROFILE:-}" && -s /tmp/polar_profile_runtime.yaml ]]; then
     POLAR_PROFILE=/tmp/polar_profile_runtime.yaml
   fi
-  POLAR_PROFILE="${POLAR_PROFILE:-${POLAR_DEPLOY_DIR}/profile.yaml}"
+  POLAR_PROFILE="${POLAR_PROFILE:-${POLAR_DEPLOY_DIR}/profiles/profile.yaml}"
   source <("${POLAR_PYTHON:-python3}" "${POLAR_DEPLOY_DIR}/tools/load_polar_profile.py" \
     --profile "${POLAR_PROFILE}" --repo-root "${POLAR_REPO_ROOT}")
 fi

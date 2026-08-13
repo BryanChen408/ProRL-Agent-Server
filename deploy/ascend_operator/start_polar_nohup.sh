@@ -6,7 +6,7 @@ source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)/_paths.sh"
 if [[ -z "${POLAR_PYTHON:-}" && -x /root/polar-venv/bin/python ]]; then
   export POLAR_PYTHON=/root/polar-venv/bin/python
 fi
-POLAR_PROFILE="${POLAR_PROFILE:-${POLAR_DEPLOY_DIR}/profile.yaml}"
+POLAR_PROFILE="${POLAR_PROFILE:-${POLAR_DEPLOY_DIR}/profiles/profile.yaml}"
 PYTHON_FOR_PROFILE="${POLAR_PYTHON:-python3}"
 source <("${PYTHON_FOR_PROFILE}" "${POLAR_DEPLOY_DIR}/tools/load_polar_profile.py" \
   --profile "${POLAR_PROFILE}" \

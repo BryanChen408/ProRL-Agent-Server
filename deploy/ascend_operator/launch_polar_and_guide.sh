@@ -32,7 +32,7 @@ POLAR_VENV="${POLAR_VENV:-/mnt/model/cbx/env/polar-env}"
 #
 # 起第二个实例时这两个都要给：POLAR_PROFILE_RUNTIME 不给会覆盖默认实例的渲染产物。
 # 用法见 profile.bak.yaml 头部。
-POLAR_PROFILE_SRC="${POLAR_PROFILE_SRC:-${POLAR_REPO}/deploy/ascend_operator/profile.t2a.yaml}"
+POLAR_PROFILE_SRC="${POLAR_PROFILE_SRC:-${POLAR_REPO}/deploy/ascend_operator/profiles/profile.t2a.yaml}"
 POLAR_PROFILE_RUNTIME="${POLAR_PROFILE_RUNTIME:-/tmp/polar_profile_runtime.yaml}"
 
 # ─────── 站点值（profile 里只有 token，实际值在这里）──────────────────────────
