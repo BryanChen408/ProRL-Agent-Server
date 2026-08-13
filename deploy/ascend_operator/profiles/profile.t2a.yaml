@@ -79,7 +79,14 @@ operator:
   runtime:
     image: ascendc-tilelang:v1                          # ← delta 2
     network: host
-    workdir: /opt/workspace/agent_workdir
+    # ← delta 14:workdir 从 /opt/workspace/agent_workdir 挪进 /polar/session。
+    #   /polar/session 是 runtime 的 session bind 点(base.py:14 RUNTIME_SESSION_DIR)。
+    #   gateway 每 session 起两个 runtime:agent 用 session_dir、fresh eval judge 用
+    #   session_dir/eval_runtime(node.py:554),docker 下两者各自 bind 到同名
+    #   /polar/session。workdir 落在它**之外**时,进程级 runtime(无 mount namespace)
+    #   会让两个实例共用同一个宿主目录,把「judge 在 fresh 容器上判分」静默破掉。
+    #   顺带:judge 取 submission 因此落进 bind-mount 快路径(见 operator_judge.py:135)。
+    workdir: /polar/session/agent_workdir
     env:
       # ← delta 10:SOC_VERSION 注入容器 env。CLAUDE.md 的 Phase 0「硬件信息查询」按
       #   优先级 1(读 $SOC_VERSION)→ 2(npu-smi)→ 3(CANN 安装信息)降级,而本环境
