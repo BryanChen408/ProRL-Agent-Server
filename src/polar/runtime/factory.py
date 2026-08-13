@@ -8,11 +8,13 @@ from polar._imports import import_subclass
 from polar.runtime.apptainer import ApptainerRuntime
 from polar.runtime.base import BaseRuntime
 from polar.runtime.docker import DockerRuntime
+from polar.runtime.local import LocalRuntime
 from polar.runtime.models import RuntimeSpec
 
 _BUILTIN_BACKENDS: dict[str, type[BaseRuntime]] = {
     "docker": DockerRuntime,
     "apptainer": ApptainerRuntime,
+    "local": LocalRuntime,
 }
 
 
@@ -55,9 +57,10 @@ def _validate_runtime_capabilities(runtime: BaseRuntime) -> None:
     if spec.kwargs.get("ascend") and not runtime.supports_ascend:
         raise ValueError(
             f"runtime backend {backend!r} does not implement Ascend NPU passthrough "
-            "(kwargs.ascend); only the 'docker' backend exposes the required driver/device mounts "
-            "and optional runtime lifetime card lease. Running an operator rollout on this backend "
-            "would silently miss the required Ascend environment."
+            "(kwargs.ascend). 'docker' exposes the driver/device mounts plus the optional "
+            "runtime lifetime card lease; 'local' inherits an Ascend environment that is "
+            "already present (process-level, nothing to mount). Running an operator "
+            "rollout on any other backend would silently miss the Ascend environment."
         )
     if not spec.allow_internet:
         if not runtime.can_disable_internet:

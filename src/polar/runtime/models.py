@@ -56,7 +56,9 @@ class ExecResult(BaseModel):
 class RuntimeSpec(BaseModel):
     """Container runtime configuration for one rollout session."""
 
-    backend: Literal["docker", "apptainer"] = "docker"
+    # "local" = process-level: no nested container, each session is a gateway
+    # subprocess. For restricted environments with no host access (see runtime/local.py).
+    backend: Literal["docker", "apptainer", "local"] = "docker"
     image: str
     prepare: list[PrepareAction] = Field(default_factory=list)
     eval_prepare: list[PrepareAction] | None = None
