@@ -10,6 +10,31 @@ set -euo pipefail
 #   4. Polar 启动后，vime 自动检测到并开始训练
 
 POLAR_REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd -P)"
+
+# ─────── 共享盘根：自动探测，别写死 ──────────────────────────────────────────
+# 同一份存储在不同机器上挂载点不同：这台是 /mnt/model，平台节点/沙箱容器是
+# /mnt/host-model。原先四处默认值写死 /mnt/model/cbx/...，换机器时 venv、数据集、
+# asc-devkit 全部落空，而且失败点分散在启动流程各处，难归因。
+# 与 vime 侧 SHARE_ROOT_CANDIDATES 同一套做法（start_vime_in_platform.sh:51）。
+#
+# 判据是"含 cbx/"而不是"目录存在"：容器 uid=0 且 / 可写，没挂上时 /mnt/model 这种
+# 路径也可能是 rootfs 上的空目录。cbx/ 是本项目自己的目录，必须在。
+POLAR_SHARE_CANDIDATES="${POLAR_SHARE_CANDIDATES:-/mnt/host-model /mnt/model /models}"
+if [[ -z "${POLAR_SHARE_ROOT:-}" ]]; then
+  for _cand in ${POLAR_SHARE_CANDIDATES}; do
+    if [[ -d "${_cand}/cbx" ]]; then
+      POLAR_SHARE_ROOT="${_cand}"
+      break
+    fi
+  done
+fi
+if [[ -z "${POLAR_SHARE_ROOT:-}" ]]; then
+  echo "ERROR: 候选路径里找不到共享盘根（要求含 cbx/）：${POLAR_SHARE_CANDIDATES}" >&2
+  echo "  venv / 数据集 / asc-devkit 都在它下面，继续跑会在启动各处零散报错。" >&2
+  echo "  挂载点不在候选表里时用 POLAR_SHARE_ROOT 显式指定。" >&2
+  exit 1
+fi
+echo "[polar-init] 共享盘根：${POLAR_SHARE_ROOT}"
 # 本项目自己的 venv。原先指向 corlorlight_models/mingchengzou/ 下那个（别人的目录）。
 #
 # 这个 venv **只提供第三方依赖**，polar 本身不需要装：start_polar_nohup.sh:128 在启动时
@@ -24,7 +49,7 @@ POLAR_REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd -P)"
 #   /mnt/model/cbx/env/polar-env/bin/python -m ensurepip --upgrade
 #   /mnt/model/cbx/env/polar-env/bin/python -m pip install \
 #     fastapi uvicorn httpx pydantic pyyaml
-POLAR_VENV="${POLAR_VENV:-/mnt/model/cbx/env/polar-env}"
+POLAR_VENV="${POLAR_VENV:-${POLAR_SHARE_ROOT}/cbx/env/polar-env}"
 # 这两个可覆盖，用来在同机并存第二个 polar 实例（profile 即实例身份：端口、卡池、
 # 输出目录全由它决定）。**默认值一字不改** —— start_hostctl.sh 硬编码读
 # /tmp/polar_profile_runtime.yaml 拿在跑服务的端口表，改默认值会让它退回 profile.yaml
@@ -94,9 +119,9 @@ fi
 # 与 vime 的 OPERATOR_TASKS_DIR 同一份，不需要第二份拷贝：{op}.py 走 vime 的
 # sample.task_source 传过来。filtered189 用 get_inputs()（输入写在 py 里），没有
 # 同名 .json，所以 _has_case_json 为假、那条 upload 不生成 —— 这是预期的。
-TASK_ASSETS_DIR="${TASK_ASSETS_DIR:-/mnt/model/cbx/op_tasks/op_tasks/op_assets_cudallm_filtered189/op_tasks}"
+TASK_ASSETS_DIR="${TASK_ASSETS_DIR:-${POLAR_SHARE_ROOT}/cbx/op_tasks/op_tasks/op_assets_cudallm_filtered189/op_tasks}"
 # 共享盘路径：clone 和软链一次落盘，换机器/重建容器都还在，不必每台重拉。
-ASC_DEVKIT_DIR="${ASC_DEVKIT_DIR:-/mnt/model/cbx/asc-devkit-9.0.0}"
+ASC_DEVKIT_DIR="${ASC_DEVKIT_DIR:-${POLAR_SHARE_ROOT}/cbx/asc-devkit-9.0.0}"
 # ─────── vime 交接：本轮拓扑由 vime 的 resolved layout 单源提供 ────────────────
 # vime rank0 渲染完 layout 后，往 ${RDV_DIR}/polar_handoff.env 写两个值：
 #   VIME_ROLLOUT_HOST → 推理端点主机（= layout 的 rollout[0].node，router/LB-proxy 绑这台）
@@ -109,7 +134,7 @@ ASC_DEVKIT_DIR="${ASC_DEVKIT_DIR:-/mnt/model/cbx/asc-devkit-9.0.0}"
 # 东西，也不可能读到上一轮残留，两个方向的启动顺序都能跑通。
 # 必须与 vime 侧 SCRATCH_DIR 同值（vime: ${VIME_SHARE_ROOT}/cbx/scratch）：交接目录
 # 由它拼出来，两边不一致就等不到对方。vime 那边同名变量可覆盖，改一处要改两处。
-VIME_SHARE_ROOT="${VIME_SHARE_ROOT:-/mnt/model}"
+VIME_SHARE_ROOT="${VIME_SHARE_ROOT:-${POLAR_SHARE_ROOT}}"
 VIME_SCRATCH_DIR="${VIME_SCRATCH_DIR:-${VIME_SHARE_ROOT}/cbx/scratch}"
 
 # ─────── 先停掉在跑的 polar（必须排在所有可能失败的步骤之前）──────────────────
