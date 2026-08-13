@@ -113,20 +113,32 @@ LocalRuntime 在 `exec()` 里把 `/polar/session` 前缀替换成**本实例的*
 - `load_polar_profile.py:87` —— prepare 命令里写死 `--workdir /opt/workspace/agent_workdir`，
   **没走 `workdir` 变量**
 - `_runtime_volumes:54` —— `{tools_dir}:/opt/workspace/agent_workdir/tools:ro`
-- `check_render_contract.py:123` —— 同一字面量，渲染契约校验会失败
+`check_render_contract.py:123` 有同一个字面量，但**不需要改** `[实测]`：它校验的是
+mainline 路径（`polar_config.yaml` + `expand_operator_sample_request`）、自建
+expected volumes，不经过 `load_polar_profile.py`。改完本文件后未动它即通过
+（`task_request=ok / topology=ok`）。本文档上一版把它列进必改清单，是照字面量搜索
+就下结论、没核对调用链。
 
 ---
 
 ## 4. 改动清单
 
-| # | 文件 | 改动 | 量 |
-|---|---|---|---|
-| 1 | `src/polar/runtime/local.py` | **新增** LocalRuntime | ~180 行 |
-| 2 | `src/polar/runtime/models.py` | `backend` Literal 加 `"local"` | 1 行 |
-| 3 | `src/polar/runtime/factory.py` | `_BUILTIN_BACKENDS` 加一项 | 2 行 |
-| 4 | `profiles/profile.t2a.yaml` | `runtime.backend: local` + `workdir` | 2 行 |
-| 5 | `tools/load_polar_profile.py` | `:290` 改读 profile；`:87` 去硬编码 | ~4 行 |
-| 6 | `check_render_contract.py:123` | 跟随 workdir | 1 行 |
+| # | 文件 | 改动 | 量 | 状态 |
+|---|---|---|---|---|
+| 1 | `src/polar/runtime/local.py` | **新增** LocalRuntime | ~180 行 | 待做 |
+| 2 | `src/polar/runtime/models.py` | `backend` Literal 加 `"local"` | 1 行 | 待做 |
+| 3 | `src/polar/runtime/factory.py` | `_BUILTIN_BACKENDS` 加一项 | 2 行 | 待做 |
+| 4 | `profiles/profile.t2a.yaml` | `runtime.backend: local` | 1 行 | 待做 |
+| 5 | `tools/load_polar_profile.py:297` | `"backend": "docker"` 改读 profile | ~2 行 | 待做 |
+| 6 | `tools/load_polar_profile.py` | workdir 迁移 + 去两处硬编码 | ~12 行 | **已落 `8265c230`** |
+| 7 | `launch_polar_and_guide.sh` | 共享盘根改自动探测 | ~25 行 | **已落 `d87f22aa`** |
+
+`check_render_contract.py` 不在清单里 —— 见 §3.2 末尾。
+
+#7 不属原设计，是实施中发现的：沙箱容器的共享盘挂在 `/mnt/host-model`，而 launcher
+四处默认值写死 `/mnt/model/cbx/...`，不改则 venv、数据集、asc-devkit 全落空。
+
+分支 `feat/local-runtime`（基线 `ac1a5673`）。`ascendc-szai` 不受影响。
 
 ### 4.1 LocalRuntime 要点
 
@@ -256,10 +268,20 @@ eval 子进程，全都漏网。
 
 Step 0 已完成，可直接进 Step 1。
 
-**Step 1：改 workdir 与去硬编码（#4/#5/#6），先不写 LocalRuntime。**
-仍用 `backend: docker`，在**能跑 docker 的环境**上验一次 —— 这样把「workdir 迁移」
-和「新 runtime」两个变量分开。任一出问题都能立刻归因。
-若手上已无 docker 环境，退化为 `check_render_contract.py` + 渲染产物 diff。
+**Step 1：改 workdir 与去硬编码（#6/#7）—— 代码已落，等 docker 环境验一次。**
+仍用 `backend: docker`，这样把「workdir 迁移」和「新 runtime」两个变量分开，
+任一出问题都能立刻归因。已落 `8265c230` + `d87f22aa`。
+
+在能跑 docker 的环境上验三条：
+
+1. prepare 不报 `exit 1`（失败在 agent 起来之前，日志只有一行，最难归因）
+2. `<session>/agent_workdir/input/{op}.py` 在位
+3. **judge 出分非 0.2** —— 0.2 是 `submission_missing` 地板分
+
+第 3 条同时会顺带验证 §8.1 第五个用例要覆盖的隐患：judge 跨实例取 submission 到底
+靠不靠 gateway 显式传的 `submission_host_path`（`node.py:878`）。docker 上正常出分 =
+那条转移路径存在且有效，LocalRuntime 只要不破坏它即可；docker 上就出 0.2 = 问题在
+workdir 迁移本身，与 runtime 无关。两种结果都有用。
 
 **Step 2：写 LocalRuntime（#1/#2/#3），配 §8.1 的单测。**
 不接 gateway，纯 runtime 契约。
@@ -282,7 +304,7 @@ Step 0 已完成，可直接进 Step 1。
 `_run_local_command`，`asyncio.run` 包一层）。LocalRuntime 比 DockerRuntime 好测：
 它本来就是跑本地子进程，多数用例可以直接**真跑** `bash`，不用 mock。
 
-四个用例，都对着「静默失败」写：
+五个用例，都对着「静默失败」写：
 
 | 用例 | 防的问题 |
 |---|---|
@@ -290,9 +312,18 @@ Step 0 已完成，可直接进 Step 1。
 | `exec` 的 cwd / env value / 命令字符串三处前缀都被重写 | 漏一处就走错目录 |
 | `stop()` 后子进程的**孙进程**也没了 | §6 漏进程占卡 |
 | `factory.create_runtime` 对 `kwargs.ascend` 不再抛 | `supports_ascend` 忘了置 True |
+| **agent 实例写的文件，judge 实例能取到** | 见下 |
 
 第三个用例是重点：起 `bash -c 'sleep 300 & sleep 300'` 再 `stop()`，断言两个
 `sleep` 都消失。这条最容易写漏，也是最贵的 bug。
+
+第五个用例是前缀重写最刁的一处，实施中才想到：agent 的 workdir 重写到
+`<session>/agent_workdir`，judge 的重写到 `<session>/eval_runtime/agent_workdir`
+—— 两个不同的宿主目录。而 `operator_judge._abs()` 拼出的绝对路径会按 **judge 自己的
+实例**重写，落到 `eval_runtime/` 下面，可 submission 其实是 agent 写在另一处的。
+Docker 下不成问题（judge 在 fresh 容器里，gateway 显式传 `submission_host_path`
+做转移，`node.py:878`），但那条转移路径在 LocalRuntime 下必须同样有效。
+判据 = judge 出分非 0.2。Step 1 在 docker 上跑过之后，这条的性质就清楚了。
 
 ### 8.2 实跑判据（Step 4，一个 session）
 
