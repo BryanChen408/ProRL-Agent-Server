@@ -47,11 +47,12 @@ def _repo_path(repo: Path, value: object) -> str:
 
 
 def _runtime_volumes(operator_runtime_dir: Path, workflow: str,
-                     asc_devkit_dir: str | None = None) -> list[str]:
+                     asc_devkit_dir: str | None = None,
+                     workdir: str = "/polar/session/agent_workdir") -> list[str]:
     volumes = [f"{operator_runtime_dir}:/opt/canonical:ro"]
     tools_dir = operator_runtime_dir / "tools"
     if workflow == "legacy" or tools_dir.is_dir():
-        volumes.append(f"{tools_dir}:/opt/workspace/agent_workdir/tools:ro")
+        volumes.append(f"{tools_dir}:{workdir}/tools:ro")
     # asc-devkit:上游 init.sh Step 4 会 clone 的算子开发资料仓($ASC_DEVKIT_DIR)。
     # 只读挂载而非拷进 workdir —— 97M,每 session 拷一份不划算,上游那边也是一份 clone 挂着。
     if asc_devkit_dir:
@@ -83,9 +84,12 @@ def _operator_prepare(
             },
         ]
 
+    # {{op_name}} 是双花括号:这条命令后面还要过一次 .format(op_name=...),
+    # f-string 里的单花括号会被提前吃掉。改成 f-string 是为了让 workdir 跟着参数走
+    # (原先写死 /opt/workspace/agent_workdir,与 runtime.workdir 分叉)。
     command = (
         "python3 /opt/canonical/runtime/prepare_operator_workdir.py "
-        "--op-name {op_name} --workdir /opt/workspace/agent_workdir "
+        f"--op-name {{op_name}} --workdir {workdir} "
         "--no-stub --readonly-tools"
     )
     if backend == "ascendc":
@@ -261,9 +265,12 @@ def main() -> int:
     asc_devkit_dir = str(operator_runtime.get("asc_devkit_dir") or "").strip() or None
     if asc_devkit_dir:
         asc_devkit_dir = _repo_path(repo, asc_devkit_dir)
-    volumes = _runtime_volumes(operator_runtime_dir, workflow, asc_devkit_dir)
+    # workdir 必须在 volumes 之前求值:tools 的挂载点由它拼出来(见 _runtime_volumes)。
+    # 默认值落在 /polar/session 内 —— 那是 runtime 的 session bind 点,进程级 runtime
+    # 靠它把两个实例(agent / fresh eval judge)分到各自的宿主目录。
+    workdir = str(runtime.get("workdir", "/polar/session/agent_workdir"))
+    volumes = _runtime_volumes(operator_runtime_dir, workflow, asc_devkit_dir, workdir)
     upload_source = str(op_assets_dir / "op_tasks" / "{op_name}.py")
-    workdir = str(runtime.get("workdir", "/opt/workspace/agent_workdir"))
     # ascendc 专用:算子同名 .json(用例规格)所在的数据集目录;triton 侧不配=不产生该动作
     task_assets_dir = str(operator_runtime.get("task_assets_dir") or "").strip() or None
     # ascendc 专用:只保留 canonical/skills 的 skill(CLI 自带的关掉);triton 侧不配=不产生该参数
