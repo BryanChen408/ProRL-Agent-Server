@@ -293,8 +293,13 @@ def main() -> int:
         task_assets_dir=task_assets_dir,
         only_project_skills=only_project_skills,
     )
+    # 注意:`backend`(:198)是 triton/ascendc —— prepare 的上传布局,与这里无关。
+    # runtime backend 是 docker/apptainer/local,故用 runtime_backend 另起一个名字:
+    # 复用 `backend` 会静默改掉 ascendc 的 prepare 逻辑。
+    # local = 进程级,受限环境无宿主权限时用(src/polar/runtime/local.py)。
+    runtime_backend = str(runtime.get("backend") or "docker").strip().lower()
     runtime_spec = {
-        "backend": "docker",
+        "backend": runtime_backend,
         "image": str(runtime.get("image", "sandbox:v1")),
         "network": str(runtime.get("network", "host")),
         "workdir": workdir,
