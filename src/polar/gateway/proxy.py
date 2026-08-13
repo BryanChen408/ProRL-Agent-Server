@@ -163,6 +163,18 @@ class InferenceClient:
         headers = {"Content-Type": "application/json", "x-polar-engine-url": self.base_url}
         if trace_headers:
             headers.update({str(k): str(v) for k, v in trace_headers.items()})
+            # Session affinity. vime's LB proxy pins a session to one engine when
+            # x-session-id is present (select_server_by_session); without it the
+            # proxy falls back to active_tokens load balancing. We never sent this
+            # header, so a session's turns drifted between engines: measured 16.5%
+            # of turns switched, and those got 45% prefix cache hit vs 91% for
+            # turns that stayed. The session id is already carried in
+            # x-polar-trace-id as "{session_id}:{turn_seq}".
+            _trace_id = headers.get("x-polar-trace-id", "")
+            if _trace_id and "x-session-id" not in headers:
+                _session_id = _trace_id.rsplit(":", 1)[0]
+                if _session_id:
+                    headers["x-session-id"] = _session_id
         try:
             resp = await client.post(
                 "/v1/chat/completions",
