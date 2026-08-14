@@ -580,20 +580,63 @@ grep -oiE "\-8005|resource.?busy|dcmi|fail" /tmp/smi.*.log | sort | uniq -c
   asyncio 单事件循环里该函数无 `await`，实际串行。gateway 若改用线程池建 runtime 才会
   暴露，届时加 `try/FileExistsError` 兜住即可
 
-## 12. 仍需真环境验证的两项
+## 12. 离上线还差什么
 
-前面所有实测都在训练容器完成（含降权、e2e、并发）。剩下两项本容器给不出结论：
+polar 侧改造已完成并实测（§4 清单全落，全量 323 passed，e2e 五条判据全过）。
+剩下三件，按「是否阻塞」排序：
 
-1. **降权后 CANN 能否真编译。** 要真 kernel + 可用的卡；假 tarball 在 AST 检查就被
-   拒，到不了编译阶段。本容器的卡被训练占着（`device_count 0`）。这条会在与 vime
-   联调时自然覆盖 —— 若失败，多半是 `polar` 用户缺某个 CANN 目录的读权限，
-   查 `/usr/local/Ascend` 下的属主。
-2. **`skills/ascendc-env-check` 触发 `npu-smi` 时的 DCMI 锁争抢**（§10.3）。
-   需要多张卡同时在用。
+### 12.1 网络可达性 —— 硬门槛，与 LocalRuntime 无关
 
-沙箱容器上要先跑一次 `setup_local_runtime_user.sh`（建 `polar`、加设备 gid、
-锁共享树）。注意顺序：**asc-devkit 自举必须在它之前**跑完 —— 0555 之后连 `polar`
-自己也改不了那两棵树。
+原拓扑 polar 在宿主机、IP 固定，vime 靠平台前端填 `POLAR_HOST_IP` 拨过去。polar 挪进
+容器后，`launch_polar_and_guide.sh:196` 算出的 `HOST_IP` 是**容器 IP**。
+`bind_host: 0.0.0.0` 保证容器内监听所有网卡，但容器 IP 能否被 vime 那台机器拨到取决于
+平台给的网络模式：
+
+| 网络模式 | 结果 |
+|---|---|
+| host network | 直接通，`POLAR_HOST_IP` 填宿主 IP |
+| bridge + 端口映射 | 要映射 rollout 端口，vime 填**宿主 IP:映射端口** |
+| 纯 bridge 无映射 | **不通，整条链路起不来** |
+
+注意是**双向**可达：vime → polar rollout（提交任务），polar gateway → vime 的 vLLM
+router `:8001`（agent 的 LLM 调用被透明代理过去）。
+
+### 12.2 completion → trajectory → reward 一次没跑过
+
+e2e 里 `reward=None`、`error=no completions` —— shell harness 零 LLM 调用，
+`builder/per_request.py:27` 直接返回空 traces。而 **reward 正是 vime 唯一消费的东西**。
+
+有真 LLM 时 completion 记录会有，这条应当自然通（gateway 的捕获逻辑与 runtime backend
+无关），但**没有证据**。需要真 LLM，绕不过去。
+
+### 12.3 降权后 CANN 真编译
+
+假 tarball 在 AST 检查就被拒，到不了编译阶段；本容器的卡也被训练占着
+（`device_count 0`）。失败多半是 `polar` 用户缺 `/usr/local/Ascend` 下某目录的读权限。
+
+### 12.4 联调顺序 —— 按这个走，出问题最容易归因
+
+1. 从 **vime 那台机器**打 `curl <polar 可达地址>:<rollout 端口>/health` —— 不通就是 §12.1
+2. 从 **polar 容器内**打 `curl <vime router>:8001/v1/models`，顺便核对模型名与
+   `MODEL_SERVED` **逐字相同**（不一致是每请求 404、启动阶段静默）
+3. 一个 session 跑到出分，看 **reward 非 None** —— §12.2 的判据，也是真正的上线判据
+4. 看 `error_type`：`ast_check_failed` 或编译类都算路径通；`submission_missing` 才是
+   路径断（注意 eval pipeline 把「文件在但结构不对」也标成这个，见 §8.3）
+5. session 结束后 `/dev/shm/npu-locks` 无残留持有、canonical 与 asc-devkit
+   `git status` 干净
+
+前两条不通就别往下走 —— 会在错误的地方排查。§12.2 和 §12.3 会在第 3 步同时被覆盖。
+
+沙箱侧还要：装 polar 依赖、放数据集与 asc-devkit、跑一次
+`setup_local_runtime_user.sh`。**asc-devkit 自举必须在该脚本之前** —— 0555 之后连
+`polar` 自己也改不了那两棵树。
+
+### 12.5 未验证但不阻塞上线的两项
+
+- `npu-smi` 并发时的 DCMI 锁争抢（§10.3 有脚本，需多卡同时在用）
+- `_link_volumes` 的竞态（asyncio 单事件循环下不触发，gateway 改线程池才暴露）
+
+前面所有实测都在训练容器完成，含降权、e2e、并发。
 
 
 
