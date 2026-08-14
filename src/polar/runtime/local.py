@@ -215,7 +215,7 @@ class LocalRuntime(BaseRuntime):
             cwd or self.spec.workdir or self.runtime_session_dir
         )
         Path(effective_workdir).mkdir(parents=True, exist_ok=True)
-        wrapped = self._rewrite(command)
+        wrapped = self._prepend_pinned_exports(self._rewrite(command), effective_env)
         if self._run_as:
             # Drop privileges here, not in the agent preset: this single point covers
             # prepare, agent and judge. Wrapping in the preset would miss the other two.
@@ -228,6 +228,33 @@ class LocalRuntime(BaseRuntime):
             cwd=effective_workdir, env=effective_env, timeout=timeout_sec,
         )
         return ExecResult(stdout=stdout, stderr=stderr, return_code=rc)
+
+    # 这三个必须在登录 profile 跑完之后再设一遍，见 _prepend_pinned_exports。
+    _PINNED = ("HOME", "TMPDIR", "ASCEND_PROCESS_LOG_PATH")
+
+    def _prepend_pinned_exports(self, command: str, env: dict[str, str]) -> str:
+        """Re-export the session-scoped paths *after* the login profile has run.
+
+        ``bash -lc`` is a login shell and resets ``HOME`` from the passwd database —
+        measured: passing ``HOME=/tmp/x`` to ``bash -lc`` yields ``/root``, while
+        ``bash -c`` keeps it (``-p`` does not help either). So everything
+        ``_session_env`` pins via ``env=`` is silently discarded by the time the
+        command runs: CANN keeps logging to ``/root/ascend/log`` and, worse, every
+        concurrent session shares one ``HOME`` and one ``TMPDIR`` (the eval pipeline's
+        ``/tmp/npu``) — the exact collisions the pinning existed to prevent.
+
+        Dropping ``-l`` is not an option: DockerRuntime uses ``bash -lc`` too, and the
+        CANN/conda environment only lands on PATH via the login profile. So instead of
+        fighting the login shell, re-assert the values after it.
+
+        Only a concurrent test catches this: with one instance ``HOME=/root`` raises
+        nothing at all.
+        """
+        exports = " ".join(
+            f"export {key}={shlex.quote(str(env[key]))};"
+            for key in self._PINNED if key in env
+        )
+        return f"{exports} {command}" if exports else command
 
     def _session_env(self, env: dict[str, str]) -> dict[str, str]:
         """Rewrite prefixes, then pin the three paths that would otherwise be shared."""
