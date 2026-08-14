@@ -298,13 +298,26 @@ def main() -> int:
     # 复用 `backend` 会静默改掉 ascendc 的 prepare 逻辑。
     # local = 进程级,受限环境无宿主权限时用(src/polar/runtime/local.py)。
     runtime_backend = str(runtime.get("backend") or "docker").strip().lower()
+    # run_as:LocalRuntime 用它把 exec 包进 runuser 降权(docker backend 忽略此项)。
+    # 为什么必须降权:软链没有 docker `:ro` 的内核语义,agent 以 root 跑就能写穿它改坏
+    # 共享树(/opt/canonical、/opt/asc-devkit)。后果不是崩而是静默漂移 ——
+    # asc-devkit 被改坏 → docs-search 返回错内容 → agent 照着写出编不过的 kernel,
+    # 且一份坏了污染后续所有 session。见 LOCAL_RUNTIME_DESIGN.md §5.1。
+    # 空值 = 不降权(测试、或接受该暴露的部署)。
+    runtime_kwargs: dict = {
+        "ascend": {"pool": npu_pool, "lock_dir": npu_lock_dir, "lease_at_start": False},
+        "volumes": volumes,
+    }
+    run_as = str(runtime.get("run_as") or "").strip()
+    if run_as:
+        runtime_kwargs["run_as"] = run_as
     runtime_spec = {
         "backend": runtime_backend,
         "image": str(runtime.get("image", "sandbox:v1")),
         "network": str(runtime.get("network", "host")),
         "workdir": workdir,
         "env": runtime_env,
-        "kwargs": {"ascend": {"pool": npu_pool, "lock_dir": npu_lock_dir, "lease_at_start": False}, "volumes": volumes},
+        "kwargs": runtime_kwargs,
         "prepare": prepare,
         "eval_prepare": eval_prepare,
     }
