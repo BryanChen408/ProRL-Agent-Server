@@ -202,15 +202,23 @@ def test_volumes_become_symlinks(tmp_path: Path) -> None:
 
     async def go() -> None:
         await rt.start()
-        # session 内那条
-        link = rt.session_dir / "agent_workdir" / "tools"
-        assert link.is_symlink() and (link / "env.sh").is_file()
-        # 经软链能读到内容
+        # session 内那条必须是**真目录拷贝**而非软链 —— tools/ascendc_eval_pipeline.sh
+        # 会 readlink -f 自己再取上一级当 WORK_ROOT，软链会让它解析到共享树，
+        # judge_out 写进 operator_runtime_t2a（实测踩过）。docker 下那是 bind 挂载。
+        tools = rt.session_dir / "agent_workdir" / "tools"
+        assert tools.is_dir() and not tools.is_symlink(), "session 内的 volume 必须是拷贝"
+        assert (tools / "env.sh").is_file()
+        # 解析后仍在 session 内 —— 这是防回归的关键断言
+        assert str((tools / "env.sh").resolve()).startswith(str(rt.session_dir))
+        # 拷贝是只读的（profile 标 :ro）
+        assert not (tools / "env.sh").stat().st_mode & 0o222
         r = await rt.exec("cat tools/env.sh")
         assert r.return_code == 0 and "echo env" in (r.stdout or "")
+        # 全局那条仍是软链
+        assert Path("/opt/canonical_test").is_symlink()
         await rt.stop()
-        # session 内的软链清掉,全局的留着(可能别的 session 在用)
-        assert not link.is_symlink()
+        # stop() 恢复写位，否则 gateway 的 rmtree(session_dir) 清不掉、每 rollout 漏一个
+        assert (tools / "env.sh").stat().st_mode & 0o200, "写位没恢复，session 目录清不掉"
 
     asyncio.run(go())
     for stale in (Path("/opt/canonical_test"),):

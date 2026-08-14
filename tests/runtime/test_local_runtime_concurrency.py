@@ -62,17 +62,20 @@ def test_concurrent_start_shares_global_symlink(tmp_path: Path) -> None:
     # session 内那份各自独立
     for rt in runtimes:
         link = rt.session_dir / "agent_workdir" / "tools"
-        assert link.is_symlink(), f"{rt.session_id} 缺 session 内软链"
-        assert (link / "env.sh").is_file()
+        assert link.is_dir() and not link.is_symlink(), f"{rt.session_id} 的 tools 该是拷贝"
+        assert str(link.resolve()).startswith(str(rt.session_dir)), "解析后逃出了 session"
 
     async def stop_all() -> None:
         await asyncio.gather(*(rt.stop() for rt in runtimes), return_exceptions=True)
 
     asyncio.run(stop_all())
 
-    # session 内的清掉；全局的**留着** —— 别的 session 可能仍在用
+    # session 内的拷贝恢复可写（否则 gateway 的 rmtree 清不掉）；全局软链**留着** ——
+    # 别的 session 可能仍在用
     for rt in runtimes:
-        assert not (rt.session_dir / "agent_workdir" / "tools").is_symlink()
+        f = rt.session_dir / "agent_workdir" / "tools" / "env.sh"
+        if f.exists():
+            assert f.stat().st_mode & 0o200, f"{rt.session_id} 的拷贝没恢复写位"
     assert global_dst.is_symlink(), "全局软链被某个 session 的 stop() 误删"
     global_dst.unlink()
 

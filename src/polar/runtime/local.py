@@ -64,6 +64,7 @@ class LocalRuntime(BaseRuntime):
         # (tests, or a deployment that accepts the exposure).
         self._run_as = str(spec.kwargs.get("run_as") or "").strip()
         self._symlinks: list[Path] = []
+        self._copies: list[Path] = []
 
     @property
     def runtime_id(self) -> str:
@@ -125,12 +126,25 @@ class LocalRuntime(BaseRuntime):
             )
 
     def _link_volumes(self) -> None:
-        """Realise ``kwargs.volumes`` (``src:dst[:opts]``) as symlinks.
+        """Realise ``kwargs.volumes`` (``src:dst[:opts]``).
 
-        The profile contract is unchanged; only the mechanism differs. A destination
-        inside ``/polar/session`` is per-session (e.g. ``<workdir>/tools``); anything
-        else is global and shared across sessions (``/opt/canonical``,
-        ``/opt/asc-devkit`` — 21M and 317M, far too big to copy per session).
+        The profile contract is unchanged; only the mechanism differs. Two mechanisms,
+        picked by where the destination lands:
+
+        * **inside the session → real copy.** A symlink is wrong here, and subtly so:
+          ``tools/ascendc_eval_pipeline.sh`` runs ``readlink -f "$BASH_SOURCE"`` *on
+          purpose* (to survive being invoked through a symlink) and derives
+          ``WORK_ROOT="$_SCRIPT_DIR/.."``. Under Docker ``<workdir>/tools`` is a bind
+          mount — a real directory — so ``WORK_ROOT`` comes out as ``<workdir>``. If we
+          symlink it to the repo tree instead, ``readlink -f`` resolves *through* the
+          link and ``WORK_ROOT`` becomes the shared tree: ``judge_out/`` then gets
+          written into ``operator_runtime_t2a/`` (measured), and the judge looks for the
+          agent's project in the wrong place. Copying restores Docker's semantics
+          exactly. Cheap: the only session-scoped volume is ``tools`` at 260K / 8 files.
+        * **outside the session → shared symlink.** ``/opt/canonical`` (21M) and
+          ``/opt/asc-devkit`` (317M) are read-only reference trees, far too big to copy
+          per session, and nothing resolves paths *through* them the way the eval
+          pipeline does with its own directory.
         """
         for volume in self.spec.kwargs.get("volumes", []) or []:
             parts = str(volume).split(":")
@@ -143,6 +157,9 @@ class LocalRuntime(BaseRuntime):
                 # Docker would silently create an empty dir here; that is exactly how
                 # asc-devkit went missing and 46 skill references dangled. Be loud.
                 logger.error("volume source does not exist: %s (dest %s)", src, dst)
+                continue
+            if self._is_session_scoped(dest):
+                self._copy_volume(source, dest)
                 continue
             if dest.is_symlink():
                 if dest.resolve() == source.resolve():
@@ -158,6 +175,37 @@ class LocalRuntime(BaseRuntime):
             dest.parent.mkdir(parents=True, exist_ok=True)
             dest.symlink_to(source, target_is_directory=source.is_dir())
             self._symlinks.append(dest)
+
+    def _is_session_scoped(self, dest: Path) -> bool:
+        try:
+            dest.relative_to(self.session_dir)
+        except ValueError:
+            return False
+        return True
+
+    def _copy_volume(self, source: Path, dest: Path) -> None:
+        """Copy a session-scoped volume, then drop write bits to mimic ``:ro``.
+
+        The profile marks these ``:ro`` and prepare re-copies what it needs into the
+        workdir, so nothing should write here. Read-only also keeps a rogue agent from
+        editing the eval entry point it is about to be judged by.
+        """
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        if dest.exists() or dest.is_symlink():
+            if dest.is_symlink() or dest.is_file():
+                dest.unlink()
+            else:
+                shutil.rmtree(dest)
+        if source.is_dir():
+            shutil.copytree(source, dest, symlinks=True)
+        else:
+            shutil.copy2(source, dest)
+        for path in ([dest, *dest.rglob("*")] if dest.is_dir() else [dest]):
+            try:
+                path.chmod(path.stat().st_mode & ~0o222)
+            except OSError:
+                pass
+        self._copies.append(dest)
 
     async def stop(self) -> None:
         """Kill every process group we started, then drop per-session symlinks.
@@ -180,6 +228,16 @@ class LocalRuntime(BaseRuntime):
         for pgid in list(self._pgids):
             self._signal_group(pgid, signal.SIGKILL)
         self._pgids.clear()
+        # Restore write bits on the read-only volume copies: the gateway's
+        # _remove_session_dir_best_effort does shutil.rmtree(session_dir), which fails on
+        # a read-only subtree and would leak a session dir per rollout.
+        for copied in self._copies:
+            try:
+                for path in ([copied, *copied.rglob("*")] if copied.is_dir() else [copied]):
+                    path.chmod(path.stat().st_mode | 0o200)
+            except OSError:
+                logger.warning("failed to restore write bits on %s", copied)
+        self._copies.clear()
         # Only per-session links; a shared global link may still be in use elsewhere.
         for link in self._symlinks:
             try:
