@@ -163,6 +163,17 @@ class InferenceClient:
         headers = {"Content-Type": "application/json", "x-polar-engine-url": self.base_url}
         if trace_headers:
             headers.update({str(k): str(v) for k, v in trace_headers.items()})
+            # 引擎会话亲和:vime 的 PD/LB proxy 收到 x-session-id 时,把同一 session 的每轮
+            # 稳定哈希到固定引擎(prefill/decode 各自 sticky),让前缀 KV 跨轮复用、只 prefill
+            # 增量;收不到就退回 round-robin/active_tokens,前缀被打散 → 每轮重灌整段上下文。
+            # gateway 自管 session id 但从不下发,这条亲和路径从上线起没被走到过。session id
+            # 已在 x-polar-trace-id 里(格式 "{session_id}:{turn_seq}"),取冒号前段补发。
+            # 无 trace-id → 不补,行为不变(PD 分离功能零影响)。
+            _trace_id = headers.get("x-polar-trace-id", "")
+            if _trace_id and "x-session-id" not in headers:
+                _session_id = _trace_id.rsplit(":", 1)[0]
+                if _session_id:
+                    headers["x-session-id"] = _session_id
         try:
             resp = await client.post(
                 "/v1/chat/completions",
