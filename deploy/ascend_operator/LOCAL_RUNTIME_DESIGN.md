@@ -205,6 +205,20 @@ session 目录，还要显式给 `ASCEND_PROCESS_LOG_PATH`，否则每次 exec �
 **降权点必须选 `exec()`：** 这一层同时覆盖 prepare、agent、judge 三个阶段，不用改
 agent preset、profile、prepare 动作列表。包在 agent preset 里则 prepare 和 judge 漏掉。
 
+**已实测通过** `[实测]`（`RUN_AS=polar` 的 e2e + `test_local_runtime_run_as.py`）：
+进程以 `polar` 身份跑、`HOME` 指进 session、agent 写的 tarball 与 `judge_out` 属主都是
+`polar`、往共享树写被内核拒（`Permission denied`）、canonical 与 asc-devkit 事后
+`git status` 干净。
+
+**踩到一个必修的顺序问题**：`workdir` 必须在 `chown` **之前**建好。原先它由后来的
+`exec()` 以 root 身份 `mkdir` 出来，agent 于是拿到一个 `root:root 0755` 的工作目录，
+第一次写就 `Permission denied` —— 而 `start()` 的 `chown -R` 早已跑完，救不回来。
+`exec()` 里新建的 cwd 也要跟着 `chown`（只对刚建的、且在 session 内的）。
+
+另一处易错：只读拷贝的**重定向失败由 shell 本身报到它自己的 stderr**，
+命令里写 `2>&1` 拦不到（那只作用于 `echo`，而 `echo` 根本没跑起来）。
+写断言时要查 stderr + 内容未变，否则会误判成「写保护没生效」。
+
 `killpg` 不受影响：root 杀 `polar` 的进程组照样有效（§6）。CLI 的
 `--dangerously-skip-permissions` 在 root 下靠 `IS_SANDBOX=1`（`claude_code.py:82`）
 放行 `[读码]`，降权不影响它。

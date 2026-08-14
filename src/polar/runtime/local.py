@@ -118,9 +118,16 @@ class LocalRuntime(BaseRuntime):
         self.artifacts_dir.mkdir(parents=True, exist_ok=True)
         for sub in ("logs/agent", "logs/eval", "eval_artifacts", "tmp"):
             (self.session_dir / sub).mkdir(parents=True, exist_ok=True)
+        # Create the workdir HERE, before the chown below — otherwise exec() creates it
+        # later as root and the unprivileged agent cannot write to its own workdir
+        # (measured: `touch probe.txt` -> Permission denied on a root:root 755 dir).
+        if self.spec.workdir:
+            Path(self._rewrite(self.spec.workdir)).mkdir(parents=True, exist_ok=True)
         self._link_volumes()
         if self._run_as:
             # The agent runs unprivileged; its own session tree must stay writable.
+            # -R covers the volume copies too, which is fine: they are mode 0555, so
+            # ownership alone does not make them writable.
             await self._run_local_command(
                 "chown", "-R", f"{self._run_as}:", str(self.session_dir), capture=True
             )
@@ -272,7 +279,16 @@ class LocalRuntime(BaseRuntime):
         effective_workdir = self._rewrite(
             cwd or self.spec.workdir or self.runtime_session_dir
         )
-        Path(effective_workdir).mkdir(parents=True, exist_ok=True)
+        # A cwd created here belongs to the gateway (root); hand it to run_as or the
+        # unprivileged command cannot write in its own working directory. Only touch
+        # directories we just made, and only inside the session.
+        cwd_path = Path(effective_workdir)
+        fresh = not cwd_path.exists()
+        cwd_path.mkdir(parents=True, exist_ok=True)
+        if fresh and self._run_as and self._is_session_scoped(cwd_path):
+            await self._run_local_command(
+                "chown", f"{self._run_as}:", str(cwd_path), capture=True
+            )
         wrapped = self._prepend_pinned_exports(self._rewrite(command), effective_env)
         if self._run_as:
             # Drop privileges here, not in the agent preset: this single point covers
