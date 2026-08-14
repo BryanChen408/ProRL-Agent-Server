@@ -33,8 +33,13 @@ say() { printf '\n=== %s ===\n' "$1"; }
 fail() { FAILED+=("$1"); echo "  FAIL: $1"; }
 
 cleanup() {
-  pkill -f "polar.cli serve_rollout" 2>/dev/null
-  pkill -f "polar.cli serve_gateway" 2>/dev/null
+  # 只杀真正的 python 服务进程。用 pkill -f "polar.cli serve" 会连**调用方的 shell**
+  # 一起杀掉 —— 那条 shell 的 cmdline 里含这个字符串就会被匹配上，脚本自杀且零输出，
+  # 极难归因（我在这上面丢了两轮）。按 exe 是 python 且 cmdline 含 polar.cli 来筛。
+  for pid in $(pgrep -f "polar\.cli serve_\(rollout\|gateway\)" 2>/dev/null); do
+    [[ "$(readlink -f "/proc/${pid}/exe" 2>/dev/null)" == *python* ]] || continue
+    kill "${pid}" 2>/dev/null
+  done
   sleep 1
 }
 trap cleanup EXIT
@@ -153,9 +158,15 @@ for act in rt.get("prepare", []) + (rt.get("eval_prepare") or []):
         act["source"] = str(tasks / f"{op_name}.py")
 sub = ev["config"].get("submission_path", "output/submission/{op_name}_impl.tar.gz")
 sub = sub.replace("{op_name}", op_name)
-fake = (f"set -x; mkdir -p $(dirname {sub}) /tmp/fk/{op_name}; "
-        f"echo 'not a real kernel' > /tmp/fk/{op_name}/main.cpp; "
-        f"tar -czf {sub} -C /tmp/fk {op_name}; ls -l {sub}; echo FAKE_WRITTEN")
+# 假 tarball 要造成**结构合规**的 AscendC 工程：{op}/kernel/ + {op}/model_new_ascendc.py。
+# 只塞一个 main.cpp 的话 eval pipeline 报「submission tarball 缺 {op}/kernel 或
+# model_new_ascendc.py」并把 error_type 标成 submission_missing —— 那个标签它同时用于
+# 「文件不存在」和「文件在但结构不对」，判据就分不清「路径断了」和「内容不行」。
+# 结构合规之后失败点后移到编译，error_type 变成别的值，判据才干净。
+fake = (f"set -x; mkdir -p $(dirname {sub}) /tmp/fk/{op_name}/kernel; "
+        f"echo '// not a real kernel' > /tmp/fk/{op_name}/kernel/op.cpp; "
+        f"printf 'class ModelNew:\\n    pass\\n' > /tmp/fk/{op_name}/model_new_ascendc.py; "
+        f"tar -czf {sub} -C /tmp/fk {op_name}; tar -tzf {sub}; echo FAKE_WRITTEN")
 req = {"task_id": f"e2e-{op_name}", "instruction": "shell harness, no LLM",
        "num_samples": 1, "timeout_seconds": 900.0, "runtime": rt,
        "agent": {"harness": "shell",
@@ -195,23 +206,39 @@ find "${SESS}" -name '*_impl.tar.gz' 2>/dev/null | head -2 | sed 's/^/  /' \
 [[ -d /polar/session ]] && fail "宿主根被建出 /polar/session（前缀重写漏了）" \
   || echo "  宿主根干净 OK"
 
-echo "[3] error_type 不是 submission_missing —— 决定性判据"
+echo "[3] judge 取到了 agent 写的 submission —— 决定性判据"
+# 判据不能只看 error_type：eval pipeline 把「文件不存在」和「文件在但结构不对」都标成
+# submission_missing（实测），两者含义相反。所以直接查两件硬事实：
+#   a) tarball 是否被转移到 eval 实例的 workdir（跨实例那条路径）
+#   b) judge 是否真的解开过它（错误信息在谈 tarball 内容 ⇒ 它打开了）
+# 文件名是 metrics.json（不是 eval_metrics.json —— 上一版写错，导致判据永远读不到、
+# 只 grep sessions.json 给出假 PASS）。
 "${PYBIN}" - "${WORK}/sessions.json" "${SESS}" <<'PY'
 import json, pathlib, sys
-d = json.load(open(sys.argv[1]))
-for s in d.get("sessions", []):
-    print(f"  status={s.get('status')} reward={s.get('reward')} error={str(s.get('error'))[:60]}")
-blob = pathlib.Path(sys.argv[1]).read_text()
-m = list(pathlib.Path(sys.argv[2]).rglob("eval_metrics.json")) if len(sys.argv) > 2 else []
-for f in m[:1]:
-    j = json.loads(f.read_text())
-    print(f"  error_type={j.get('error_type')} submission_used={str(j.get('submission_used'))[:60]}")
-    blob += f.read_text()
-if "submission_missing" in blob:
-    sys.exit("  FAIL: submission_missing —— judge 没取到 agent 写的文件")
-print("  PASS: 无 submission_missing —— judge 取到了文件，跨实例路径通")
+sessions, sess_dir = pathlib.Path(sys.argv[1]), pathlib.Path(sys.argv[2])
+for s in json.loads(sessions.read_text()).get("sessions", []):
+    print(f"  status={s.get('status')} reward={s.get('reward')} error={str(s.get('error'))[:70]}")
+
+eval_wd = sess_dir / "eval_runtime" / "agent_workdir"
+tarballs = list(eval_wd.rglob("*_impl.tar.gz"))
+if not tarballs:
+    sys.exit("  FAIL: eval 实例的 workdir 里没有 tarball —— 跨实例转移没发生")
+print(f"  a) tarball 已转移到 eval 实例: {tarballs[0].relative_to(sess_dir)}")
+
+metrics = sorted(sess_dir.rglob("metrics.json"))
+if not metrics:
+    sys.exit("  FAIL: 没有 metrics.json —— judge 没跑到出分")
+j = json.loads(metrics[-1].read_text())
+print(f"  b) judge 出分了: error_type={j.get('error_type')} success={j.get('success')}")
+errs = [p.read_text()[:120] for p in sess_dir.rglob("metrics_error.log")]
+if errs:
+    print(f"     judge 的说法: {errs[-1].strip()}")
+opened = any(("tarball" in e) or ("kernel" in e) or ("compile" in e.lower()) for e in errs)
+if j.get("error_type") == "submission_missing" and not opened:
+    sys.exit("  FAIL: judge 说 submission 不存在，且没有解包痕迹 —— 路径真的断了")
+print("  PASS: judge 取到并解开了 agent 写的 tarball —— 跨实例路径通")
 PY
-[[ $? == 0 ]] || fail "judge 报 submission_missing"
+[[ $? == 0 ]] || fail "judge 没取到 agent 写的 submission"
 
 echo "[4] 无残留进程 / 无残留 flock"
 sleep 2

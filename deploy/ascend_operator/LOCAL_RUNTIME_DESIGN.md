@@ -286,12 +286,40 @@ workdir 迁移本身，与 runtime 无关。两种结果都有用。
 **Step 2：写 LocalRuntime（#1/#2/#3），配 §8.1 的单测。**
 不接 gateway，纯 runtime 契约。
 
-**Step 3：`probe_gateway_runtime.py` 打一次。**
-它能在**不起 agent、不判分**的前提下验通「gateway 起 runtime → exec → 拆」整条
-生命周期（`DEFAULT_PROBE_WORKDIR = /polar/session`）。比起全量 session 快一个量级，
-是本方案性价比最高的一步。
+**Step 3/4：单 session 实跑到 judge 出分 —— 已在训练容器跑通** `[实测]`。
 
-**Step 4：单 session 实跑到 judge 出分。** 判据见 §8.2。
+我先前判断这两步需要沙箱环境，那是错的：依赖齐（fastapi/uvicorn/httpx/pydantic/pyyaml）、
+不需要 docker（这就是本方案的意义）、不需要真 LLM（shell harness）、不需要真 NPU
+（假 tarball 到不了编译阶段）。脚本 `verify_local_runtime_e2e.sh`。
+
+跑通的链路：起真 rollout + gateway（`backend: local`）→ prepare → agent（shell
+harness）→ judge 出分。取到的证据：
+
+| 判据 | 结果 |
+|---|---|
+| agent 与 eval 各有独立 workdir | `<session>/agent_workdir` 与 `<session>/eval_runtime/agent_workdir` 两个不同宿主目录 —— §3 前缀重写的直接证据 |
+| tarball 落在 session 内 | 两处各一份；宿主根上没有 `/polar/session` |
+| judge 取到并解开了 agent 写的 tarball | 见 §8.3 |
+| 无残留进程、共享树未被写坏 | `git status` 干净 |
+
+`probe_gateway_runtime.py`（原 Step 3）没用上：全量 e2e 本身只要 ~80s，probe 省下的
+时间不值得多维护一条路径。它仍可用（已有 `--backend` 参数）。
+
+### 7.1 这一步撞出的两个坑，都不是静态检查能看出的
+
+**session 内的 volume 不能用软链**（已修，`633ec98a`）。`judge_out/` 落进了共享树
+`operator_runtime_t2a/` 而非 session。根因在 `tools/ascendc_eval_pipeline.sh:11` ——
+它**故意**对 `$BASH_SOURCE` 做 `readlink -f`（注释写明：被软链调用时 `dirname` 会拿到
+软链的目录），再取 `WORK_ROOT="$_SCRIPT_DIR/.."`。docker 下 `<workdir>/tools` 是 bind
+挂载、是真目录，`WORK_ROOT` 正是 `<workdir>`；做成软链后 `readlink -f` 穿过去，
+`WORK_ROOT` 变成共享树。**那句为「安全」而加的 `readlink -f`，恰好是打破软链方案的
+东西。** 改法见 §5。
+
+**测试操作本身会制造假象。** e2e 脚本被 timeout 掐断后仍在后台轮询，它退出时 trap 会
+`cleanup` 掉**新一轮**的进程；旧 gateway 占着端口时新 gateway `bind` 失败直接退出，而
+rollout 会连上旧的 —— session 照样跑完、状态照样 `completed`，判据却全部落空，看起来
+像 LocalRuntime 的 bug。排查了三轮才发现 gateway 日志只有 6 行、末尾是
+`address already in use`。脚本开头因此加了清理 + 端口释放等待。
 
 ## 8. 测试：够用即止
 
