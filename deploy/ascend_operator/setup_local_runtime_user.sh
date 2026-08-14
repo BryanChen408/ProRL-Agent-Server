@@ -24,6 +24,16 @@ else
   useradd -M -s /bin/bash "${USER_NAME}" || { echo "useradd 失败"; exit 1; }
   echo "  已建：$(id "${USER_NAME}")"
 fi
+# passwd 里的 home 仍要真实存在。用 -M 是因为 LocalRuntime 会把 HOME 指进 session
+# 目录（每 session 一份），不需要固定 home；但 CANN 有组件**不走 $HOME**、直接按
+# passwd 拼路径 —— 沙箱实测刷出
+#   can not create directory: /home/polar/ascend/log
+# 它不报错、只是把日志静默丢掉，出问题时无据可查。建出来当兜底。
+_HOME="$(getent passwd "${USER_NAME}" | cut -d: -f6)"
+if [[ -n "${_HOME}" && "${_HOME}" != "/" && ! -d "${_HOME}" ]]; then
+  install -d -o "${USER_NAME}" -g "${USER_NAME}" -m 0755 "${_HOME}" \
+    && echo "  已建 passwd home（CANN 日志兜底）：${_HOME}"
+fi
 
 echo
 echo "=== 2. 加 NPU 设备属组 ==="
