@@ -132,13 +132,15 @@ class OperatorJudgeEvaluator(BaseTrajectoryEvaluator):
     def _abs(self, path: str) -> str:
         """Resolve a runtime path against ``workdir`` so the transfer actually finds it.
 
-        The agent writes the submission under its workdir (e.g. ``/opt/workspace/agent_workdir/
-        output/submission/...``), but ``DockerRuntime.download_file`` -> ``docker cp`` resolves a bare
-        relative path against the container ROOT (``/output/submission/...``) and the bind-mount fast
-        path only covers ``/polar/session`` — so a relative path is found by NEITHER and the judge
+        The agent writes the submission under its workdir (now ``/polar/session/agent_workdir/
+        output/submission/...``; it used to sit outside the session bind at
+        ``/opt/workspace/agent_workdir`` — moved so a process-level runtime can give the agent and
+        the fresh eval judge separate host directories, see LOCAL_RUNTIME_DESIGN.md §3). But
+        ``DockerRuntime.download_file`` -> ``docker cp`` resolves a bare relative path against the
+        container ROOT (``/output/submission/...``), so a relative path is not found and the judge
         reports ``submission_missing`` even on a perfect kernel (deterministic false-negative that
         floors every rollout to 0.2 and zeroes the GRPO group's advantage). Joining ``workdir`` makes
-        ``docker cp`` hit the real file. Absolute paths and a missing workdir pass through unchanged.
+        the transfer hit the real file. Absolute paths and a missing workdir pass through unchanged.
         Assumes the judge runtime mirrors the agent's workdir layout (it does: same WORKDIR + eval_prepare).
         """
         if self.workdir and not posixpath.isabs(path):

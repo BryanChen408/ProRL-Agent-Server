@@ -123,22 +123,40 @@ expected volumes，不经过 `load_polar_profile.py`。改完本文件后未动�
 
 ## 4. 改动清单
 
-| # | 文件 | 改动 | 量 | 状态 |
-|---|---|---|---|---|
-| 1 | `src/polar/runtime/local.py` | **新增** LocalRuntime | ~180 行 | 待做 |
-| 2 | `src/polar/runtime/models.py` | `backend` Literal 加 `"local"` | 1 行 | 待做 |
-| 3 | `src/polar/runtime/factory.py` | `_BUILTIN_BACKENDS` 加一项 | 2 行 | 待做 |
-| 4 | `profiles/profile.t2a.yaml` | `runtime.backend: local` | 1 行 | 待做 |
-| 5 | `tools/load_polar_profile.py:297` | `"backend": "docker"` 改读 profile | ~2 行 | 待做 |
-| 6 | `tools/load_polar_profile.py` | workdir 迁移 + 去两处硬编码 | ~12 行 | **已落 `8265c230`** |
-| 7 | `launch_polar_and_guide.sh` | 共享盘根改自动探测 | ~25 行 | **已落 `d87f22aa`** |
+**全部已落**，分支 `feat/local-runtime`（基线 `ac1a5673`）。`ascendc-szai` 不受影响。
+
+| 文件 | 改动 | commit |
+|---|---|---|
+| `src/polar/runtime/local.py` | **新增** LocalRuntime | `bff20dab` |
+| `src/polar/runtime/models.py` | `backend` Literal 加 `"local"` | `bff20dab` |
+| `src/polar/runtime/factory.py` | `_BUILTIN_BACKENDS` 加一项 | `bff20dab` |
+| `tools/load_polar_profile.py` | workdir 迁移 + 去两处硬编码 | `e7885d7b` |
+| `tools/load_polar_profile.py` | runtime backend 改读 profile | `47bd8d94` |
+| `tools/load_polar_profile.py` | `run_as` 透传到 `kwargs` | `46b6607f` |
+| `profiles/profile.t2a.yaml` | workdir 显式值（必要补充，见下） | `6bea75a5` |
+| `profiles/profile.local.yaml` | **新增** 进程级变体 | `46b6607f` |
+| `launch_polar_and_guide.sh` | 共享盘根改自动探测 | `0522a80b` |
+| `setup_local_runtime_user.sh` | **新增** 降权前置 | `3e1fd971` |
+| `verify_local_runtime_e2e.sh` | **新增** 端到端验证 | `3e1fd971` / `eecb8391` |
+| `tests/runtime/test_local_runtime_contract.py` | 契约用例 | `9b6bad34` |
+| `tests/runtime/test_local_runtime_concurrency.py` | 并发用例 | `2b4f02d4` |
+| `tests/runtime/test_local_runtime_run_as.py` | 降权用例 | `3ee05e40` |
+
+三笔修的是实施中撞出来的问题，不在原设计里：`2b4f02d4`（登录 shell 冲掉 `HOME`）、
+`633ec98a`（session 内 volume 必须真拷贝）、`3ee05e40`（`workdir` 要在 `chown` 之前建）。
 
 `check_render_contract.py` 不在清单里 —— 见 §3.2 末尾。
 
-#7 不属原设计，是实施中发现的：沙箱容器的共享盘挂在 `/mnt/host-model`，而 launcher
-四处默认值写死 `/mnt/model/cbx/...`，不改则 venv、数据集、asc-devkit 全落空。
+两项也不属原设计：
+- 共享盘根探测 —— 沙箱容器挂在 `/mnt/host-model`，而 launcher 四处默认值写死
+  `/mnt/model/cbx/...`，不改则 venv、数据集、asc-devkit 全落空。
+- `profile.t2a.yaml` 的 workdir —— **只改 loader 的 fallback 默认值不生效**：profile 里
+  `operator.runtime.workdir` 是显式写着的，`runtime.get(...)` 拿到的是显式值。
+  干跑一次请求构造才露出来，`bash -n` 和读 diff 都看不出。
 
-分支 `feat/local-runtime`（基线 `ac1a5673`）。`ascendc-szai` 不受影响。
+**为什么新增 `profile.local.yaml` 而不是把 t2a 改成 `backend: local`**：docker 那条路径
+要留着（Step 1 的 workdir 迁移在它上面验，且换回 docker 只需改 `POLAR_PROFILE_SRC`）。
+代价是 loader 不支持继承，改公共项两份都要改 —— 与其余六份 profile 同样是整份复制。
 
 ### 4.1 LocalRuntime 要点
 
@@ -542,21 +560,40 @@ grep -oiE "\-8005|resource.?busy|dcmi|fail" /tmp/smi.*.log | sort | uniq -c
 
 ## 11. 遗留项
 
-- **`/tmp/npu`** 在 eval pipeline 出现一处（`ascendc_eval_pipeline.sh:33`）
-  `[实测 grep]`。workdir 已 session 化，但这个是绝对路径、全 session 共享。
-  处理：给每 session 一个 `TMPDIR`，随 §4 的 diff 一起落
-- **`backend` 这个 key 在两个层级是两回事**，改 #5 时极易搞混：
-  `operator_runtime.backend` = `triton`/`ascendc`（决定 prepare 上传布局，
-  `load_polar_profile.py:194` 已有同名局部变量占位）；
-  `operator.runtime.backend` = `docker`/`local`。**新变量务必换名**，
-  否则会静默改掉 ascendc 的 prepare 逻辑
+**已解决：**
+
+- `/tmp/npu`（`ascendc_eval_pipeline.sh:33`）→ 每 session 一个 `TMPDIR`（`bff20dab`），
+  并在 `2b4f02d4` 修掉了登录 shell 把它冲掉的问题
+- `backend` 两个层级同名 → loader 里用 `runtime_backend` 另起名（`47bd8d94`）
+
+**仍未解决：**
+
 - **`npu-smi` 禁令仍然有效。** `CLAUDE.md:443-453,1293` 已明令 agent 不得调用
   （它无视 `ASCEND_RT_VISIBLE_DEVICES` 枚举全部卡、抢全局 DCMI 锁 → -8005）。
   但 `skills/ascendc-env-check/` 整个 skill 就是干这事的，且在启用列表里。
   独占卡缓解了与 vime 的冲突，**但同容器内 session 之间仍会互撞** `[未定论]` ——
-  实跑时若见 `-8005` 或 `aclInit 507899` 先查这里
-- **`operator_judge.py:135` 的 docstring 提到 workdir**，改完顺手更新，
-  否则下一个 session 会照着过时描述下结论（handoff §9 的原话）
+  实跑时若见 `-8005` 或 `aclInit 507899` 先查这里。§10.3 有验证脚本
+- **`operator_judge.py:135` 的 docstring 仍写着 `/opt/workspace/agent_workdir`**，
+  workdir 已迁移，那段描述过时了。不改会让下一个 session 照着它下结论
+- **`_link_volumes` 的竞态**：`is_symlink()` 到 `symlink_to()` 之间有窗口，第二个
+  session 撞 `FileExistsError` 会让 session init 挂掉。实测并发 `start()` 未触发 ——
+  asyncio 单事件循环里该函数无 `await`，实际串行。gateway 若改用线程池建 runtime 才会
+  暴露，届时加 `try/FileExistsError` 兜住即可
+
+## 12. 仍需真环境验证的两项
+
+前面所有实测都在训练容器完成（含降权、e2e、并发）。剩下两项本容器给不出结论：
+
+1. **降权后 CANN 能否真编译。** 要真 kernel + 可用的卡；假 tarball 在 AST 检查就被
+   拒，到不了编译阶段。本容器的卡被训练占着（`device_count 0`）。这条会在与 vime
+   联调时自然覆盖 —— 若失败，多半是 `polar` 用户缺某个 CANN 目录的读权限，
+   查 `/usr/local/Ascend` 下的属主。
+2. **`skills/ascendc-env-check` 触发 `npu-smi` 时的 DCMI 锁争抢**（§10.3）。
+   需要多张卡同时在用。
+
+沙箱容器上要先跑一次 `setup_local_runtime_user.sh`（建 `polar`、加设备 gid、
+锁共享树）。注意顺序：**asc-devkit 自举必须在它之前**跑完 —— 0555 之后连 `polar`
+自己也改不了那两棵树。
 
 
 
