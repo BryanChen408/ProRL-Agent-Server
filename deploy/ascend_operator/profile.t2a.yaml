@@ -77,10 +77,16 @@ operator:
       ASCENDC_SOC_VERSION: "ascend910b1"
       ASC_DEVKIT_DIR: "/opt/asc-devkit"
       CLAUDE_CODE_MAX_CONTEXT_TOKENS: "232000"
-      BASH_DEFAULT_TIMEOUT_MS: "1800000"
-      BASH_MAX_TIMEOUT_MS: "1800000"
 
   agent:
+    # ← harness 侧 env:随 `claude` 那条 exec 下发,覆盖容器 env。BASH_*_TIMEOUT_MS 只有
+    #   CLI 进程读得到,而 claude_code preset 对它们有 setdefault("600000") 兜底 —— 配在
+    #   上面的 runtime.env 会被那个兜底盖掉(实测 133937 就是这么失效的),必须配在这里。
+    #   1800000 = 30 min:实测 pipeline 前台耗时 p50 68s / p90 388s / p99 578s,超时的那批
+    #   真实耗时中位 733s、p90 1411s;30 min 覆盖 96.4%,再往上收益 <1pp。
+    env:
+      BASH_DEFAULT_TIMEOUT_MS: "1800000"
+      BASH_MAX_TIMEOUT_MS: "1800000"
     model_name: claude-opus-4-5
     # ← delta 14:17 次评测 × 每次至少「读日志→调 Skill→改代码→跑评测」4 轮 = 68 轮,
     #   加实测 30-40 轮的 Phase 0-3 探索,100 不够。

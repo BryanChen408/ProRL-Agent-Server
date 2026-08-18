@@ -86,11 +86,19 @@ class ClaudeCodeHarness(BaseHarness):
         }
         env.setdefault("API_TIMEOUT_MS", self._DEFAULT_API_TIMEOUT_MS)
         env.setdefault("CLAUDE_CODE_MAX_RETRIES", self._DEFAULT_MAX_RETRIES)
-        # Bash tool timeouts: default any unset per-call timeout to 10 min. The eval
-        # pipeline (cmake compile + NPU verify + benchmark) takes minutes; with a short
-        # timeout Claude Code auto-backgrounds the command, hiding the verdict from both
-        # the agent and the observer. This only sets the DEFAULT — an explicit per-call
-        # timeout still wins, so the task prompt also tells the agent not to set a short one.
+        # Bash tool timeouts. NOTE these are `setdefault` over `self.env` (AgentSpec.env)
+        # and the result is handed to ExecInput below, which OVERRIDES the container env —
+        # so a deployment that wants a different value must set it in the profile's
+        # `agent.env`, NOT in `runtime.env`. Putting it in `runtime.env` silently loses:
+        # run 133937 configured BASH_MAX_TIMEOUT_MS=1800000 there, the container really had
+        # it, and the CLI still advertised "up to 600000ms" because these two lines wrote
+        # 600000 on top. 92 of that run's 125 pipeline calls dutifully requested 1800000
+        # and were clamped back to 10 min.
+        #
+        # 600000 is also the CLI's own built-in ceiling (its Bash tool resolves max as
+        # `max(builtin, default)`), so as a *default* both lines are no-ops — which is why
+        # this never showed up until a non-default value was tried. They stay as an
+        # explicit floor for harnesses whose CLI default is lower (120000 upstream).
         env.setdefault("BASH_DEFAULT_TIMEOUT_MS", "600000")
         env.setdefault("BASH_MAX_TIMEOUT_MS", "600000")
         if self.settings.get("max_thinking_tokens"):

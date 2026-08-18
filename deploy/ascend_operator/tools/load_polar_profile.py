@@ -334,6 +334,16 @@ def main() -> int:
         "disallowed_tools": str(agent.get("disallowed_tools", "")),
         "append_system_prompt": str(agent.get("append_system_prompt", "")),
     }
+    # harness 侧 env(AgentSpec.env -> ExecInput.env,随 `claude` 那条 exec 下发)。
+    # 与上面的 runtime.env 是两份、优先级不同:runtime.env 是容器 env,而 ExecInput.env
+    # 覆盖它。凡是只有 CLI 进程读得到、且 claude_code preset 里有 setdefault 兜底的变量
+    # (BASH_DEFAULT_TIMEOUT_MS / BASH_MAX_TIMEOUT_MS 等)必须走这里 —— 写进 runtime.env
+    # 会被那个 setdefault 原样盖掉:实测 run 133937 把 BASH_MAX_TIMEOUT_MS=1800000 配在
+    # runtime.env,容器里确实有,但 CLI 看到的仍是 preset 兜底的 600000,Bash 工具描述照旧
+    # 写「up to 600000ms」,125 次评测调用里 92 次 agent 老实传了 1800000 却全被砍回去。
+    agent_env = {str(k): str(v) for k, v in _mapping(agent.get("env")).items()}
+    if agent_env:
+        agent_block["env"] = agent_env
     if not task_request:
         rollout_cfg["default_operator_profile"] = profile_name
         rollout_cfg["operator_profiles"] = {
