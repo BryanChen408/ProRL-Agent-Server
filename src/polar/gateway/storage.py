@@ -303,6 +303,25 @@ class SessionStore:
                 failures = {}
             failures[kind] = int(failures.get(kind) or 0) + 1
             state.metadata["upstream_failures"] = failures
+            # Turn index at the moment of the blip (= completions saved so far). The
+            # builder compares this against the session's FINAL completion count to
+            # separate the two cases the bare counter above cannot:
+            #   recovered  -- more completions were saved afterwards, i.e. the CLI
+            #                 retried and the session ran on to a natural finish, so
+            #                 the judge scored the real, complete work.
+            #   terminal   -- nothing followed, so the session stopped here and the
+            #                 judge scored a truncated attempt: that reward is our
+            #                 plumbing's fault, not the agent's (the false negative
+            #                 this counter was introduced for).
+            # Measured on run 092443: 244/252 blips were recovered, 8 terminal.
+            state.metadata["upstream_failures_last_at"] = state.completion_count
+            # ...and WHICH kind that last blip was. `upstream_failures` above is a
+            # kind->count map, so a session that saw both a transport blip and a 4xx
+            # (16 such in run 092443) cannot say which one ended it -- and the two
+            # demand opposite verdicts: a 4xx is rejected before any generation, so
+            # the trajectory's last turn is intact, while a transport blip can leave
+            # a half-generated turn. See `_upstream_failure_truncated_session`.
+            state.metadata["upstream_failures_last_kind"] = kind
 
     def mark_session_closed(self, session_id: str, *, reason: str | None = None) -> None:
         """Remember that a session is final so late upstream completions are ignored."""

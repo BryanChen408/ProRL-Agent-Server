@@ -112,6 +112,24 @@ class InferenceClient:
             self._client = httpx.AsyncClient(
                 base_url=self.base_url,
                 timeout=httpx.Timeout(self._liveness_timeout_seconds, connect=30),
+                # No connection reuse. Closing an idle keep-alive connection is a
+                # UNILATERAL server decision with no protocol handshake, and a write
+                # to a half-closed socket SUCCEEDS -- the peer's FIN only surfaces on
+                # the following read, as an httpx.ReadError wrapping anyio.EndOfStream
+                # (which stringifies to ""). The upstream LB proxy runs uvicorn with
+                # its default timeout_keep_alive=5s while agent turns idle for minutes
+                # between tool calls (compile / NPU verify), so a pooled connection is
+                # routinely dead by the time the next turn reuses it. Measured on run
+                # 092443: 252 such failures, ~52/h, each one flagging an otherwise
+                # complete session non-trainable. Client-side expiry tuning only
+                # narrows the window (both ends time independently); dropping reuse
+                # removes the possibly-dead-pooled-socket state entirely. Cost is one
+                # TCP handshake per request -- both ends are on the same host, no TLS,
+                # so ~50-200us against a request that generates for seconds to minutes.
+                # max_connections is restated because httpx.DEFAULT_LIMITS only applies
+                # when `limits` is omitted entirely -- a bare Limits(...) leaves it None,
+                # i.e. UNLIMITED concurrent sockets, which is not the change we want.
+                limits=httpx.Limits(max_connections=100, max_keepalive_connections=0),
             )
         return self._client
 
@@ -141,7 +159,11 @@ class InferenceClient:
     def _translate_transport_error(exc: httpx.RequestError) -> UpstreamError:
         if isinstance(exc, httpx.TimeoutException):
             return UpstreamTimeoutError("Upstream request timed out")
-        return UpstreamTransportError(f"Upstream request failed: {exc}")
+        # Carry the exception CLASS: several httpx.RequestError subclasses stringify to
+        # "" (ReadError / WriteError / CloseError wrapping a bare socket failure), which
+        # collapsed this message to a bare "Upstream request failed: " and made the
+        # dominant transport failure mode undiagnosable from logs alone.
+        return UpstreamTransportError(f"Upstream request failed: {type(exc).__name__}: {exc}")
 
     async def completion(
         self, request: dict[str, Any], *, trace_headers: dict[str, str] | None = None
