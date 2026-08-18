@@ -288,7 +288,11 @@ def build_session_groups(sessions: list[dict[str, Any]]) -> tuple[list[dict[str,
     return ordered, latest
 
 
-def _gateway_get(base_url: str, path: str, timeout: float = 2.0) -> Any:
+# 5s not 2s: /health shares the gateway's uvicorn loop with ~32 concurrent
+# streaming sessions, so it sits at ~5ms idle but spikes to 0.5-3.2s under load
+# (measured). At 2s those spikes surfaced as an intermittent "gateway error" in
+# the dashboard even though the gateway was healthy.
+def _gateway_get(base_url: str, path: str, timeout: float = 5.0) -> Any:
     url = base_url.rstrip("/") + path
     try:
         with urllib.request.urlopen(url, timeout=timeout) as resp:
