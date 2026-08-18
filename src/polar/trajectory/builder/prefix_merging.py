@@ -106,6 +106,63 @@ def _prepare_attempt_span_state(kept: list[CompletionRecord]) -> dict[str, Any]:
     }
 
 
+def _upstream_failure_truncated_session(
+    metadata: dict[str, Any], completion_count: int
+) -> bool:
+    """True iff the LAST upstream blip left the session with nothing after it.
+
+    A blip mid-session is recoverable and routinely recovered: the CLI retries, the
+    session runs on and finishes naturally, and the judge scores the real work. A blip
+    that is the session's last event is the opposite -- generation stopped there, so the
+    judge scored a truncated attempt and its reward reflects our plumbing, not the
+    agent. That truncation is the false negative the counter was introduced for.
+
+    ``upstream_failures_last_at`` is the saved-completion count at blip time, so
+    ``completion_count > last_at`` means at least one turn was persisted afterwards.
+    Absent (sessions recorded before the field existed) -> not treated as truncating:
+    the measured base rate is 244/252 recovered, so keeping is the better default, and
+    every session recorded from now on carries the field.
+
+    A 4xx is exempt even when terminal. It is the engine REJECTING the request before
+    generating anything (context exhausted, malformed request), so it never becomes a
+    CompletionRecord and the trajectory's last turn is a complete one -- nothing was
+    cut off. The session simply ran out of budget, which is a legitimate end to the
+    episode: the judge scored the agent's real best submission, not a fragment. Only
+    transport/timeout/5xx can leave a half-generated turn behind. Measured on run
+    165820: all 3 discarded sessions were terminal `http_400` at 249856 prompt tokens,
+    each carrying a real judge verdict (0.25/0.29/0.30) and 50k-86k trainable tokens --
+    the LARGEST sample in its group every time, because context exhaustion selects for
+    the longest episodes. Discarding them biased training toward short sessions.
+    """
+    raw = metadata.get("upstream_failures_last_at")
+    if raw is None:
+        return False
+    try:
+        last_at = int(raw)
+    except (TypeError, ValueError):
+        return False
+    if completion_count > last_at:
+        return False
+    return not _blip_kind_is_client_rejection(metadata)
+
+
+def _blip_kind_is_client_rejection(metadata: dict[str, Any]) -> bool:
+    """True iff the session's LAST upstream blip was a 4xx (rejected pre-generation).
+
+    Prefers ``upstream_failures_last_kind`` (exact). Sessions recorded before that
+    field existed fall back to the kind->count map, which can only answer this when
+    every kind in it is a 4xx -- a mixed session (16 of 150 in run 092443) keeps the
+    conservative "may have truncated" reading.
+    """
+    kind = metadata.get("upstream_failures_last_kind")
+    if isinstance(kind, str) and kind:
+        return kind.startswith("http_4")
+    kinds = metadata.get("upstream_failures")
+    if not isinstance(kinds, dict) or not kinds:
+        return False
+    return all(str(k).startswith("http_4") for k in kinds)
+
+
 def _completion_finish_reason(completion: CompletionRecord) -> str | None:
     """Raw per-completion finish_reason from a completion record (pre-merge).
 
@@ -140,9 +197,9 @@ def _session_upstream_failures(metadata: dict[str, Any]) -> dict[str, int]:
     ended on ``API Error: 502 Upstream request failed`` yet were stored COMPLETED with
     reward 0.2, i.e. an engine outage became a real training signal.
 
-    ``SessionStore.record_upstream_failure`` counts them into session metadata; here they
-    get the same treatment as a weight-update abort (dev_09): the whole session is
-    non-trainable, status="ERROR", and oversampling backfills a clean one.
+    ``SessionStore.record_upstream_failure`` counts them into session metadata. Whether
+    a blip is fatal depends on WHERE it landed -- see
+    ``_upstream_failure_truncated_session``.
     """
     raw = metadata.get("upstream_failures")
     if not isinstance(raw, dict):
@@ -296,13 +353,41 @@ class PrefixMergingBuilder(BaseTrajectoryBuilder):
         session_versions = _session_policy_versions(session.completions)
         session_spanned = len(session_versions) > 1
         upstream_failures = _session_upstream_failures(dict(session.metadata))
-        _non_trainable = session_had_abort or session_spanned or bool(upstream_failures)
-        if upstream_failures:
-            _span_error: str | None = f"upstream engine failure: {upstream_failures}"
-        elif session_had_abort:
-            _span_error = "aborted generation (weight-update cutoff)"
+        # Only POLICY-IDENTITY failures are fatal here. An aborted or version-spanning
+        # session has no single behaviour policy, so its importance ratio has no
+        # well-defined denominator and no amount of reward validity rescues it.
+        #
+        # An upstream transport blip is a different question, and folding it in here
+        # answered that question wrongly. Measured on run 092443 (198 sessions, 252
+        # blips): 97% of blips are followed by a median of 30 MORE turns -- the CLI
+        # retries, the session recovers and finishes naturally (94/119 end on
+        # finish_reason=stop with a wrap-up summary and no tool call), and the judge
+        # scores it in a fresh container (106/106 had verdicts, 56 success=True, 29 at
+        # reward >= 0.7). A failed request leaves NO CompletionRecord at all (the
+        # gateway records the counter and returns before save_message), so the trace is
+        # a gap, never a half-written turn -- every recorded turn is complete.
+        #
+        # 118/198 sessions were being discarded for this, 57 of them on a single blip.
+        # And discarding is not the neutral choice: blip rate rises monotonically with
+        # context length (33% at 50-75k prompt tokens -> 84% at 200-225k), so it
+        # selectively removed the long, deep-iteration, high-reward sessions and biased
+        # the surviving group baseline upward. Keeping them is unbiased.
+        #
+        # Genuine infra failures still get caught downstream: the evaluator's
+        # `judge_outcome` maps INFRA_ERROR_TYPES / missing metrics to status=ERROR +
+        # retry, and a session that produced no trainable completions is already
+        # rejected above. `upstream_failures` stays in metadata below, and the gateway
+        # still logs every blip, so nothing becomes invisible.
+        upstream_truncated = bool(upstream_failures) and _upstream_failure_truncated_session(
+            dict(session.metadata), len(session.completions)
+        )
+        _non_trainable = session_had_abort or session_spanned or upstream_truncated
+        if session_had_abort:
+            _span_error: str | None = "aborted generation (weight-update cutoff)"
         elif session_spanned:
             _span_error = f"policy_version span (mixed-weight): {sorted(session_versions)}"
+        elif upstream_truncated:
+            _span_error = f"upstream engine failure truncated the session: {upstream_failures}"
         else:
             _span_error = None
         return Trajectory(

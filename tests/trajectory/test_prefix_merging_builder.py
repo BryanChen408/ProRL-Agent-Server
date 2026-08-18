@@ -361,3 +361,159 @@ def test_prefix_merge_length_mask_gate_off_restores_old_behavior(monkeypatch) ->
 
     trace = trajectory.traces[0]
     assert trace.loss_mask == [1, 1, 0, 0, 1, 1]  # 截断段照常训练(旧行为)
+
+
+# ---------------------------------------------------------------------------
+# upstream 传输抖动:可恢复,不再整条作废(混权重仍然作废)
+# ---------------------------------------------------------------------------
+
+
+def _one_turn_session(metadata: dict) -> CompletionSession:
+    return CompletionSession(
+        session_id="s-blip",
+        metadata=metadata,
+        completions=[
+            CompletionRecord(
+                completion_id="c0",
+                request={"system": "harness", "messages": [{"role": "user", "content": "go"}]},
+                response={"choices": [{
+                    "input_token_ids": [1, 2],
+                    "message": {"role": "assistant", "content": "done"},
+                    "finish_reason": "stop",
+                    "logprobs": {"content": [
+                        {"token": "t10", "token_id": 10, "logprob": -0.1, "bytes": []},
+                        {"token": "eot", "token_id": 99, "logprob": -0.1, "bytes": []},
+                    ]},
+                }]},
+                metadata={},
+            )
+        ],
+    )
+
+
+def test_upstream_blip_stays_trainable():
+    """传输抖动可恢复:轨迹带真实数据留下,只在 metadata 里留痕。
+
+    实测 092443:97% 的抖动之后 session 还跑了中位 30 轮并自然收尾,judge 正常评分;
+    而失败请求不落盘,所以已记录的每一轮都是完整的。
+    """
+    traj = asyncio.run(
+        PrefixMergingBuilder(end_of_turn_token_id=99).build(
+            _one_turn_session({"upstream_failures": {"transport": 1}})
+        )
+    )
+    assert traj.status == "COMPLETED"
+    assert traj.error is None
+    assert traj.metadata["upstream_failures"] == {"transport": 1}   # 可观测性不丢
+    assert traj.traces and any(traj.traces[0].loss_mask)
+
+
+def test_terminal_blip_still_discarded():
+    """末尾抖断:会话就此停止,judge 评的是半成品 -> 仍然整条作废(原设计要治的假阴性)。
+
+    blip 时已存 1 条,最终也是 1 条 -> completion_count <= last_at -> 判为截断。
+    """
+    traj = asyncio.run(
+        PrefixMergingBuilder(end_of_turn_token_id=99).build(
+            _one_turn_session({"upstream_failures": {"transport": 1},
+                               "upstream_failures_last_at": 1})
+        )
+    )
+    assert traj.status == "ERROR"
+    assert "truncated the session" in (traj.error or "")
+
+
+def test_recovered_blip_is_trainable():
+    """中途抖动后恢复:blip 时已存 0 条,最终 1 条 -> 有后续产出 -> 可训练。"""
+    traj = asyncio.run(
+        PrefixMergingBuilder(end_of_turn_token_id=99).build(
+            _one_turn_session({"upstream_failures": {"transport": 1},
+                               "upstream_failures_last_at": 0})
+        )
+    )
+    assert traj.status == "COMPLETED"
+    assert traj.error is None
+    assert traj.metadata["upstream_failures"] == {"transport": 1}
+
+
+def test_terminal_context_overflow_is_trainable():
+    """末尾 4xx(上下文撑爆):引擎在生成前就拒了请求 -> 没有半句话被掐断 -> 该学。
+
+    实测 165820:3 条被丢的 session 全是 prompt 撞 249856 上限的 http_400,每条都有真实
+    judge 分(0.25/0.29/0.30)与 5w-8.6w 可训练 token,且每次都是组内最大的样本 ——
+    撑爆天然挑中最长的 episode,扔掉它们会把训练分布推向短会话。
+    """
+    traj = asyncio.run(
+        PrefixMergingBuilder(end_of_turn_token_id=99).build(
+            _one_turn_session({"upstream_failures": {"http_400": 1},
+                               "upstream_failures_last_at": 1,
+                               "upstream_failures_last_kind": "http_400"})
+        )
+    )
+    assert traj.status == "COMPLETED"
+    assert traj.error is None
+    assert traj.metadata["upstream_failures"] == {"http_400": 1}   # 可观测性不丢
+    assert traj.traces and any(traj.traces[0].loss_mask)
+
+
+def test_terminal_overflow_without_last_kind_is_trainable():
+    """老数据无 last_kind:失效种类全是 4xx 时同样豁免(键集足以判定)。"""
+    traj = asyncio.run(
+        PrefixMergingBuilder(end_of_turn_token_id=99).build(
+            _one_turn_session({"upstream_failures": {"http_400": 2},
+                               "upstream_failures_last_at": 1})
+        )
+    )
+    assert traj.status == "COMPLETED"
+
+
+def test_mixed_blip_ending_on_transport_still_discarded():
+    """混合失效以 transport 收尾:最后那次可能留下半句话 -> 仍作废。
+
+    092443 里 150 条带 upstream_failures 的 session 有 16 条同时含两种 kind,
+    只看键集分不清是哪种收尾,last_kind 就是为这种情形加的。
+    """
+    traj = asyncio.run(
+        PrefixMergingBuilder(end_of_turn_token_id=99).build(
+            _one_turn_session({"upstream_failures": {"http_400": 1, "transport": 1},
+                               "upstream_failures_last_at": 1,
+                               "upstream_failures_last_kind": "transport"})
+        )
+    )
+    assert traj.status == "ERROR"
+    assert "truncated the session" in (traj.error or "")
+
+
+def test_mixed_blip_without_last_kind_stays_conservative():
+    """老数据 + 混合种类:分不清收尾者 -> 保守判为截断(不放宽)。"""
+    traj = asyncio.run(
+        PrefixMergingBuilder(end_of_turn_token_id=99).build(
+            _one_turn_session({"upstream_failures": {"http_400": 1, "transport": 1},
+                               "upstream_failures_last_at": 1})
+        )
+    )
+    assert traj.status == "ERROR"
+
+
+def test_policy_version_span_still_discarded():
+    """混权重:策略身份不明,重要性比分母不唯一 -> 仍然整条作废。"""
+    sess = _one_turn_session({})
+    sess.completions[0].metadata = {"policy_version": 0}
+    extra = CompletionRecord(
+        completion_id="c1",
+        request={"system": "harness", "messages": [{"role": "user", "content": "go"}]},
+        response={"choices": [{
+            "input_token_ids": [1, 2, 10, 99],
+            "message": {"role": "assistant", "content": "more"},
+            "finish_reason": "stop",
+            "logprobs": {"content": [
+                {"token": "t20", "token_id": 20, "logprob": -0.1, "bytes": []},
+                {"token": "eot", "token_id": 99, "logprob": -0.1, "bytes": []},
+            ]},
+        }]},
+        metadata={"policy_version": 1},
+    )
+    sess.completions.append(extra)
+    traj = asyncio.run(PrefixMergingBuilder(end_of_turn_token_id=99).build(sess))
+    assert traj.status == "ERROR"
+    assert "policy_version span" in (traj.error or "")
