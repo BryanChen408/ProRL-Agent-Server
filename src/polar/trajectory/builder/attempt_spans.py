@@ -156,8 +156,14 @@ _VERDICT_RE = re.compile(
     # 成功(done)路径无 error_type 字段、且无 ast_check_ok 字段 → 两组皆可选。
     r"\[ascendc-eval\]\s*(?:verdict|done|cached verdict)\b.*?success=(?P<success>\S+)"
     r"(?:\s+ast_check_ok=(?P<ast>\S+))?(?:\s+correctness_ok=(?P<corr>\S+))?"
-    r"(?:\s+error_type=(?P<etype>\S+))?\s+speedup_vs_torch=(?P<speedup>\S+)"
+    r"(?:\s+error_type=(?P<etype>\S+))?\s+speedup_vs_torch=(?P<speedup>[-+0-9.eE]+|None|null|nan|NaN)\b"
 )
+# 为什么 speedup 必须是「真数字或显式空值」而不是 \S+:pipeline 自己的源码里有一行
+#   echo "[ascendc-eval] done — success=true correctness_ok=true speedup_vs_torch=$SP"
+# agent 常去读脚本源码搞清楚判分规则,那一行原样进 tool result,\S+ 会把 `$SP` 也收下 ->
+# 解析成「成功但 speedup 未知」-> 下面旧代码用 1.0 顶上 -> 0.75 分,凭空多出一次成功档评测。
+# 实测两个 run 里这样的误判各有 6 次和 3 次(目前都落在非白名单调用上,进不了记分路径,
+# 是被外围条件挡住的,解析本身认不出真假)。收紧字符类后 `$SP` / `${sp}` 直接不匹配。
 
 
 def _as_bool(tok: str | None) -> bool:
@@ -266,7 +272,14 @@ def parse_verdict(tool_content: Any) -> dict[str, Any] | None:
         "error_type": etype,
     }
     if success:
-        metrics["perf_data"] = {"speedup_vs_torch": speedup if speedup is not None else 1.0}
+        if speedup is None:
+            # 成功档的分完全由 speedup 决定(0.75 + 0.25*tanh(ln s)),取不到数就是取不到,
+            # 不能拿 1.0 顶上 —— 那等于凭空判一个 0.75。真实成功路径必然带得出数字
+            # (pipeline 在 $SP 为空时走的是 benchmark FAILED 分支,根本到不了 done 行),
+            # 所以到这里只说明这行不是真的运行输出。返回 None,交给既有的 score=None 兜底:
+            # 位置保留、不给分、绝不编造。
+            return None
+        metrics["perf_data"] = {"speedup_vs_torch": speedup}
     return metrics
 
 

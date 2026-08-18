@@ -474,6 +474,58 @@ class TestParseVerdictPicksLast:
         assert attempt_spans.parse_verdict("nothing here") is None
 
 
+class TestVerdictRejectsSourceCode:
+    """verdict 行必须是「真的运行输出」,不能是 pipeline 自己的源码。
+
+    agent 常去读 ascendc_eval_pipeline.sh 搞清楚判分规则,源码里这两行会原样进 tool result:
+        echo "[ascendc-eval] done — success=true correctness_ok=true speedup_vs_torch=$SP"
+        print('[ascendc-eval] verdict — success=%s ... speedup_vs_torch=%s'%(...))
+    旧正则的 speedup 用 `\S+`,把 `$SP` / `%s` 也收下 -> 解析成「成功但 speedup 未知」
+    -> 旧代码拿 1.0 顶上 -> 0.75 分,凭空多出一次成功档评测。实测 165820/133937 各有 9、4 次
+    这样的误判(都落在非白名单调用上,进不了记分路径 —— 是被外围条件挡住的,解析本身认不出)。
+    """
+
+    SOURCE_LINES = [
+        'echo "[ascendc-eval] done — success=true correctness_ok=true speedup_vs_torch=$SP"',
+        '[ascendc-eval] done — success=true speedup_vs_torch=${sp}',
+        # fail_hint 那条 python 单行:speedup 字段是 %s 占位符
+        ("python3 -c 'import json;d=json.load(open(\"x\"));p=d.get(\"perf_data\") or {};"
+         "print(\"[ascendc-eval] verdict — success=%s ast_check_ok=%s correctness_ok=%s "
+         "error_type=%s speedup_vs_torch=%s\"%(d.get(\"success\"),d.get(\"ast_check_ok\"),"
+         "d.get(\"correctness_ok\"),d.get(\"error_type\"),p.get(\"speedup_vs_torch\")))'"),
+    ]
+
+    def test_source_lines_are_not_verdicts(self):
+        for line in self.SOURCE_LINES:
+            assert attempt_spans.parse_verdict(line) is None, line
+
+    def test_real_verdicts_still_parse(self):
+        for line in (
+            "[ascendc-eval] done — success=true correctness_ok=true speedup_vs_torch=2.08",
+            "[ascendc-eval] done — success=true correctness_ok=true speedup_vs_torch=0.6354679802955666",
+            "[ascendc-eval] done — success=true speedup_vs_torch=1.5e-3",
+            _VERDICT_OK,
+            _VERDICT_FAIL,
+        ):
+            assert attempt_spans.parse_verdict(line) is not None, line
+
+    def test_failure_verdict_may_carry_none_speedup(self):
+        """失败档的分不看 speedup,`speedup_vs_torch=None` 必须照常解析。"""
+        line = ("[ascendc-eval] verdict — success=False ast_check_ok=true correctness_ok=false "
+                "error_type=correctness_failed speedup_vs_torch=None")
+        assert attempt_spans.verdict_score(attempt_spans.parse_verdict(line)) == 0.35
+
+    def test_success_without_numeric_speedup_is_not_scored(self):
+        """成功档的分完全由 speedup 决定,取不到数就不能拿 1.0(=0.75 分)顶上。
+
+        真实成功路径必然带得出数字(pipeline 在 $SP 为空时走 benchmark FAILED 分支,
+        根本到不了 done 行),所以到这里只说明这不是真的运行输出 -> 走 score=None 兜底。
+        """
+        assert attempt_spans.parse_verdict(
+            "[ascendc-eval] done — success=true correctness_ok=true speedup_vs_torch=None"
+        ) is None
+
+
 class TestBestOrdinal:
     def test_first_attempt_reaching_max_wins(self):
         # ordinal 1 得 0.9 > ordinal 0 的 0.35
