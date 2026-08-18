@@ -83,6 +83,9 @@ def _prepare_attempt_span_state(kept: list[CompletionRecord]) -> dict[str, Any]:
     verdict_by_call_id: dict[str, Any] = {}
     ordinal_by_completion_id: dict[str, tuple[int, str]] = {}
     prev_ordinal_by_completion_id: dict[str, int] = {}
+    # Every Bash call in session order — lets a backgrounded pipeline's verdict be
+    # re-attached to the attempt that launched it (see claim_backgrounded_verdicts).
+    calls_in_order: list[tuple[str, str]] = []
     next_ordinal = 0
     for completion in kept:
         trace = build_trace_from_completion(completion)
@@ -94,15 +97,27 @@ def _prepare_attempt_span_state(kept: list[CompletionRecord]) -> dict[str, Any]:
             ):
                 verdict_by_call_id[message["tool_call_id"]] = message.get("content")
         prev_ordinal_by_completion_id[completion.completion_id] = next_ordinal - 1
+        for message in trace.response_messages:
+            calls_in_order.extend(
+                (cid, cmd) for cid, cmd in _attempt_spans.bash_calls(message) if cid
+            )
         call_id = _pipeline_call_id(trace.response_messages)
         if call_id:
             ordinal_by_completion_id[completion.completion_id] = (next_ordinal, call_id)
             next_ordinal += 1
+    _attempt_spans.claim_backgrounded_verdicts(
+        ordinal_by_completion_id, verdict_by_call_id, calls_in_order
+    )
     return {
         "verdict_by_call_id": verdict_by_call_id,
         "ordinal_by_completion_id": ordinal_by_completion_id,
         "prev_ordinal_by_completion_id": prev_ordinal_by_completion_id,
         "total_events": next_ordinal,
+        # Ordinal of the attempt that wrote `.best` — trajectory-level, so a chain
+        # break cannot lose the boundary. None -> no scored attempt -> nothing to mask.
+        "best_ordinal": _attempt_spans.best_ordinal(
+            ordinal_by_completion_id, verdict_by_call_id
+        ),
     }
 
 
@@ -280,6 +295,14 @@ class PrefixMergingBuilder(BaseTrajectoryBuilder):
 
         chains: list[list[CompletionRecord]] = []
         chain_tips: list[list[int]] = []  # last completion's prompt_ids, per chain
+        # Per chain: does it CONTINUE an earlier conversation (history rewritten /
+        # a pure-user injection moved the query point), or is it an INDEPENDENT
+        # sub-conversation (Skill / Agent dispatch, ~0 shared prefix)? Only the
+        # former is causally downstream of an earlier chain, so only the former may
+        # be masked wholesale by post-best. Measured on 80 sessions: independent
+        # sub-conversations are 31% of splits, and 17% of multi-chain sessions
+        # interleave — masking those by session time order alone is wrong.
+        chain_continues: list[bool] = []
 
         for completion in filter_result.kept:
             prompt_ids = build_trace_from_completion(completion).prompt_ids
@@ -288,6 +311,7 @@ class PrefixMergingBuilder(BaseTrajectoryBuilder):
                 chain_idx = len(chains)
                 chains.append([])
                 chain_tips.append([])
+                chain_continues.append(self._continues_existing(prompt_ids, chain_tips))
             chains[chain_idx].append(completion)
             chain_tips[chain_idx] = prompt_ids
 
@@ -324,8 +348,21 @@ class PrefixMergingBuilder(BaseTrajectoryBuilder):
                     segment_index=segment_index,
                     segment_start=start,
                     span_state=span_state,
+                    chain_continues=chain_continues[chain_index],
                 )
-                final_traces.append(finalized.trace)
+                # A trace that post-best masking emptied is dropped so
+                # trajectory_trace_counts stays honest. The masked_tokens guard is
+                # load-bearing: a trace that was ALREADY all-zero (degenerate empty
+                # responses) must still be emitted, or flipping the flag on would
+                # silently drop traces this feature never touched.
+                if finalized.trace.metadata.get("post_best_masked_tokens") and not any(
+                    finalized.trace.loss_mask
+                ):
+                    stats["traces_dropped_post_best"] = (
+                        stats.get("traces_dropped_post_best", 0) + 1
+                    )
+                else:
+                    final_traces.append(finalized.trace)
                 stats["completions_preserved"] += finalized.kept_count
                 if finalized.kept_count > 1:
                     stats["completions_merged"] += finalized.kept_count
@@ -415,6 +452,92 @@ class PrefixMergingBuilder(BaseTrajectoryBuilder):
     # Chain finalization
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _continues_existing(prompt_ids: list[int], chain_tips: list[list[int]]) -> bool:
+        """Does this new chain continue an existing conversation?
+
+        A continuation shares most of some open chain's prompt (the split came from
+        a history rewrite or a pure-user injection that moved the query point); an
+        independent sub-conversation shares essentially nothing. Testing the first
+        HALF of a tip separates the two cleanly — measured shared-prefix fractions
+        cluster at >90% (continuation) vs <5% (independent) — and it is one
+        C-level slice compare rather than a token-by-token walk over 100k+ prompts.
+        """
+        for tip in chain_tips:
+            half = len(tip) // 2
+            if half and len(prompt_ids) >= half and prompt_ids[:half] == tip[:half]:
+                return True
+        return False
+
+    @staticmethod
+    def _post_best_pos(
+        chain: list[CompletionRecord], span_state: dict, continues: bool
+    ) -> int | None:
+        """Chain position AFTER WHICH every turn is post-best — i.e. the turn just
+        before the first attempt LATER than the best one. ``-1`` = the whole chain is
+        post-best; ``None`` = nothing here is (the best attempt's segment is still
+        open at the chain's end, no scored attempt at all, or this chain is not
+        causally downstream of the best one).
+
+        The boundary is the NEXT attempt's calling turn, NOT the best attempt's own.
+        The segment model folds the work turns between attempt e and e+1 into e's
+        segment (``事件 e 之间的对话轮归入事件段 e``), and ``attempt_credit`` credits
+        segment e with the reward-to-go those turns go on to produce — so they are the
+        best attempt's own credit-bearing region, not its aftermath. Cutting at the
+        best attempt's own turn split that region in half and put the two mechanisms
+        in direct contradiction: measured on run 165820, 1.09M of the 2.74M masked
+        tokens sat INSIDE the best attempt's own segment, and 0.51M of those carried a
+        POSITIVE attempt-credit term that masking then deleted.
+
+        Aligning on the segment boundary makes the two agree by construction: within
+        the best segment reward-to-go is positive (credit rewards it, masking keeps
+        it); from the next attempt on, Δ-best makes reward-to-go 0, so credit's term
+        is ``-baseline`` <= 0 and masking removes those tokens outright. Masking is
+        still doing real work there — 1.65M tokens on the same run, about half of them
+        at TRLOO positions too thin for credit to score at all, which is precisely the
+        blind spot it exists to cover.
+
+        Resolved from the trajectory-level pre-pass, so a chain split between the best
+        attempt and its aftermath cannot lose the boundary — but only for a chain that
+        CONTINUES the earlier conversation. An independent sub-conversation merely
+        started later in session time; masking it wholesale would punish work the best
+        attempt never caused.
+        """
+        best = span_state.get("best_ordinal")
+        if best is None or not chain:
+            return None
+        by_cid = span_state["ordinal_by_completion_id"]
+
+        def _opens_later_attempt() -> int | None:
+            """Chain position of the first turn opening an attempt after ``best``.
+
+            Ordinals are assigned in session time order and a chain's completions keep
+            that order, so such a turn can only sit after the best attempt's own.
+            """
+            for pos, completion in enumerate(chain):
+                event = by_cid.get(completion.completion_id)
+                if event is not None and event[0] > best:
+                    return pos
+            return None
+
+        for completion in chain:
+            event = by_cid.get(completion.completion_id)
+            if event is not None and event[0] == best:
+                nxt = _opens_later_attempt()
+                return None if nxt is None else nxt - 1
+        if not continues:
+            return None
+        prev = span_state["prev_ordinal_by_completion_id"].get(chain[0].completion_id, -1)
+        if prev > best:
+            # A later attempt already opened before this chain started, so every turn
+            # here belongs to a post-best segment.
+            return -1
+        if prev < best:
+            return None
+        # prev == best: this chain starts INSIDE the best attempt's still-open segment.
+        nxt = _opens_later_attempt()
+        return None if nxt is None else nxt - 1
+
     def _finalize_chain(
         self,
         chain: list[CompletionRecord],
@@ -424,6 +547,7 @@ class PrefixMergingBuilder(BaseTrajectoryBuilder):
         segment_index: int,
         segment_start: int,
         span_state: dict | None = None,
+        chain_continues: bool = False,
     ) -> _FinalizedChain:
         # Everything in C_1.prompt_ids is the non-trainable
         # prompt; C_1.response_ids plus every subsequent raw response +
@@ -454,9 +578,20 @@ class PrefixMergingBuilder(BaseTrajectoryBuilder):
         # at the CALLING turn's response start (事件段从发起调用的那一轮开始).
         _want_spans = span_state is not None
         event_records: list[tuple[int, int, str]] = []
+        # Post-best masking: chain position of the best attempt's calling turn;
+        # every LATER turn is post-best. None -> nothing to mask here.
+        _pb = (
+            self._post_best_pos(chain, span_state, chain_continues)
+            if _want_spans
+            else None
+        )
+        _pb_masked = 0
 
         _rs = len(stream_ids) - len(prompt_ids)
-        self._append_response_tokens(first_trace, stream_ids, response_slots, loss_mask)
+        _pb_masked += self._append_response_tokens(
+            first_trace, stream_ids, response_slots, loss_mask,
+            force_zero_loss=_pb is not None and 0 > _pb,
+        )
         if _want_spans:
             _ev = span_state["ordinal_by_completion_id"].get(chain[0].completion_id)
             if _ev is not None:
@@ -524,7 +659,10 @@ class PrefixMergingBuilder(BaseTrajectoryBuilder):
                 msg_acc += len(interstitial_msgs)
 
             _rs = len(stream_ids) - len(prompt_ids)
-            self._append_response_tokens(Ci_trace, stream_ids, response_slots, loss_mask)
+            _pb_masked += self._append_response_tokens(
+                Ci_trace, stream_ids, response_slots, loss_mask,
+                force_zero_loss=_pb is not None and i > _pb,
+            )
             if _want_spans:
                 _ev = span_state["ordinal_by_completion_id"].get(chain[i].completion_id)
                 if _ev is not None:
@@ -573,6 +711,9 @@ class PrefixMergingBuilder(BaseTrajectoryBuilder):
             )
             if _spans:
                 _metadata["attempt_spans"] = _spans
+
+        if _pb_masked:
+            _metadata["post_best_masked_tokens"] = _pb_masked
 
         trace = Trace(
             prompt_ids=prompt_ids,
@@ -647,18 +788,31 @@ class PrefixMergingBuilder(BaseTrajectoryBuilder):
         stream_ids: list[int],
         response_slots: list[float | None],
         loss_mask: list[int],
-    ) -> None:
-        """Append a completion's response_ids and parallel logprob slots."""
+        force_zero_loss: bool = False,
+    ) -> int:
+        """Append a completion's response_ids and parallel logprob slots.
+
+        ``force_zero_loss`` (a post-best turn) appends loss_mask=0 for the whole
+        turn — ``response_ids`` and the logprob slots still go in at full length,
+        so array LENGTHS never change (CP layout and rollout-logprob alignment are
+        preserved); only mask values flip. Returns the number of tokens thereby
+        suppressed (0 otherwise).
+        """
         response_ids = list(trace.response_ids)
         stream_ids.extend(response_ids)
         trace_loss_mask = list(trace.loss_mask) or [1] * len(response_ids)
         if len(trace_loss_mask) != len(response_ids):
             raise ValueError("trace loss_mask length must match response_ids length")
+        suppressed = 0
+        if force_zero_loss:
+            suppressed = sum(trace_loss_mask)
+            trace_loss_mask = [0] * len(response_ids)
         loss_mask.extend(trace_loss_mask)
         logprobs = trace.response_logprobs or []
         for pos in range(len(response_ids)):
             value = logprobs[pos] if pos < len(logprobs) else None
             response_slots.append(float(value) if isinstance(value, (int, float)) else None)
+        return suppressed
 
     @staticmethod
     def _finalize_logprobs(

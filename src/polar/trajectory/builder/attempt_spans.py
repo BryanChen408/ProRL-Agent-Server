@@ -4,7 +4,12 @@ The prefix-merging builder attaches, to each trainable trace's metadata, a list
 of ``[start, end, attempt_idx, score|None]`` in RESPONSE-token coordinates.
 The trainer side (vime_bridge/attempt_credit.py) turns these into a discounted
 reward-to-go per-token advantage. The trace/chain splitting is NOT touched —
-this is additive metadata only.
+the spans themselves are additive metadata only.
+
+This module also hosts the ONE consumer that does touch training: ``best_ordinal``
+drives post-best masking (turns after the attempt that wrote ``.best`` get
+``loss_mask=0``), reusing the same whitelisted-command + harness-verdict detection
+instead of scraping pipeline stdout markers.
 
 Segment model (plan §6.2): spans PARTITION the trace's response stream —
 every response token belongs to exactly one segment.
@@ -44,22 +49,98 @@ import os
 import re
 from typing import Any
 
-# Exact pipeline invocation; anchored so any shell chaining (rm, ;, &&, |) fails.
-# 兼容两种 agent 实际会用的写法:
-#   1) bash tools/ascendc_eval_pipeline.sh ...            (任务书固定入口的规范形)
-#   2) OPERATOR_NAME=.. OPERATOR_ARCH=.. bash tools/...  (agent 从 CLAUDE.md 学来的
-#      env 前缀习惯; pipeline 并不读这两个变量, 纯属装饰, 与裸 bash 等价不可伪造)
-# 其它 env 前缀一律拒绝: VERIFY_IMPL_REPEAT(会削弱自己的确定性检查刷分)、
-# LD_PRELOAD/BASH_ENV(可向评测进程注入代码) 等。
-# 兼容 SKILL.md 教的多行续行格式(bash ... \ 换行续行):先折叠续行再匹配。
-# --task 在本 pipeline 里可选(固定入口不带;部分 agent 会加)。
+# Whitelisted pipeline invocation. The bar is "this shell line can only have run the
+# real, read-only pipeline and shown its output verbatim" — NOT "it is spelled the
+# canonical way". Measured on run 165820 (1408 invocations): the strict-spelling form
+# recognised 70.9%; the wrappers below take it to 80.8% with zero regressions, and the
+# 271 still rejected are all either not invocations at all (ps/ls/find/head over the
+# script) or genuine anti-forge chains (rm/tar/cp before the run).
+#
+# BENIGN WRAPPERS (each provably cannot alter what the pipeline prints):
+#   cd <abs path> &&    — 56x. Rejected if the path contains ".."; see the path note.
+#   timeout [-k N] D    — 10x. coreutils wrapper, no text of its own.
+#   env prefix          — inline `VAR=v` or `export VAR=v &&`, ALLOW-LIST only
+#                         (OPERATOR_NAME/OPERATOR_ARCH are decorative; ASCEND_HOME(_PATH)
+#                         is what the agent actually sets). A deny-list would be wrong
+#                         here: PATH / LD_PRELOAD / BASH_ENV / VERIFY_IMPL_REPEAT all
+#                         subvert the run, and the next such variable is unknown today.
+#   | tail|head|grep|cat — 42x. These SELECT lines; they cannot write text that was not
+#                         already there, so a verdict surviving them is still the
+#                         harness's own. sed/awk/tee/tr and friends stay rejected —
+#                         they can rewrite `success=false` into `success=true`.
+#   --impl optional     — 19x. Naming no impl just makes the pipeline take its default.
+#
+# PATH: tightened from `(?:\S*/)?` to `(?:/\S*/)?tools/`. The old wildcard accepted
+# `bash /tmp/mine/ascendc_eval_pipeline.sh`, i.e. the agent's own script — a forge hole
+# that already existed and that allowing `cd` would otherwise widen (a relative
+# `tools/...` would resolve wherever the cd landed). Requiring a `tools/` parent closes
+# both. Anti-forge remains defence in depth, not the last line: the reward itself comes
+# from the host-side judge in a fresh container, so a forged verdict can only misplace
+# per-attempt credit.
+#
+# Multi-line continuations (bash ... \ newline) are folded by _normalize_command first.
+_SAFE_ENV_NAME = r"(?:OPERATOR_NAME|OPERATOR_ARCH|ASCEND_HOME|ASCEND_HOME_PATH)"
 _PIPELINE_CMD_RE = re.compile(
-    r"^(?:(?:OPERATOR_NAME|OPERATOR_ARCH)=\S+\s+)*"
-    r"bash\s+(?:\S*/)?ascendc_eval_pipeline\.sh"
-    r"\s+--op_name\s+\S+\s+--impl\s+\S+(?:\s+--task\s+\S+)?\s+--out_dir\s+\S+"
+    r"^"
+    rf"(?:(?:export\s+)?{_SAFE_ENV_NAME}=\S+\s*(?:&&\s*|\s+))*"
+    r"(?:timeout\s+(?:-k\s+\S+\s+)?\d+[smhd]?\s+)?"
+    r"bash\s+(?:/\S*/)?tools/ascendc_eval_pipeline\.sh"
+    r"\s+--op_name\s+\S+(?:\s+--impl\s+\S+)?(?:\s+--task\s+\S+)?\s+--out_dir\s+\S+"
     r"(?:\s+--incremental)?"
-    r"\s*(?:2>&1)?\s*$"
+    r"(?:\s*2>&1)?"
+    r"(?:\s*\|\s*(?:tail|head|grep|cat)\b[^|;&<>]*)*"
+    r"(?:\s*2>&1)?\s*$"
 )
+
+
+# A chained prefix (`rm ... && bash ...`) is judged by WHAT IT TOUCHES, not by the
+# mere fact that it chains. The blanket "any chaining is a forgery attempt" rule this
+# replaces was inherited verbatim from polar_zxp, where no landed session ever exercised
+# it; measured here on run 165820 it rejected 134 genuine pipeline runs to catch ONE
+# budget reset — 47x deleting a self-check hash to force a real re-run, 41x clearing the
+# eval workdir, 34x `tar`-ing the submission before scoring (the flow the task prompt
+# itself prescribes). Cost of that: 23/184 trainable sessions lost attempts, and in 6 of
+# them the excluded run had scored HIGHER than anything counted, so `best_ordinal` — and
+# with it the post-best mask boundary — landed on the wrong turn. One session peaked at
+# 0.760 while the spans recorded a 0.300 ceiling, masking the entire climb.
+#
+# What actually forges a verdict is (a) running a different script or (b) rewriting the
+# output text; those are closed by the `tools/` path anchor and the read-only pipe list
+# above, not by banning `rm`. Budget circumvention — the one thing this rule did catch —
+# is not this module's job either: the enforcing layer counts fixed-entry invocations off
+# the gateway completion stream (see ascendc_eval_pipeline.sh's own note that the workdir
+# counters are "第二信号 + 遥测" and the watcher path is the one the agent cannot reach).
+#
+# So the prefix must be a pure file operation (nothing that writes text to stdout, which
+# is the only way to smuggle a fake verdict line into the tool result) AND must keep away
+# from three things: the budget counter, the shared NPU lock dir, and tools/ itself.
+_SEGMENT_SPLIT_RE = re.compile(r"\s*(?:&&|;)\s*")
+_PREFIX_CMD_RE = re.compile(
+    r"^(?:rm|tar|cp|mv|mkdir|touch|chmod|true)\b"
+    r"|^cd\s+(?!\S*\.\.)/\S*\s*$"
+    # `export ASCEND_HOME=... && bash ...` — same allow-list as the inline env prefix
+    # inside _PIPELINE_CMD_RE; it just lands in its own segment once we split on `&&`.
+    rf"|^(?:export\s+)?{_SAFE_ENV_NAME}=\S+\s*$"
+)
+_PREFIX_FORBIDDEN_RE = re.compile(
+    r"\.budget|budget\.json"          # 预算计数器 -> 绕过 attempt 预算
+    r"|/dev/shm/npu-locks"             # 别的会话的 NPU 租约 -> 抢卡
+    r"|(?:^|[\s/])tools/"              # pipeline 脚本自身 -> 直接伪造 verdict
+)
+
+
+def is_pipeline_invocation(command: str) -> bool:
+    """True iff this shell line can only have run the real pipeline and shown its
+    output verbatim. The invocation must be the LAST segment (a trailing
+    ``; echo '[ascendc-eval] ...'`` would otherwise inject a forged verdict), and every
+    preceding segment must be a harmless file operation."""
+    segments = _SEGMENT_SPLIT_RE.split(_normalize_command(command))
+    if not _PIPELINE_CMD_RE.match(segments[-1]):
+        return False
+    return all(
+        _PREFIX_CMD_RE.match(seg) and not _PREFIX_FORBIDDEN_RE.search(seg)
+        for seg in segments[:-1]
+    )
 
 
 def _normalize_command(command: str) -> str:
@@ -93,11 +174,11 @@ def _as_float_or_none(tok: str | None) -> float | None:
         return None
 
 
-def pipeline_tool_call_id(assistant_msg: dict[str, Any]) -> str | None:
-    """Return the tool_call id iff this assistant message ran the exact pipeline
-    command (whitelisted), else None."""
+def bash_calls(assistant_msg: dict[str, Any]) -> list[tuple[str, str]]:
+    """``[(tool_call_id, command)]`` for every Bash call in an assistant message."""
     if not isinstance(assistant_msg, dict) or assistant_msg.get("role") != "assistant":
-        return None
+        return []
+    out: list[tuple[str, str]] = []
     for tc in assistant_msg.get("tool_calls") or []:
         fn = (tc or {}).get("function") or {}
         if fn.get("name") != "Bash":
@@ -109,24 +190,68 @@ def pipeline_tool_call_id(assistant_msg: dict[str, Any]) -> str | None:
             except ValueError:
                 continue
         command = (args or {}).get("command", "") if isinstance(args, dict) else ""
-        if _PIPELINE_CMD_RE.match(_normalize_command(str(command))):
-            return tc.get("id")
+        out.append((tc.get("id"), str(command)))
+    return out
+
+
+def pipeline_tool_call_id(assistant_msg: dict[str, Any]) -> str | None:
+    """Return the tool_call id iff this assistant message ran the exact pipeline
+    command (whitelisted), else None."""
+    for call_id, command in bash_calls(assistant_msg):
+        if is_pipeline_invocation(command):
+            return call_id
     return None
+
+
+def _as_text(tool_content: Any) -> str | None:
+    """Tool-result content as text; some harnesses wrap it in a list of parts."""
+    if isinstance(tool_content, str):
+        return tool_content
+    if isinstance(tool_content, list):
+        return " ".join(
+            p.get("text", "") if isinstance(p, dict) else str(p) for p in tool_content
+        )
+    return None
+
+
+# Harness-generated acknowledgement when a long command is auto-backgrounded.
+# The AscendC pipeline compiles + takes an NPU lease + runs msprof, so it routinely
+# exceeds the Bash timeout and lands here — the launching turn then carries no
+# verdict at all (see `claim_backgrounded_verdicts`).
+_BG_ACK_RE = re.compile(
+    r"Command running in background with ID:\s*(?P<id>[A-Za-z0-9_-]+)"
+    r"(?:.{0,200}?Output is being written to:\s*(?P<path>\S+?)\.?(?:\s|$))?",
+    re.S,
+)
+
+
+def background_handle(tool_content: Any) -> tuple[str, str | None] | None:
+    """``(bg_id, out_path)`` iff this tool result is the harness's background-launch
+    acknowledgement, else None. Both fields are emitted by the harness, not the
+    agent, so their presence cannot be forged as the precondition for a claim."""
+    text = _as_text(tool_content)
+    if not text:
+        return None
+    m = _BG_ACK_RE.search(text)
+    return (m.group("id"), m.group("path")) if m else None
 
 
 def parse_verdict(tool_content: Any) -> dict[str, Any] | None:
     """Parse the canonical pipeline verdict line into a metrics dict, or None."""
-    if not isinstance(tool_content, str):
-        # some harnesses wrap content in a list of parts
-        if isinstance(tool_content, list):
-            tool_content = " ".join(
-                p.get("text", "") if isinstance(p, dict) else str(p) for p in tool_content
-            )
-        else:
-            return None
-    m = _VERDICT_RE.search(tool_content)
-    if not m:
+    tool_content = _as_text(tool_content)
+    if tool_content is None:
         return None
+    # LAST verdict, not the first. One pipeline run can print several of these lines
+    # (an early `cached verdict` / a per-stage `verdict` before the final `done`), and
+    # the last one is the outcome. Measured on run 165820: 59 tool results carry two or
+    # three verdicts whose first and last disagree by a full ladder span (0.200 vs
+    # 0.750). None of them is scored today because they all sit on commands the old
+    # whitelist rejected — which is exactly why this has to land in the same change as
+    # the widened whitelist, not after it.
+    matches = list(_VERDICT_RE.finditer(tool_content))
+    if not matches:
+        return None
+    m = matches[-1]
     success = _as_bool(m.group("success"))
     speedup = _as_float_or_none(m.group("speedup"))
     etype = m.group("etype")
@@ -164,6 +289,98 @@ def verdict_score(metrics: dict[str, Any]) -> float:
     if metrics.get("ast_check_ok"):
         return 0.25
     return 0.2
+
+
+def claim_backgrounded_verdicts(
+    ordinal_by_completion_id: dict[str, tuple[int, str]],
+    verdict_by_call_id: dict[str, Any],
+    calls_in_order: list[tuple[str, str]],
+) -> int:
+    """Re-attach verdicts that came back through the background-output channel.
+
+    The AscendC pipeline routinely gets auto-backgrounded, so the launching turn's
+    tool result is only ``Command running in background with ID: X ... written to:
+    P`` — the verdict arrives several turns later, when the agent reads ``P``. That
+    read is not a whitelisted pipeline call, so its verdict is orphaned and the
+    attempt scores None (measured: ~26% of judge-successful sessions had zero
+    scored attempts).
+
+    The agent learns the outcome by following the harness-issued handle; the
+    attempt follows the same link. For each attempt whose own result is a
+    background ack, the LAST later tool call whose command references that
+    ``bg_id``/``path`` and whose output parses as a verdict is attributed to it
+    (last, not first — the agent polls the file while it is still being written).
+
+    Anti-forge: the handle is harness-generated, so an attempt must genuinely have
+    launched the pipeline before anything can be claimed for it. A forged verdict
+    can still misplace *credit*, but never the reward — that comes from the
+    host-side judge in a fresh container.
+
+    Mutates ``verdict_by_call_id`` in place; returns the number of claims made.
+    """
+    position = {call_id: i for i, (call_id, _) in enumerate(calls_in_order)}
+    claimed = 0
+    for _ordinal, call_id in ordinal_by_completion_id.values():
+        if parse_verdict(verdict_by_call_id.get(call_id)) is not None:
+            continue
+        handle = background_handle(verdict_by_call_id.get(call_id))
+        if handle is None:
+            continue
+        bg_id, path = handle
+        needles = [n for n in (path, bg_id) if n]
+        start = position.get(call_id, -1)
+        for other_id, command in calls_in_order[start + 1:]:
+            if not any(n in command for n in needles):
+                continue
+            if parse_verdict(verdict_by_call_id.get(other_id)) is not None:
+                verdict_by_call_id[call_id] = verdict_by_call_id[other_id]
+                claimed += 1
+    return claimed
+
+
+def best_ordinal(
+    ordinal_by_completion_id: dict[str, tuple[int, str]],
+    verdict_by_call_id: dict[str, Any],
+) -> int | None:
+    """Trajectory-level ordinal of the attempt that PEAKED — the FIRST one to reach
+    the trajectory-wide max ladder score (``>``, so a tie keeps the earlier one).
+
+    This is the moment improvement stopped, which is what post-best masking is
+    about: everything after it is work that never beat what the agent already had.
+
+    NOT the same as "who last wrote ``{op}_impl.best.tar.gz``", and deliberately so.
+    ``pack_submission.sh`` compares tiers and falls through to ``update = True`` when
+    the tier merely TIES below tier 3, so at a tied failure tier the tarball is
+    rewritten every time and its last writer is the LAST tied attempt. Measured: the
+    max is tied in 72/138 sessions on run 092443 and 9/36 on 165820, ALWAYS at a
+    failure tier (0 success-tier ties), median 3 ordinals between first and last
+    tied attempt. Taking the first is the more aggressive of the two — tied-max
+    sessions mask a median 33.7% of their tokens vs 2.6% for a unique max, and
+    account for 67% of all masking on 165820 — but it is the boundary the masking
+    means, so it is the one to keep. Anyone "fixing" this to match ``.best`` would
+    be trading the intended semantics for a filesystem detail.
+
+    Attempts whose verdict never parsed (``score=None``) are not eligible. Returns
+    ``None`` when no attempt in the trajectory carries a score, in which case the
+    caller masks nothing.
+
+    Derived from the same server-side records as the spans (whitelisted command
+    + harness-produced verdict line), so it inherits their anti-forge property:
+    the agent cannot move this boundary by printing anything.
+    """
+    best_ord: int | None = None
+    best_score: float | None = None
+    for ordinal, call_id in sorted(ordinal_by_completion_id.values()):
+        content = verdict_by_call_id.get(call_id)
+        if content is None:
+            continue
+        metrics = parse_verdict(content)
+        if metrics is None:
+            continue
+        score = verdict_score(metrics)
+        if best_score is None or score > best_score:
+            best_score, best_ord = score, ordinal
+    return best_ord
 
 
 def build_spans(
@@ -212,5 +429,9 @@ def build_spans(
 
 
 def env_on() -> bool:
-    """POLAR_ATTEMPT_CREDIT 默认开;=0/false/no/off 关闭(回退到无 spans 的旧行为)。"""
+    """POLAR_ATTEMPT_CREDIT 默认开;=0/false/no/off 关闭。
+
+    关闭时 spans 与 post-best 掩码一并停用 —— 两者共用同一份会话级 pre-pass,
+    是同一个开关的两面。
+    """
     return os.environ.get("POLAR_ATTEMPT_CREDIT", "1").lower() not in ("0", "false", "no", "off")
