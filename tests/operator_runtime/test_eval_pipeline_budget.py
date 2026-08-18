@@ -118,9 +118,25 @@ def _prompt_env(**over: str) -> dict[str, str]:
         "PATH": "/usr/bin:/bin:/usr/local/bin",
         "AGENT_SIDE": "1", "PERF_TARGET": "1.1",
         "PIPELINE_OPT_MAX": "4", "PIPELINE_OPT_COUNT": "0",
+        "OUT_DIR": ".",   # _run 的 cwd=tmp_path,配合 _seed_metrics 使用
     }
     env.update(over)
     return env
+
+
+_METRICS = {
+    "schema_version": 2, "op_name": "op_x", "success": True,
+    "ast_check_ok": True, "correctness_ok": True,
+    "perf_data": {"framework_latency_ms": 1.0, "impl_latency_ms": 2.0, "speedup_vs_torch": 0.859},
+    "error": None, "error_type": None, "error_file": None,
+    "error_bytes": 0, "error_sha256": None, "error_truncated": False,
+}
+
+
+def _seed_metrics(tmp_path: Path) -> Path:
+    f = tmp_path / "metrics.json"
+    f.write_text(json.dumps(_METRICS, ensure_ascii=False), encoding="utf-8")
+    return f
 
 
 def test_prompt_says_not_met_below_target(tmp_path):
@@ -152,6 +168,46 @@ def test_prompt_silent_on_judge_side(tmp_path):
     out = _run("emit_optimization_prompt", 'emit_optimization_prompt "0.5"',
                _prompt_env(AGENT_SIDE="0"), tmp_path)
     assert out.strip() == ""
+
+
+def test_prompt_is_also_written_into_metrics_json(tmp_path):
+    """指引必须同时落进 metrics.json,不能只走 stdout。
+
+    评测常顶穿 Bash 超时被自动转后台,stdout 改写进临时文件、agent 只能轮询,还会撞上
+    harness 的 "Wasted call — file unchanged" 护栏 —— 实测 run 133937 的 45 个会话里只有
+    9 个收到过这段话(20%)。而 agent 拿不到 stdout 时恰恰是去读 metrics.json 补的:4 个
+    「正确性过了、speedup 低于目标线、预算没用完就收工」的会话里有 2 个就是这么拿到
+    speedup 的 —— 它们知道没达标,只是没人告诉它们还有优化预算。
+    """
+    f = _seed_metrics(tmp_path)
+    _run("emit_optimization_prompt", 'emit_optimization_prompt "0.859"', _prompt_env(), tmp_path)
+    d = json.loads(f.read_text(encoding="utf-8"))
+    ns = d["next_step"]
+    assert ns["target_met"] is False
+    assert ns["perf_target_speedup"] == 1.1
+    assert ns["phase_next"] == "optimization"
+    assert ns["optimization_remaining"] == 4
+    assert "不要结束任务" in ns["action"]
+    # 原有键一个都不能动:judge 侧的 reward 只认这几个
+    for k in ("success", "error_type", "perf_data", "ast_check_ok", "correctness_ok"):
+        assert d[k] == _METRICS[k]
+
+
+def test_metrics_next_step_absent_when_nothing_to_say(tmp_path):
+    """预算用完 / judge 侧:stdout 闭嘴,metrics.json 也不能被掺东西。"""
+    for over in ({"PIPELINE_OPT_COUNT": "4"}, {"AGENT_SIDE": "0"}):
+        f = _seed_metrics(tmp_path)
+        _run("emit_optimization_prompt", 'emit_optimization_prompt "0.5"',
+             _prompt_env(**over), tmp_path)
+        assert json.loads(f.read_text(encoding="utf-8")) == _METRICS, over
+
+
+def test_prompt_survives_missing_metrics_json(tmp_path):
+    """metrics.json 不在时只留 stdout —— 这段是附加指引,不该让固定入口失败。"""
+    out = _run("emit_optimization_prompt", 'emit_optimization_prompt "0.859"',
+               _prompt_env(), tmp_path)          # 没有 _seed_metrics
+    assert "不要结束任务" in out
+    assert not (tmp_path / "metrics.json").exists()
 
 
 def test_perf_target_default_matches_claude_md():

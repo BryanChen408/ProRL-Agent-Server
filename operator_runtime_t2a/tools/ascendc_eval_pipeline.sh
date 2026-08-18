@@ -315,6 +315,47 @@ except Exception:
   echo "[ascendc-eval] 下一次调用本固定入口进入 optimization 阶段:预算 ${PIPELINE_OPT_MAX} 次,已用 ${PIPELINE_OPT_COUNT} 次,剩 ${remain} 次。"
   echo "[ascendc-eval] 继续优化 kernel(多核切分 / 双缓冲 / UB 利用率 / 搬运合并)后重跑本入口。加速比越高得分越高,没有上限。"
   echo "[ascendc-eval] .best.tar.gz 只在 speedup 更高时才替换 —— 优化失败不会掉分,不试才会。"
+
+  # 同一份指引再写进 metrics.json。上面那几行只走 stdout,而 stdout 经常整段丢失:
+  # 评测常顶穿 Bash 超时被自动转后台,输出改写进一个临时文件,agent 只能轮询、还会撞上
+  # harness 的 "Wasted call — file unchanged" 护栏。实测 run 133937 的 45 个会话里只有 9 个
+  # 收到过这段话(送达率 20%);而 4 个「正确性过了、speedup 低于目标线、预算没用完就收工」
+  # 的会话中,有 2 个恰恰是靠读 metrics.json 才拿到 speedup 的 —— 它们知道自己没达标,只是
+  # 没人告诉它们还有优化预算。写进这里,指引就和 stdout 通道解耦了。
+  # 只在 agent 侧写(judge 侧 AGENT_SIDE=0,上面已 return),judge 的 metrics.json 一字不变;
+  # 即便写了也无害:reward 路径只读 success/error_type/perf_data,不认识的键直接忽略。
+  # 拿不到 metrics.json 就只留 stdout —— 这段是附加指引,永远不该让固定入口失败。
+  [[ -n "${OUT_DIR:-}" && -f "${OUT_DIR}/metrics.json" ]] || return 0
+  SP="$sp" HIT="$hit" TARGET="$PERF_TARGET" OPT_MAX="$PIPELINE_OPT_MAX" \
+  OPT_USED="$PIPELINE_OPT_COUNT" REMAIN="$remain" MJ="$OUT_DIR/metrics.json" python3 - <<'PY' 2>/dev/null || true
+import json, os
+from pathlib import Path
+p = Path(os.environ["MJ"])
+try:
+    d = json.loads(p.read_text(encoding="utf-8"))
+except Exception:
+    raise SystemExit(0)
+hit = os.environ.get("HIT") == "1"
+target, remain = os.environ["TARGET"], int(os.environ["REMAIN"])
+d["next_step"] = {
+    "perf_target_speedup": float(target),
+    "target_met": hit,
+    "phase_next": "optimization",
+    "optimization_budget": int(os.environ["OPT_MAX"]),
+    "optimization_used": int(os.environ["OPT_USED"]),
+    "optimization_remaining": remain,
+    "action": (
+        (f"正确性已通过,speedup={os.environ.get('SP','')}x ≥ 目标线 {target}x —— 已达标。"
+         if hit else
+         f"正确性已通过,但 speedup={os.environ.get('SP','')}x < 目标线 {target}x —— 未达标,不要结束任务。")
+        + f"下一次调用本固定入口即进入 optimization 阶段,还剩 {remain} 次预算。"
+        " 继续优化 kernel(多核切分 / 双缓冲 / UB 利用率 / 搬运合并)后重跑本入口。"
+        " 加速比越高得分越高,没有上限。"
+        " .best.tar.gz 只在 speedup 更高时才替换 —— 优化失败不会掉分,不试才会。"
+    ),
+}
+p.write_text(json.dumps(d, ensure_ascii=False, indent=2), encoding="utf-8")
+PY
 }
 
 pack_best() {  # $1=verified?  $2=speedup?
