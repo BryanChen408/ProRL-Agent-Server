@@ -239,8 +239,83 @@ CLASSIFY
 PIPELINE_GEN_MAX="${POLAR_GEN_PIPELINE_MAX:-6}"
 PIPELINE_OPT_MAX="${POLAR_OPT_PIPELINE_MAX:-3}"
 PIPELINE_PHASE="generation"; PIPELINE_LIMIT="$PIPELINE_GEN_MAX"; PIPELINE_ATTEMPT=1
+PIPELINE_GEN_COUNT=0; PIPELINE_OPT_COUNT=0; PIPELINE_FIRST_SUCCESS=0
 BEST_META="$WORK_ROOT/output/submission/.${OP_NAME}_impl.best.meta.json"
 CUR_HASH=""
+# 性能目标线。reward = 0.75 + 0.25*tanh(ln speedup)(operator_reward.reward_from_metrics):
+# 1.0x 只拿 0.75,低于 1.0x 反而往 0.5 掉。CLAUDE.md 4-S.4 的达标判定必须同步这个数。
+PERF_TARGET="${POLAR_PERF_TARGET:-1.1}"
+
+# 预算状态写进 $ARTIFACTS_DIR(gateway 侧 session 目录),不是 workdir —— 逐字对齐 triton 侧的
+# pipeline_status_write();ascendc 移植时整段漏了,导致 pipeline_budget_status.json 从来没落过盘,
+# watcher 的 should_cancel_from_status 分支对 ascendc 一直是空跑。
+# 注意口径:workdir 里的 .selfcheck 计数器 agent 删得掉,这份状态文件也在同一个 session bind mount 里,
+# 两者都只是「第二信号 + 遥测」。真正的强制层是 watcher 从 gateway completion 流里数固定入口调用次数
+# (polar_pipeline_budget_watcher.analyze_budget / should_cancel),那条链路 agent 改不到。
+pipeline_status_write() {
+  [[ -n "${ARTIFACTS_DIR:-}" ]] || return 0
+  mkdir -p "${ARTIFACTS_DIR}" 2>/dev/null || return 0
+  PIPELINE_STATUS_FILE="${ARTIFACTS_DIR}/pipeline_budget_status.json" \
+  SESSION_ID="${SESSION_ID:-}" TASK_ID="${TASK_ID:-}" OP_NAME="${OP_NAME:-}" \
+  PIPELINE_PHASE="$PIPELINE_PHASE" PIPELINE_ATTEMPT="$PIPELINE_ATTEMPT" PIPELINE_LIMIT="$PIPELINE_LIMIT" \
+  PIPELINE_GEN_COUNT="$PIPELINE_GEN_COUNT" PIPELINE_OPT_COUNT="$PIPELINE_OPT_COUNT" \
+  PIPELINE_FIRST_SUCCESS="$PIPELINE_FIRST_SUCCESS" python3 - <<'PY' 2>/dev/null || true
+import json, os, time
+from pathlib import Path
+
+def to_int(value, default=0):
+    try:
+        return int(value)
+    except Exception:
+        return default
+
+attempt = to_int(os.environ.get("PIPELINE_ATTEMPT"), 0)
+limit = to_int(os.environ.get("PIPELINE_LIMIT"), 0)
+payload = {
+    "schema_version": 1,
+    "session_id": os.environ.get("SESSION_ID") or None,
+    "task_id": os.environ.get("TASK_ID") or None,
+    "op_name": os.environ.get("OP_NAME") or None,
+    "phase": os.environ.get("PIPELINE_PHASE") or None,
+    "attempt": attempt,
+    "limit": limit,
+    "gen_count": to_int(os.environ.get("PIPELINE_GEN_COUNT"), 0),
+    "opt_count": to_int(os.environ.get("PIPELINE_OPT_COUNT"), 0),
+    "first_success": str(os.environ.get("PIPELINE_FIRST_SUCCESS") or "").lower() in {"1", "true", "yes"},
+    "limit_exhausted": bool(limit and attempt > limit),
+    "updated_at_unix": time.time(),
+}
+path = Path(os.environ["PIPELINE_STATUS_FILE"])
+tmp = path.with_suffix(path.suffix + ".tmp")
+tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+tmp.replace(path)
+PY
+}
+
+# 正确性一过就收工是当前最大的分数漏点(实测 179 个成功 session 只有 2 个继续优化,
+# speedup 中位数 0.859x、58.8% 慢于 torch)。成功回显里必须明说「阶段 / 剩余预算 / 离目标线差多少」:
+# phase 是在下一次调用开头才判定的,不说的话 agent 永远看不到 optimization 阶段的存在,
+# 只看到 "错误分类: 通过" 就结束。
+emit_optimization_prompt() {  # $1=speedup
+  [[ "$AGENT_SIDE" == "1" ]] || return 0
+  local sp="${1:-}" remain=$(( PIPELINE_OPT_MAX - PIPELINE_OPT_COUNT ))
+  [[ "$remain" -gt 0 ]] || return 0
+  local hit
+  hit=$(SP="$sp" TARGET="$PERF_TARGET" python3 -c '
+import os
+try:
+    print("1" if float(os.environ["SP"]) >= float(os.environ["TARGET"]) else "0")
+except Exception:
+    print("0")' 2>/dev/null || echo 0)
+  if [[ "$hit" == "1" ]]; then
+    echo "[ascendc-eval] 正确性已通过,speedup=${sp}x ≥ 目标线 ${PERF_TARGET}x —— 已达标。"
+  else
+    echo "[ascendc-eval] 正确性已通过,但 speedup=${sp}x < 目标线 ${PERF_TARGET}x —— 未达标,不要结束任务。"
+  fi
+  echo "[ascendc-eval] 下一次调用本固定入口进入 optimization 阶段:预算 ${PIPELINE_OPT_MAX} 次,已用 ${PIPELINE_OPT_COUNT} 次,剩 ${remain} 次。"
+  echo "[ascendc-eval] 继续优化 kernel(多核切分 / 双缓冲 / UB 利用率 / 搬运合并)后重跑本入口。加速比越高得分越高,没有上限。"
+  echo "[ascendc-eval] .best.tar.gz 只在 speedup 更高时才替换 —— 优化失败不会掉分,不试才会。"
+}
 
 pack_best() {  # $1=verified?  $2=speedup?
   [[ -x "$PACK_SH" || -f "$PACK_SH" ]] || return 0
@@ -267,9 +342,9 @@ if [[ "$AGENT_SIDE" == "1" ]]; then
   fi
   if [[ -f "$BEST_META" ]] && python3 -c "
 import json,sys;d=json.load(open('$BEST_META'));sys.exit(0 if int(d.get('tier') or 0)>=3 else 1)" 2>/dev/null; then
-    PIPELINE_PHASE="optimization"; PIPELINE_LIMIT="$PIPELINE_OPT_MAX"
+    PIPELINE_PHASE="optimization"; PIPELINE_LIMIT="$PIPELINE_OPT_MAX"; PIPELINE_FIRST_SUCCESS=1
   fi
-  PIPELINE_ATTEMPT=$(PIPELINE_STATE_FILE="$STATE_DIR/.${OP_NAME}_budget.json" PIPELINE_PHASE="$PIPELINE_PHASE" python3 -c '
+  read -r PIPELINE_GEN_COUNT PIPELINE_OPT_COUNT <<<"$(PIPELINE_STATE_FILE="$STATE_DIR/.${OP_NAME}_budget.json" PIPELINE_PHASE="$PIPELINE_PHASE" python3 -c '
 import json, os
 from pathlib import Path
 path = Path(os.environ["PIPELINE_STATE_FILE"]); data = {}
@@ -281,7 +356,14 @@ if path.exists():
 key = "opt_count" if os.environ["PIPELINE_PHASE"] == "optimization" else "gen_count"
 data[key] = int(data.get(key) or 0) + 1
 path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
-print(data[key])' 2>/dev/null || echo 1)
+print(int(data.get("gen_count") or 0), int(data.get("opt_count") or 0))' 2>/dev/null || echo "1 0")"
+  PIPELINE_GEN_COUNT="${PIPELINE_GEN_COUNT:-0}"; PIPELINE_OPT_COUNT="${PIPELINE_OPT_COUNT:-0}"
+  if [[ "$PIPELINE_PHASE" == "optimization" ]]; then
+    PIPELINE_ATTEMPT="${PIPELINE_OPT_COUNT:-1}"
+  else
+    PIPELINE_ATTEMPT="${PIPELINE_GEN_COUNT:-1}"
+  fi
+  pipeline_status_write
   echo "[pipeline-budget] phase=$PIPELINE_PHASE attempt=$PIPELINE_ATTEMPT/$PIPELINE_LIMIT"
   pack_best
 fi
@@ -562,3 +644,4 @@ fi
 write_metrics true true true "$FW" "$IMPL" "$SP" ""
 echo "[ascendc-eval] done — success=true correctness_ok=true speedup_vs_torch=$SP"
 fail_hint
+emit_optimization_prompt "$SP"

@@ -749,7 +749,10 @@ elif op_type == "complex":
 1. 编译通过且审查 PASS 后，进行性能数据采集
 2. 使用 `ops-profiling` skill（--quick 模式）采集性能数据
 3. 性能数据归档到 `{output_dir}/performance.json`
-4. 达标判定：加速比 ≥ 0.6x PyTorch reference → 达标
+4. 达标判定：加速比 **≥ 1.1x** PyTorch reference → 达标
+   - **< 1.1x 一律视为未达标**：必须继续优化 kernel 后重跑固定评测入口，不允许以「精度已通过」为由结束任务
+   - 加速比越高得分越高且无上限；1.0x 只是与 PyTorch 持平，不是目标
+   - 固定入口只在 speedup 更高时才替换 `.best.tar.gz`，因此优化失败不会掉分，不试才会
 
 ---
 

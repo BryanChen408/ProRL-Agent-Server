@@ -65,6 +65,13 @@ def _instruction(op_name: str, model_rel: str) -> str:
         "- Do not read, modify, inspect, or delete anything under tools/, the verifier scripts under "
         ".claude/skills/ascendc-*/scripts/, or pipeline parameters (SOC_VERSION / warmup / repeats / "
         "precision thresholds are fixed by the entry).\n"
+        # 目标线与 CLAUDE.md 4-S.4 / ascendc_eval_pipeline.sh 的 PERF_TARGET 是同一个数,三处要同步。
+        # 只写"实现算子"时实测中位 speedup 0.859x、58.8% 慢于 torch:agent 精度一过就收工,
+        # 而 reward 在 1.0x 才 0.75、更快才涨,等于把分数留在桌上。
+        "- Correctness is not the finish line: anything slower than 1.1x the PyTorch reference does "
+        "NOT meet the bar. After the entry reports success, keep optimizing the kernel and re-run it; "
+        "it keeps a .best.tar.gz of your fastest verified version, so a failed optimization attempt "
+        "never costs the score you already banked.\n"
         "- The fixed entry has a call budget; when it prints LIMIT_EXHAUSTED, stop immediately.\n"
         "- Follow ./CLAUDE.md for the full workflow and judging contract."
     )
