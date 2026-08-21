@@ -108,14 +108,16 @@ def apply_deltas(text: str) -> str:
 - **不要**设置 `ASCEND_RT_VISIBLE_DEVICES`（多容器共享卡池，自设会抢走别人的卡）""",
     )
 
-    # [D5] 同上:npu-smi 是 NPU 探针,共享卡池下会干扰别的 session。保留上游原文,加注解。
-    text = _sub(
+    # [D5] 本环境 SOC_VERSION 恒由环境变量注入(优先级 1 必中,见覆盖区「环境事实」),
+    #      npu-smi 是禁用的 NPU 探针(多容器共享卡池):优先级 2/3 与兜底段全是死内容,
+    #      保留只会诱导 agent 跑 npu-smi。整段删除,只留优先级 1 与「存储」约定。
+    text = _cut(
         text,
         "#### 优先级 2：`npu-smi info -t board -i ${npu}`",
-        "#### 优先级 2：`npu-smi info -t board -i ${npu}`\n\n"
-        "> ⚠️ **本环境不适用**：`SOC_VERSION` 已由环境变量注入，永远命中优先级 1；\n"
-        "> 且 `npu-smi` 属于禁止的 NPU 探针（多容器共享卡池，探测会干扰别的 session）。",
+        "**存储**",
+        "SOC 检测死段落(本环境恒命中优先级 1)",
     )
+    text = text.replace("**检测优先级（按可靠性从高到低）**：", "**检测方式**：")
 
     # [D6] Skill 参考资料清单改为从目录树生成(上游那份粒度不一、裸文件名会被解析错)。
     i = text.index("**Skill 参考资料**")
