@@ -165,8 +165,9 @@ def _assert_payload_contract(
     if leaked_prompt_terms:
         raise SystemExit(f"agent append_system_prompt leaked control/hardening terms: {leaked_prompt_terms}")
     banned_tools = set(str(settings.get("disallowed_tools", "")).split())
-    if "Agent" in banned_tools:
-        raise SystemExit("sub-agent smoke config must not ban Agent")
+    # Agent 历史上被保留给 sub-agent smoke 测试;实测四个 rollout ~200 次调用
+    # 60% 是「skill 名当 agent type」的确定性报错(designer/translator not found),
+    # 有价值的只有 Explore 类文档调研(用 Grep/Glob 承接),故允许禁用。
     required_plan_bans = {
         "TaskCreate",
         "TaskGet",
