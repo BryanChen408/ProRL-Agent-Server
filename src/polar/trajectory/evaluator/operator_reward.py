@@ -188,7 +188,349 @@ def apply_truncation_penalty(reward: float, truncation_events: int) -> tuple[flo
     return max(reward - deducted, floor), deducted
 
 
+# --------------------- 过程奖励(process reward)---------------------
+#
+# 设计:dev_docs/dev_04_process_reward_design.md;实现:dev_docs/dev_05_process_reward_implementation.md。
+# 数据源是 agent 侧固定评测入口自动落盘的 process_info.json(tools/process_track.py,
+# 经 $ARTIFACTS_DIR bind mount 直通宿主机)。原则与上方各机制同一套纪律:
+#   C1 outcome 主导:R_process 总摆幅 ±Δ(默认 0.10),永远不能把 0.2 的失败抬过 0.75 的成功;
+#   C2 不可作弊:只信 events 原始序列(计分全部从 events 重算,不信自报 summary),
+#      且终局必须与 judge 实测 metrics 一致(validate_process_info V3);
+#   C3 不制造 dead group:主项随「首次通过步数」连续变化;
+#   C4 infra 不染指:process 在 judge_outcome 判 COMPLETED 之后才合并,retry 分支走不到。
+
+POLAR_PROCESS_REWARD_ENV = "POLAR_PROCESS_REWARD"          # 默认 1;<=0 整体回退纯 outcome
+POLAR_PROCESS_REWARD_CAP_ENV = "POLAR_PROCESS_REWARD_CAP"  # 总摆幅 Δ,默认 0.10
+
+# 分量权重按 Δ 等比:0.06/0.04/0.04(Δ=0.10 时)。灰度期只暴露总开关 + 总摆幅两个旋钮。
+_W_FIRST_PASS_RATIO = 0.6
+_W_OPT_GAIN_RATIO = 0.4
+_W_REPEAT_RATIO = 0.4
+_REPEAT_UNIT = 0.01        # 同一 (stage, error_type) 连击每次扣分(与截断惩罚 λ 同款量级)
+_OPT_GAIN_FULL = 0.2       # speedup 提升多少拿满 opt_gain 的兑现半份
+
+PROCESS_INFO_SCHEMA_VERSION = 1
+
+
+def process_reward_knobs(env: dict | None = None) -> tuple[float, bool]:
+    """(总摆幅 Δ, 是否启用)。POLAR_PROCESS_REWARD<=0 即整体关闭。"""
+    source = os.environ if env is None else env
+
+    def _f(key: str, default: str) -> float:
+        try:
+            return float(source.get(key, default) or default)
+        except (TypeError, ValueError):
+            return float(default)
+
+    cap = _f(POLAR_PROCESS_REWARD_CAP_ENV, "0.10")
+    enabled = _f(POLAR_PROCESS_REWARD_ENV, "1") > 0.0
+    return cap, enabled
+
+
+def terminal_stage_status(metrics: dict) -> tuple[str, str]:
+    """judge 实测 metrics -> 期望的终局 (stage, status)。
+
+    与 tools/process_track.py derive_stage_substeps 同一张推导表(两侧无依赖,
+    靠单测锁定一致性):ast→compile→verify→benchmark→done 单调递进。
+    """
+    ast_ok = bool(metrics.get("ast_check_ok", False))
+    corr_ok = bool(metrics.get("correctness_ok", False))
+    success = bool(metrics.get("success", False))
+    if not ast_ok:
+        stage = "ast"
+    elif not corr_ok:
+        stage = "compile" if str(metrics.get("error_type") or "") == "ascendc_compile_failed" else "verify"
+    elif not success:
+        stage = "benchmark"
+    else:
+        stage = "done"
+    return stage, "pass" if success else "fail"
+
+
+def validate_process_info(data: object, final_metrics: dict) -> tuple[list[dict] | None, str]:
+    """process_info.json -> (洗净的 events, 校验结论)。events=None 即 process 分量记 0。
+
+    V1 格式:schema_version / events 数组 / global_step 严格递增;
+    V3 终局一致(防伪造,关键校验):judge 在干净 runtime 重跑出的 metrics 是改不了的,
+        agent 的过程记录必须与它对得上 ——
+        judge 实测 success  => events 里必须真有过 stage=done 的 pass;
+        judge 实测不 success => events 里不允许存在任何 pass(报过成功却复现不了 = 伪造或腐烂)。
+        注意比「末条事件」而不是「每条」:judge 判的是 .best.tar.gz(R1 反退化),agent
+        末次评测可能是 best 之后的回退尝试,严格比末条会误杀合法轨迹;
+    V4 speedup 合法性:非法值降级为 None(不整篇作废)。
+    """
+    if not isinstance(data, dict) or data.get("schema_version") != PROCESS_INFO_SCHEMA_VERSION:
+        return None, "bad_schema"
+    raw_events = data.get("events")
+    if not isinstance(raw_events, list) or not raw_events:
+        return None, "no_events"
+    events: list[dict] = []
+    steps: list[int] = []
+    for raw in raw_events:
+        if not isinstance(raw, dict):
+            return None, "bad_event"
+        ev = dict(raw)
+        step = ev.get("global_step")
+        if not isinstance(step, int):
+            return None, "bad_step"
+        steps.append(step)
+        sp = ev.get("speedup_vs_torch")
+        if sp is not None:
+            try:
+                sp = float(sp)
+            except (TypeError, ValueError):
+                sp = None
+            if sp is None or not math.isfinite(sp) or sp < 0:
+                ev["speedup_vs_torch"] = None
+        events.append(ev)
+    if steps != sorted(steps) or len(set(steps)) != len(steps):
+        return None, "non_monotonic_steps"
+    _, expected_status = terminal_stage_status(final_metrics)
+    has_done_pass = any(e.get("status") == "pass" and e.get("stage") == "done" for e in events)
+    has_any_pass = any(e.get("status") == "pass" for e in events)
+    if expected_status == "pass" and not has_done_pass:
+        return None, "terminal_mismatch"      # judge 复现了成功,过程记录却没有
+    if expected_status != "pass" and has_any_pass:
+        return None, "terminal_mismatch"      # 过程记录报了成功,judge 复现不了
+    return events, "ok"
+
+
+def _consecutive_repeat_max(events: list[dict]) -> int:
+    """相邻「失败」事件 (stage, error_type) 相同的最长连击(stage 在推进不算打转)。
+
+    只数 fail:连续 pass(如 optimization 阶段反复刷 speedup)是有效尝试,
+    「没提升」已由 B_opt_gain 的兑现半份表达,再用连击扣分会与进阶段奖励自相矛盾。
+    """
+    best, run, prev = 0, 0, None
+    for ev in events:
+        if ev.get("status") == "pass":
+            run, prev = 0, None
+            continue
+        key = (ev.get("stage"), ev.get("error_type"))
+        run = run + 1 if key == prev else 1
+        prev = key
+        best = max(best, run)
+    return best
+
+
+def _first_pass_step_of_deepest(events: list[dict]) -> int | None:
+    """已解锁最深子步骤(benchmark>verify>compile>ast)首次 pass 的 global_step。"""
+    first: dict[str, int] = {}
+    for ev in events:
+        step = ev.get("global_step")
+        for name, state in (ev.get("substeps") or {}).items():
+            if state == "pass" and name not in first and isinstance(step, int):
+                first[name] = step
+    for name in ("benchmark", "verify", "compile", "ast"):
+        if name in first:
+            return first[name]
+    return None
+
+
+def process_reward(
+    events: list[dict],
+    metrics: dict,
+    env: dict | None = None,
+) -> tuple[float, dict]:
+    """已校验 events -> (R_process ∈ [-Δ, +Δ], 分量明细)。
+
+    R_process = clamp(B_first_pass + B_opt_gain − P_repeat, −Δ, +Δ)
+      B_first_pass:达到同一 outcome 用的评测次数越少越高(主项,连续);
+      B_opt_gain:仅 success 轨迹 —— 进 optimization 阶段半份,speedup 兑现再半份;
+      P_repeat:同一 (stage, error_type) 连击,超 1 次起扣 0.01/次,封顶 w_rep。
+    """
+    cap, enabled = process_reward_knobs(env)
+    if not enabled:
+        return 0.0, {"disabled": "env"}
+    w_fp = _W_FIRST_PASS_RATIO * cap
+    w_opt = _W_OPT_GAIN_RATIO * cap
+    w_rep = _W_REPEAT_RATIO * cap
+
+    # B_first_pass
+    k = _first_pass_step_of_deepest(events)
+    budget = 0
+    for ev in events:  # generation 预算;缺失回退到实际步数(兜底不分母为 0)
+        if ev.get("phase") == "generation" and isinstance(ev.get("phase_limit"), int):
+            budget = ev["phase_limit"]
+            break
+    if budget <= 0:
+        budget = max((e.get("global_step") or 1 for e in events), default=1)
+    b_fp = w_fp * max(0, budget + 1 - k) / budget if k else 0.0
+
+    # B_opt_gain(只对成功轨迹有意义;失败轨迹此项 0,不影响失败组内排序)
+    b_opt = 0.0
+    opt_entered = False
+    opt_gain = 0.0
+    if bool(metrics.get("success", False)):
+        opt_entered = any(e.get("phase") == "optimization" for e in events)
+        speedups = [
+            (e.get("global_step") or 0, float(e["speedup_vs_torch"]))
+            for e in events
+            if e.get("speedup_vs_torch") is not None and e.get("status") == "pass"
+        ]
+        if speedups:
+            first_success_sp = next(
+                sp for _, sp in sorted(speedups)  # 首个 pass 事件的 speedup
+            )
+            best_sp = max(sp for _, sp in speedups)
+            opt_gain = max(0.0, best_sp - first_success_sp)
+        b_opt = w_opt * (0.5 * float(opt_entered) + 0.5 * min(1.0, opt_gain / _OPT_GAIN_FULL))
+
+    # P_repeat
+    repeat_max = _consecutive_repeat_max(events)
+    p_rep = min(_REPEAT_UNIT * max(0, repeat_max - 1), w_rep)
+
+    total = max(-cap, min(cap, b_fp + b_opt - p_rep))
+    return total, {
+        "b_first_pass": round(b_fp, 6),
+        "b_opt_gain": round(b_opt, 6),
+        "p_repeat": round(p_rep, 6),
+        "first_pass_step": k,
+        "budget": budget,
+        "opt_entered": opt_entered,
+        "opt_gain_speedup": round(opt_gain, 6),
+        "repeat_max": repeat_max,
+        "cap": cap,
+    }
+
+
 # --------------------------------- tests ---------------------------------
+
+def _mk_events(specs: list[tuple[str, str, str | None, float | None]], budget: int = 6) -> list[dict]:
+    """构造 events:(stage, status, error_type, speedup) 列表 -> 合法 events 数组。"""
+    sub = {
+        "ast": {"ast": "fail", "compile": "skip", "verify": "skip", "benchmark": "skip"},
+        "compile": {"ast": "pass", "compile": "fail", "verify": "skip", "benchmark": "skip"},
+        "verify": {"ast": "pass", "compile": "pass", "verify": "fail", "benchmark": "skip"},
+        "benchmark": {"ast": "pass", "compile": "pass", "verify": "pass", "benchmark": "fail"},
+        "done": {"ast": "pass", "compile": "pass", "verify": "pass", "benchmark": "pass"},
+    }
+    events = []
+    seen_pass = False
+    for i, (stage, status, et, sp) in enumerate(specs, start=1):
+        phase = "optimization" if seen_pass else "generation"
+        events.append({
+            "global_step": i, "kind": "eval", "phase": phase,
+            "phase_step": i, "phase_limit": budget,
+            "stage": stage, "status": status, "error_type": et,
+            "substeps": sub[stage], "speedup_vs_torch": sp,
+        })
+        seen_pass = seen_pass or status == "pass"
+    return events
+
+
+def _mk_info(events: list[dict]) -> dict:
+    return {"schema_version": 1, "events": events, "milestones": []}
+
+
+def _mk_metrics(success: bool, ast: bool = True, corr: bool = True,
+                error_type: str | None = None, speedup: float | None = 1.0) -> dict:
+    return {"success": success, "ast_check_ok": ast, "correctness_ok": corr,
+            "error_type": error_type,
+            "perf_data": {"speedup_vs_torch": speedup} if speedup is not None else None}
+
+
+def test_validate_rejects_forgery():
+    m_ok = _mk_metrics(True)
+    events = _mk_events([("done", "pass", None, 1.1)])
+    # non_monotonic
+    bad = _mk_info([dict(events[0], global_step=2), dict(events[0], global_step=1)])
+    assert validate_process_info(bad, m_ok)[0] is None
+    assert validate_process_info(bad, m_ok)[1] == "non_monotonic_steps"
+    # bad_schema / no_events
+    assert validate_process_info({"schema_version": 99, "events": events}, m_ok)[1] == "bad_schema"
+    assert validate_process_info(_mk_info([]), m_ok)[1] == "no_events"
+    assert validate_process_info("junk", m_ok)[1] == "bad_schema"
+    # terminal_mismatch 两个方向
+    assert validate_process_info(_mk_info(_mk_events([("compile", "fail", "ascendc_compile_failed", None)])), m_ok)[1] == "terminal_mismatch"
+    m_fail = _mk_metrics(False, corr=False, error_type="correctness_failed")
+    assert validate_process_info(_mk_info(events), m_fail)[1] == "terminal_mismatch"
+    # 合法轨迹(judge 判 best、agent 末次是回退尝试)不应被误杀
+    legit = _mk_events([("done", "pass", None, 1.1), ("compile", "fail", "ascendc_compile_failed", None)])
+    assert validate_process_info(_mk_info(legit), m_ok)[1] == "ok"
+
+
+def test_validate_sanitizes_speedup():
+    events = _mk_events([("done", "pass", None, 1.1)])
+    events[0]["speedup_vs_torch"] = float("nan")
+    cleaned, why = validate_process_info(_mk_info(events), _mk_metrics(True))
+    assert why == "ok" and cleaned[0]["speedup_vs_torch"] is None
+    events[0]["speedup_vs_torch"] = -3.0
+    cleaned, why = validate_process_info(_mk_info(events), _mk_metrics(True))
+    assert why == "ok" and cleaned[0]["speedup_vs_torch"] is None
+
+
+def test_process_reward_first_pass_gradient():
+    env = {POLAR_PROCESS_REWARD_ENV: "1", POLAR_PROCESS_REWARD_CAP_ENV: "0.10"}
+    m = _mk_metrics(True, speedup=1.0)
+    rewards = []
+    for k in (1, 3, 6):
+        specs = [("compile", "fail", "ascendc_compile_failed", None)] * (k - 1) + [("done", "pass", None, 1.0)]
+        events, why = validate_process_info(_mk_info(_mk_events(specs)), m)
+        assert why == "ok"
+        r, comp = process_reward(events, m, env)
+        rewards.append(comp["b_first_pass"])
+    assert rewards[0] > rewards[1] > rewards[2] >= 0.0
+    assert abs(rewards[0] - 0.06) < 1e-9  # 一次通过拿满主项
+
+
+def test_process_reward_opt_gain_only_on_success():
+    env = {POLAR_PROCESS_REWARD_ENV: "1", POLAR_PROCESS_REWARD_CAP_ENV: "0.10"}
+    events = _mk_events([("done", "pass", None, 1.0), ("done", "pass", None, 1.2)])
+    m_ok = _mk_metrics(True, speedup=1.2)
+    _, comp = process_reward(events, m_ok, env)
+    assert comp["opt_entered"] is True and comp["b_opt_gain"] > 0.0
+    # 提升 0.2 拿满兑现半份:0.5*w + 0.5*w = w = 0.04
+    assert abs(comp["b_opt_gain"] - 0.04) < 1e-9
+    # 失败轨迹 opt 分量恒 0
+    fail_events = _mk_events([("verify", "fail", "correctness_failed", None)])
+    m_fail = _mk_metrics(False, corr=False, error_type="correctness_failed", speedup=None)
+    r, comp = process_reward(fail_events, m_fail, env)
+    assert comp["b_opt_gain"] == 0.0
+
+
+def test_process_reward_repeat_penalty_cap():
+    env = {POLAR_PROCESS_REWARD_ENV: "1", POLAR_PROCESS_REWARD_CAP_ENV: "0.10"}
+    specs = [("compile", "fail", "ascendc_compile_failed", None)] * 10
+    events = _mk_events(specs)
+    _, comp = process_reward(events, _mk_metrics(False, corr=False, error_type="ascendc_compile_failed", speedup=None), env)
+    assert comp["repeat_max"] == 10
+    assert abs(comp["p_repeat"] - 0.04) < 1e-9  # 封顶 w_rep
+    # 连击 1 不扣;两类错误交替(阶段在推进)不算打转
+    alt = _mk_events([("compile", "fail", "ascendc_compile_failed", None),
+                      ("verify", "fail", "correctness_failed", None)])
+    _, comp = process_reward(alt, _mk_metrics(False, corr=False, error_type="correctness_failed", speedup=None), env)
+    assert comp["repeat_max"] == 1 and comp["p_repeat"] == 0.0
+    # 连续 pass(optimization 刷 speedup)不算连击,也不打断后的 fail 重新从 1 计
+    passes = _mk_events([("done", "pass", None, 1.0), ("done", "pass", None, 1.1),
+                         ("verify", "fail", "correctness_failed", None)])
+    _, comp = process_reward(passes, _mk_metrics(False, corr=False, error_type="correctness_failed", speedup=None), env)
+    assert comp["repeat_max"] == 1 and comp["p_repeat"] == 0.0
+
+
+def test_process_reward_disabled_by_env():
+    events = _mk_events([("done", "pass", None, 1.0)])
+    r, comp = process_reward(events, _mk_metrics(True), {POLAR_PROCESS_REWARD_ENV: "0"})
+    assert r == 0.0 and comp == {"disabled": "env"}
+
+
+def test_process_reward_bounded():
+    env = {POLAR_PROCESS_REWARD_ENV: "1", POLAR_PROCESS_REWARD_CAP_ENV: "0.10"}
+    best = _mk_events([("done", "pass", None, 1.0)] + [("done", "pass", None, 9.9)] * 5)
+    r, _ = process_reward(best, _mk_metrics(True, speedup=9.9), env)
+    assert -0.10 <= r <= 0.10
+    worst = _mk_events([("compile", "fail", "ascendc_compile_failed", None)] * 50)
+    r, _ = process_reward(worst, _mk_metrics(False, corr=False, error_type="ascendc_compile_failed", speedup=None), env)
+    assert -0.10 <= r <= 0.10
+
+
+def test_terminal_stage_status_table():
+    assert terminal_stage_status(_mk_metrics(False, ast=False, corr=False)) == ("ast", "fail")
+    assert terminal_stage_status(_mk_metrics(False, corr=False, error_type="ascendc_compile_failed")) == ("compile", "fail")
+    assert terminal_stage_status(_mk_metrics(False, corr=False, error_type="correctness_failed")) == ("verify", "fail")
+    assert terminal_stage_status(_mk_metrics(False, corr=True, error_type="benchmark_failed")) == ("benchmark", "fail")
+    assert terminal_stage_status(_mk_metrics(True)) == ("done", "pass")
+
 
 def test_ladder_not_success():
     assert reward_from_metrics({"success": False, "correctness_ok": True, "ast_check_ok": True}) == 0.4

@@ -144,6 +144,18 @@ if len(_raw) > _CAP:
     metrics["error_truncated"] = True
 (out / "metrics.json").write_text(json.dumps(metrics, ensure_ascii=False, indent=2), encoding="utf-8")
 PY
+  # 过程事件采集(process reward 数据源,dev_05 M2):agent 侧 only —— judge 侧
+  # (AGENT_SIDE=0)的评测是打分动作,不是被评分的过程。从刚落盘的 metrics.json 原样
+  # 读四参数,error_type 与 metrics.json 逐字节一致(judge 侧 V3 校验依赖)。
+  # || true 兜底:采集失败绝不影响评测本身。
+  if [[ "$AGENT_SIDE" == "1" ]]; then
+    "$PY_BIN" "$_SCRIPT_DIR/process_track.py" record-eval \
+      --metrics "$OUT_DIR/metrics.json" \
+      --file "$STATE_DIR/process_info.json" \
+      --mirror "${ARTIFACTS_DIR:-}/process_info.json" \
+      --op-name "$OP_NAME" \
+      >>"$OUT_DIR/process_track.log" 2>&1 || true
+  fi
 }
 
 fail_hint() {
