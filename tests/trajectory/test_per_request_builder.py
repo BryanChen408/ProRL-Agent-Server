@@ -174,7 +174,9 @@ def test_per_request_builder_keeps_normal_single_user_request_with_tools() -> No
     assert trajectory.metadata["completion_filter"]["excluded_completions"] == 0
 
 
-def test_qwen_reasoning_tokens_are_loss_masked_without_changing_token_alignment() -> None:
+def test_qwen_reasoning_tokens_are_loss_masked_without_changing_token_alignment(monkeypatch) -> None:
+    # 专测「掩零」行为,显式钉回旧默认;新默认(训 CoT)由 prefix_merging 侧用例覆盖。
+    monkeypatch.setenv("POLAR_MASK_REASONING", "1")
     session = CompletionSession(
         session_id="session-1",
         completions=[

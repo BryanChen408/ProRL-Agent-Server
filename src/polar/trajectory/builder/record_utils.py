@@ -127,8 +127,11 @@ def _response_loss_mask(
         return mask, {"masked_tokens": 0, "reason": "think_end_token_not_found"}
 
     # [CoT-train gate] POLAR_MASK_REASONING=0 → 训 reasoning(不 mask <think>…</think>),但仍记录 span
-    #   到 metadata 供下游用。默认 "1" = 现状(mask)。放开时 loss_mask 保持全 1,reasoning 进训练。
-    if os.environ.get("POLAR_MASK_REASONING", "1") == "0":
+    #   到 metadata 供下游用。默认 "0" = 训 CoT;=1 回退为掩零。
+    #   默认训 CoT 的理由(2026-08 决策):agentic RL 需要 reasoning 质量同步提升,
+    #   且 output 已抬到 32768 + 空截断并链修复已兜住截断副作用;思考长度膨胀
+    #   由截断惩罚(0.01/次)对冲。若截断事件回升,改回 "1"。
+    if os.environ.get("POLAR_MASK_REASONING", "0") == "0":
         return mask, {"masked_tokens": 0, "reasoning_span": end_index + 1, "reason": "reasoning_masking_disabled"}
 
     masked_tokens = end_index + 1

@@ -149,7 +149,9 @@ def test_prefix_merge_returns_error_when_filter_removes_everything() -> None:
     }
 
 
-def test_prefix_merge_preserves_reasoning_loss_mask() -> None:
+def test_prefix_merge_preserves_reasoning_loss_mask(monkeypatch) -> None:
+    # 本用例专测「掩零」行为,显式钉回旧默认;新默认(训 CoT)见下一条用例。
+    monkeypatch.setenv("POLAR_MASK_REASONING", "1")
     records = [
         CompletionRecord(
             completion_id="00-main1",
@@ -571,3 +573,31 @@ def test_partial_truncation_keeps_response_in_stream():
     # MASK_TRUNCATED: 截断段(c2 的 [30,31])入流但掩零;工具结果与 limit 消息为 interstitial 掩零
     assert tr.response_ids == [20, 99, 1, 60, 99, 1, 50, 51, 30, 31, 99, 1, 70, 71, 99, 1, 50, 51, 40, 99]
     assert tr.loss_mask == [1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1]
+
+
+def test_reasoning_trains_by_default() -> None:
+    """新默认(POLAR_MASK_REASONING 缺省=0):CoT 进训练,loss_mask 全 1。"""
+    import os
+    os.environ.pop("POLAR_MASK_REASONING", None)
+    records = [
+        CompletionRecord(
+            completion_id="00-main1",
+            request={"system": "harness", "messages": [{"role": "user", "content": "q"}]},
+            response={
+                "choices": [{
+                    "input_token_ids": [1, 2],
+                    "message": {"role": "assistant", "reasoning_content": "plan", "content": "main1"},
+                    "finish_reason": "stop",
+                    "logprobs": {"content": [
+                        {"token": "Need", "token_id": 10, "logprob": -0.01},
+                        {"token": "</think>", "token_id": 11, "logprob": -0.02},
+                        {"token": "main1", "token_id": 12, "logprob": -0.03},
+                        {"token": f"t{EOT}", "token_id": EOT, "logprob": -0.04},
+                    ]},
+                }]
+            },
+        ),
+    ]
+    trajectory = _build(records)
+    trace = trajectory.traces[0]
+    assert trace.loss_mask == [1, 1, 1, 1], "默认下 CoT 应进训练(全 1)"
