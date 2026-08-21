@@ -142,9 +142,22 @@ def main() -> int:
             p.write_text(make_stub(texts[p], p.name, kept_pages), encoding="utf-8")
             stubbed.append(p.relative_to(dst).as_posix())
 
+    # 3) 修复 docs/api 树里的 Windows 反斜杠交叉引用(href="context\Xxx.md"
+    #    → href="context/Xxx.md"):容器里顺着链接 Read 会 404,实测模型踩过。
+    #    只动 href 属性内的反斜杠,其他字节不变。
+    n_linkfix = 0
+    link_re = re.compile(r'(href="[^"]*?)\\([^"]*?\.md")')
+    for md in sorted(dst.glob("docs/**/*.md")):
+        text = md.read_text(encoding="utf-8", errors="ignore")
+        fixed, n = link_re.subn(r"\1/\2", text)
+        if n:
+            md.write_text(fixed, encoding="utf-8")
+            n_linkfix += n
+
     print(f"src={src}")
     print(f"dst={dst}")
     print(f"stubbed A5-only pages: {len(stubbed)}")
+    print(f"fixed backslash hrefs: {n_linkfix}")
     for rel in stubbed[:10]:
         print(f"  {rel}")
     if len(stubbed) > 10:

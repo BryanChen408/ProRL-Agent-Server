@@ -84,6 +84,9 @@ bash tools/ascendc_eval_pipeline.sh --op_name {op_name} \
   本版实际是 `examples/{01_simd_cpp_api,02_simd_c_api,03_simt_api}/`,用 find 定位。
 - 编译报 `no template named 'TQue'` / `did you mean 'AscendC::...'` 这类,是命名空间或签名
   记错,查 `$ASC_DEVKIT_DIR/docs/zh/api/` 核实,不要靠猜改。
+- 检索文档一律从 `$ASC_DEVKIT_DIR` 根目录搜(Grep/Glob 的 path 填根目录),不要凭记忆
+  猜子路径——docs/ 下有两棵树(`docs/zh/api/` 与 `docs/api/`),只搜子树会漏;
+  搜不到时换关键词(去后缀、换同义词),不要直接下「API 不存在」的结论。
 
 ## 不可用
 
