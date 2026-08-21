@@ -629,9 +629,11 @@ class PrefixMergingBuilder(BaseTrajectoryBuilder):
         event_records: list[tuple[int, int, str]] = []
         # Post-best masking: chain position of the best attempt's calling turn;
         # every LATER turn is post-best. None -> nothing to mask here.
+        # POLAR_POST_BEST_MASK 独立开关:关时峰值后段不再掩零,交由 attempt credit
+        # 的 R_e=0 负项柔和接管(A/B 对照用);spans 与 credit 不受影响。
         _pb = (
             self._post_best_pos(chain, span_state, chain_continues)
-            if _want_spans
+            if _want_spans and _attempt_spans.post_best_mask_on()
             else None
         )
         _pb_masked = 0

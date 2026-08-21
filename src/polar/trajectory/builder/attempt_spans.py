@@ -448,3 +448,13 @@ def env_on() -> bool:
     是同一个开关的两面。
     """
     return os.environ.get("POLAR_ATTEMPT_CREDIT", "1").lower() not in ("0", "false", "no", "off")
+
+
+def post_best_mask_on() -> bool:
+    """POLAR_POST_BEST_MASK 默认开;=0/false/no/off 关闭。
+
+    与 POLAR_ATTEMPT_CREDIT 解耦:关掉它只停 post-best 掩码(峰值后轮次不再
+    loss_mask=0),attempt_spans 与 vime 侧 attempt credit 照常 —— 峰值后段改由
+    credit 的 R_e=0 负项柔和接管。用于「掩码 vs credit」的 A/B 对照。
+    """
+    return os.environ.get("POLAR_POST_BEST_MASK", "1").lower() not in ("0", "false", "no", "off")
