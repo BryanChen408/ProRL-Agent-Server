@@ -34,7 +34,10 @@ operator_runtime:
   #   钉 9.0.0 分支而非 init.sh 默认的 master:实测 API 名对本机 CANN 9.0.0 头文件的命中率
   #   9.0.0=95% / master=82%,master 独有的 548 个里 53% 本机没有,照着写会引入新的编译错误。
   #   路径映射:skill 写死 docs/zh/api,9.0.0 布局是 docs/api/context,已在仓内建相对软链。
-  asc_devkit_dir: /home/docker/asc-devkit-9.0.0
+  # ← delta 12:asc_devkit_dir 指向 clean_asc_devkit.py 的 A5-only stub 副本(523+523 页换成
+  #   一行「A2/A3 不可用」;保留页字节不动,diff 已核)。实测两个 run 25% 的文档读取(913 次/4M+字符)
+  #   打在 950-only 页上,学错签名烧 A 类迭代。原件 asc-devkit-9.0.0 保留,回退=改回该路径。
+  asc_devkit_dir: /home/docker/asc-devkit-9.0.0-a2a3
   budget:
     generation_max: 8
     optimization_max: 4
