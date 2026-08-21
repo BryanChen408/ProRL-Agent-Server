@@ -178,13 +178,14 @@ class OperatorJudgeEvaluator(BaseTrajectoryEvaluator):
         timeout_cap = runtime.get("timeout_seconds")
         timeout = self.judge_timeout if timeout_cap is None else min(self.judge_timeout, float(timeout_cap))
 
-        # 截断事件计数(训练信号,见 operator_reward.apply_truncation_penalty)。node.py 先
-        # _build_trajectory 后 _run_eval,此处 traces 已全。用 finish_reason=length 的 trace 数
-        # 近似空截断次数:coalesce 合并会让它略小于 completion 级真实值(实测 117 vs 133),
-        # 惩罚略偏弱,方向不错。
-        truncation_events = sum(
-            1 for t in (trajectory.traces or []) if t.finish_reason == "length"
-        )
+        # 截断事件计数(训练信号,见 operator_reward.apply_truncation_penalty)。优先读
+        # builder 的 completion 级统计(空截断轮修复后不再单独成 trace);旧落盘没有
+        # 该字段时回退到按 finish_reason=length 的 trace 数近似。
+        truncation_events = (trajectory.metadata or {}).get("truncation_events")
+        if truncation_events is None:
+            truncation_events = sum(
+                1 for t in (trajectory.traces or []) if t.finish_reason == "length"
+            )
 
         if submission_missing:
             return self._scored(

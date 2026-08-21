@@ -769,9 +769,13 @@ async def proxy_request(request: Request, path: str):
     openai_request["model"] = state.node.model_served
     is_streaming = openai_request.get("stream", False)
 
-    # 截断续命注入(POLAR_TRUNCATION_SALVAGE=0 关闭做 A/B):
+    # 截断续命注入(默认关;POLAR_TRUNCATION_SALVAGE=1 开):
     # 上轮空截断时把残稿返还给模型,打破 4 连顶穿熔断的死循环。
-    if os.environ.get("POLAR_TRUNCATION_SALVAGE", "1") == "1":
+    # 默认关闭的依据:builder 已支持「剥生成头认链 + 空截断 response 不入流」,
+    # 截断不再拆链,salvage 的注入反而成为「出口断」(一次性注入后消失)的来源;
+    # 且实测 151450 的 20 个 4 连熔断 session 在 salvage 注入下依然全部死亡,
+    # 救场价值有限。CLI 自己的 "Output token limit hit" 消息已含续写指引。
+    if os.environ.get("POLAR_TRUNCATION_SALVAGE", "0") == "1":
         salvage_msg = _salvage_message_for(state.storage.get_completions(session_id))
         if salvage_msg is not None:
             openai_request.setdefault("messages", []).append(salvage_msg)

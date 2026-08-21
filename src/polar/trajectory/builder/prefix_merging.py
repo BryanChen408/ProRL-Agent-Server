@@ -54,6 +54,46 @@ logger = logging.getLogger(__name__)
 _NATURAL_STOP_REASONS = frozenset({"stop", "tool_calls", "stop_sequence"})
 
 
+def _strip_generation_prompt(tip: list[int]) -> list[int]:
+    """去掉 prompt 末尾的 generation-prompt 尾(``<|im_start|>assistant[\\n<think>\\n]``)。
+
+    空截断(finish=length + content 空 + 无 tool_calls)被 CLI 整个丢弃后,下一轮
+    请求在同一位置变成 user 消息 —— 与 tip 末尾的生成头错位、判链失败(实测分叉点
+    精确在 tip 末尾那 4 个 token)。生成头是模板构件(每个请求各自重新生成),
+    不应参与「两条 prompt 是否同源」的判断。
+
+    结构依据:gen-prompt 恒为 prompt 最后一段,以最后一个 ``<|im_start|>`` 开头且
+    很短(<=16 token);找不到短尾时原样返回 —— 宁可不剥,不可误剥真实内容。
+    """
+    if len(tip) < 3:
+        return tip
+    im_start = tip[0]  # ChatML prompt 恒以 <|im_start|> 开头
+    for i in range(len(tip) - 1, max(len(tip) - 20, 1), -1):
+        if tip[i] == im_start and 0 < len(tip) - i <= 16:
+            return tip[:i]
+    return tip
+
+
+def _is_discarded_empty_truncation(trace: "Trace") -> bool:
+    """该 completion 是「会被 CLI 整个丢弃」的空截断轮:
+    finish=length + content 空 + 无 tool_calls。
+
+    实测此类轮次在下一请求历史中不存在(被 CLI 删),gateway 的 salvage 注入条件
+    与此完全同形(server.py ``_salvage_message_for``)。与之区分:
+    半截截断(有 content 或有 tool_calls)会被 CLI 保留进历史,正常入流。
+    """
+    if trace.finish_reason != "length":
+        return False
+    for m in trace.response_messages or []:
+        if m.get("role") != "assistant":
+            continue
+        if (m.get("content") or "").strip():
+            return False
+        if m.get("tool_calls"):
+            return False
+    return True
+
+
 def _pipeline_call_id(messages: list[dict[str, Any]]) -> str | None:
     """First whitelisted-pipeline tool-call id among a completion's response messages."""
     for m in messages or []:
@@ -427,6 +467,14 @@ class PrefixMergingBuilder(BaseTrajectoryBuilder):
             _span_error = f"upstream engine failure truncated the session: {upstream_failures}"
         else:
             _span_error = None
+        # 截断事件计数(completion 级,供截断惩罚):空截断轮修复后不再单独成
+        # trace(response 不入流),按 trace 数会漏计 —— 改从原始 completion 统计,
+        # operator_judge 优先读这个字段。
+        truncation_events = sum(
+            1
+            for c in session.completions
+            if _is_discarded_empty_truncation(build_trace_from_completion(c))
+        )
         return Trajectory(
             status="ERROR" if _non_trainable else "COMPLETED",
             error=_span_error,
@@ -443,6 +491,7 @@ class PrefixMergingBuilder(BaseTrajectoryBuilder):
                 "reconstruction_stats": stats,
                 "completion_filter": filter_result.metadata,
                 "upstream_failures": upstream_failures or None,
+                "truncation_events": truncation_events,
                 **_top_level_scheduler_metadata(session.metadata),
             },
             traces=final_traces,
@@ -588,10 +637,17 @@ class PrefixMergingBuilder(BaseTrajectoryBuilder):
         _pb_masked = 0
 
         _rs = len(stream_ids) - len(prompt_ids)
-        _pb_masked += self._append_response_tokens(
-            first_trace, stream_ids, response_slots, loss_mask,
-            force_zero_loss=_pb is not None and 0 > _pb,
-        )
+        _prev_discarded = _is_discarded_empty_truncation(first_trace)
+        if _prev_discarded:
+            # 空截断轮(CLI 已整个丢弃):response 不入流,训练流与推理现场逐 token 一致。
+            # 其思考内容仅经下一轮 prompt 的 user 消息(limit/salvage 引用)进入序列,
+            # 作为 interstitial 恒掩零 —— 不产生全零 loss 孤儿 trace,前缀也不重复送。
+            pass
+        else:
+            _pb_masked += self._append_response_tokens(
+                first_trace, stream_ids, response_slots, loss_mask,
+                force_zero_loss=_pb is not None and 0 > _pb,
+            )
         if _want_spans:
             _ev = span_state["ordinal_by_completion_id"].get(chain[0].completion_id)
             if _ev is not None:
@@ -607,10 +663,12 @@ class PrefixMergingBuilder(BaseTrajectoryBuilder):
 
             # Canonical-vs-canonical prefix check: both sides are server-side
             # tokenizations of the same message prefix — matches reliably
-            # unless the harness rewrote prior messages.
+            # unless the harness rewrote prior messages. 与判链一致,比较前剥掉
+            # prev prompt 末尾的生成头(空截断被丢弃后下一轮同位置是 user 消息)。
+            prev_core = _strip_generation_prompt(prev_prompt_ids)
             if (
-                len(Ci_prompt_ids) < len(prev_prompt_ids)
-                or Ci_prompt_ids[: len(prev_prompt_ids)] != prev_prompt_ids
+                len(Ci_prompt_ids) < len(prev_core)
+                or Ci_prompt_ids[: len(prev_core)] != prev_core
             ):
                 logger.debug(
                     "prefix_merging: canonical prefix break at step %d/%d",
@@ -621,7 +679,7 @@ class PrefixMergingBuilder(BaseTrajectoryBuilder):
                 break
 
             # canonical_tail = canonical tokens for [prev assistant msg + new interstitials].
-            canonical_tail = Ci_prompt_ids[len(prev_prompt_ids):]
+            canonical_tail = Ci_prompt_ids[len(prev_core):]
             if eot_id is None:
                 logger.debug(
                     "prefix_merging: eot unavailable at step %d/%d",
@@ -630,11 +688,16 @@ class PrefixMergingBuilder(BaseTrajectoryBuilder):
                 )
                 break_reason = "eot_unavailable"
                 break
-            interstitial = self._slice_interstitial(
-                canonical_tail=canonical_tail,
-                prev_raw_response=prev_raw_response,
-                eot_id=eot_id,
-            )
+            if _prev_discarded:
+                # prev 是空截断轮(CLI 已丢):canonical_tail 里没有 prev assistant 体,
+                # 全部内容(limit/salvage user 消息 + gen glue)都是 interstitial。
+                interstitial = list(canonical_tail)
+            else:
+                interstitial = self._slice_interstitial(
+                    canonical_tail=canonical_tail,
+                    prev_raw_response=prev_raw_response,
+                    eot_id=eot_id,
+                )
             if interstitial is None:
                 logger.debug(
                     "prefix_merging: interstitial split failed at step %d/%d "
@@ -659,10 +722,14 @@ class PrefixMergingBuilder(BaseTrajectoryBuilder):
                 msg_acc += len(interstitial_msgs)
 
             _rs = len(stream_ids) - len(prompt_ids)
-            _pb_masked += self._append_response_tokens(
-                Ci_trace, stream_ids, response_slots, loss_mask,
-                force_zero_loss=_pb is not None and i > _pb,
-            )
+            _prev_discarded = _is_discarded_empty_truncation(Ci_trace)
+            if _prev_discarded:
+                pass  # 空截断轮 response 不入流(见上)
+            else:
+                _pb_masked += self._append_response_tokens(
+                    Ci_trace, stream_ids, response_slots, loss_mask,
+                    force_zero_loss=_pb is not None and i > _pb,
+                )
             if _want_spans:
                 _ev = span_state["ordinal_by_completion_id"].get(chain[i].completion_id)
                 if _ev is not None:
@@ -671,7 +738,8 @@ class PrefixMergingBuilder(BaseTrajectoryBuilder):
             msg_acc += len(Ci_trace.response_messages)
 
             prev_prompt_ids = Ci_prompt_ids
-            prev_raw_response = list(Ci_trace.response_ids)
+            # 丢弃轮的 raw response 视为不存在,下一轮的 interstitial 取全段 canonical_tail
+            prev_raw_response = [] if _prev_discarded else list(Ci_trace.response_ids)
             kept += 1
 
         response_ids = stream_ids[len(prompt_ids):]
@@ -877,8 +945,13 @@ class PrefixMergingBuilder(BaseTrajectoryBuilder):
         best_idx: int | None = None
         best_len = -1
         for idx, tip in enumerate(chain_tips):
-            n = len(tip)
-            if n > best_len and 0 < n <= len(prompt_ids) and prompt_ids[:n] == tip:
+            # 剥掉 tip 末尾的生成头再比前缀:空截断轮被 CLI 丢弃后,下一轮同位置
+            # 是 user 消息,带生成头的完整 tip 永远匹配失败 → 截断轮被误判成新链
+            # (孤儿链 + prompt 重复训练)。剥头后「前缀全等、仅末尾新增消息」的
+            # 请求被正确认回主链;子 agent/历史重写在前几个 token 就分叉,不受影响。
+            core = _strip_generation_prompt(tip)
+            n = len(core)
+            if n > best_len and 0 < n <= len(prompt_ids) and prompt_ids[:n] == core:
                 best_idx, best_len = idx, n
         return best_idx
 

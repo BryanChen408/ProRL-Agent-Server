@@ -517,3 +517,57 @@ def test_policy_version_span_still_discarded():
     traj = asyncio.run(PrefixMergingBuilder(end_of_turn_token_id=99).build(sess))
     assert traj.status == "ERROR"
     assert "policy_version span" in (traj.error or "")
+
+
+def _trunc_record(completion_id, prompt_ids, response_ids, *, content=""):
+    """空截断轮 fixture:finish=length + content 空 + 无 tool_calls(CLI 会丢弃的那类)。"""
+    r = _record(completion_id, prompt_ids, response_ids, finish_reason="length")
+    r.response["choices"][0]["message"]["content"] = content
+    return r
+
+
+# 生成头结构:im_start=1(prompt 首 token),gen-prompt = [1, 50, 51]
+def test_empty_truncation_rejoins_chain_and_response_excluded():
+    """空截断 + 后续带 limit 消息:不拆链、截断响应不入流、interstitial 掩零。
+
+    复现实测场景(152826 op-3):C2 思考顶穿被 CLI 丢弃,C3 的 prompt 在 C2 的
+    生成头位置变成 user 消息。旧行为:C2 自成 1-completion 全零孤儿链。
+    新行为:C2 并入主链、响应不入流、limit 消息作为 interstitial 恒掩零。
+    """
+    p1 = [1, 10, 11, 99, 1, 50, 51]
+    p2 = [1, 10, 11, 99, 1, 50, 51, 20, 99, 1, 60, 99, 1, 50, 51]
+    p3 = [1, 10, 11, 99, 1, 50, 51, 20, 99, 1, 60, 99, 1, 70, 71, 99, 1, 50, 51]
+    traj = _build([
+        _record("c1", p1, [20, 99]),
+        _trunc_record("c2", p2, [30, 31, 32]),
+        _record("c3", p3, [40, 99]),
+    ])
+    st = traj.metadata["reconstruction_stats"]
+    assert st["chains_total"] == 1, f"截断后被拆链: {st}"
+    tr = traj.traces[0]
+    assert tr.prompt_ids == p1
+    assert 30 not in tr.response_ids and 31 not in tr.response_ids and 32 not in tr.response_ids, \
+        "空截断的响应不应入流"
+    assert tr.response_ids == [20, 99, 1, 60, 99, 1, 50, 51, 1, 70, 71, 99, 1, 50, 51, 40, 99]
+    assert tr.loss_mask == [1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1]
+    assert traj.metadata["truncation_events"] == 1
+
+
+def test_partial_truncation_keeps_response_in_stream():
+    """半截截断(content 非空)会被 CLI 保留:响应正常入流、由 MASK_TRUNCATED 掩零。"""
+    p1 = [1, 10, 11, 99, 1, 50, 51]
+    p2 = [1, 10, 11, 99, 1, 50, 51, 20, 99, 1, 60, 99, 1, 50, 51]
+    # 半截截断:CLI 保留 c2 的半截 assistant 回合([1,50,51,30,31,99],带 eot 收尾)
+    p3 = [1, 10, 11, 99, 1, 50, 51, 20, 99, 1, 60, 99, 1, 50, 51, 30, 31, 99, 1, 70, 71, 99, 1, 50, 51]
+    traj = _build([
+        _record("c1", p1, [20, 99]),
+        _trunc_record("c2", p2, [30, 31], content="partial text"),
+        _record("c3", p3, [40, 99]),
+    ])
+    st = traj.metadata["reconstruction_stats"]
+    assert st["chains_total"] == 1
+    tr = traj.traces[0]
+    assert 30 in tr.response_ids and 31 in tr.response_ids, "半截截断的响应必须入流"
+    # MASK_TRUNCATED: 截断段(c2 的 [30,31])入流但掩零;工具结果与 limit 消息为 interstitial 掩零
+    assert tr.response_ids == [20, 99, 1, 60, 99, 1, 50, 51, 30, 31, 99, 1, 70, 71, 99, 1, 50, 51, 40, 99]
+    assert tr.loss_mask == [1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1]
