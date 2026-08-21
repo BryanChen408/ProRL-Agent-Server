@@ -55,7 +55,7 @@ gateway:
   node_id: ascend-node-01
   max_init_workers: 8
   max_run_workers: 64
-  max_postrun_workers: 64
+  max_postrun_workers: 8
   completion_persistence:
     enabled: true
     max_field_bytes: 67108864
@@ -79,7 +79,7 @@ operator:
       SOC_VERSION: "ascend910b1"
       ASCENDC_SOC_VERSION: "ascend910b1"
       ASC_DEVKIT_DIR: "/opt/asc-devkit"
-      CLAUDE_CODE_MAX_CONTEXT_TOKENS: "245760"
+      CLAUDE_CODE_MAX_CONTEXT_TOKENS: "229376"
 
   agent:
     # ← harness 侧 env:随 `claude` 那条 exec 下发,覆盖容器 env。BASH_*_TIMEOUT_MS 只有
@@ -107,10 +107,10 @@ operator:
     #   项目级那份不能省:CLAUDE.md 和任务 prompt 里的命令都走相对路径 `.claude/skills/...`。
     #   triton 侧无此字段 = 保持 /opt/canonical/skills(它的 prepare 不拷 skills,必须靠用户级)。
     skills_path: ""
-    max_output_tokens: 16384
+    max_output_tokens: 32768
     inference_timeout_ms: 14400000
-    disallowed_tools: "AskUserQuestion CronCreate CronDelete CronList EnterPlanMode EnterWorktree ExitPlanMode ExitWorktree NotebookEdit ScheduleWakeup TaskCreate TaskGet TaskList TaskOutput TaskStop TaskUpdate TodoWrite WebFetch WebSearch"
-    append_system_prompt: "Follow ./CLAUDE.md. The user instruction provides the concrete operator name; reference is at input/{op_name}.py. 产出 {op_name}/ 工程并打成单个 tarball 到 output/submission/{op_name}_impl.tar.gz。Do not ask user questions in this non-interactive run. \u5b8c\u6210\u5224\u5b9a(\u786c\u89c4\u5219):\u56fa\u5b9a\u5165\u53e3\u56de\u663e success=true \u4f46 speedup \u4f4e\u4e8e\u5b83\u56de\u663e\u7684\u76ee\u6807\u7ebf\u3001\u4e14 optimization \u9884\u7b97\u672a\u7528\u5b8c\u65f6,\u4e0d\u5f97\u8f93\u51fa\u603b\u7ed3\u7ed3\u675f\u4f1a\u8bdd \u2014\u2014 \u5fc5\u987b\u7ee7\u7eed\u4f18\u5316 kernel \u5e76\u91cd\u8dd1\u56fa\u5b9a\u5165\u53e3\u3002\u76ee\u6807\u7ebf\u4e0e\u5269\u4f59\u9884\u7b97\u4ee5\u56fa\u5b9a\u5165\u53e3\u7684 [ascendc-eval] \u56de\u663e\u6216 judge_out/metrics.json \u7684 next_step \u4e3a\u51c6;\u4e24\u8005\u90fd\u6ca1\u62ff\u5230\u5c31\u5148\u91cd\u8dd1\u56fa\u5b9a\u5165\u53e3\uff0c\u4e0d\u8981\u81ea\u884c\u5224\u5b9a\u5df2\u5b8c\u6210\u3002 Run the fixed validation entry in the foreground with a long Bash timeout (1800000 ms), never run_in_background; if it still gets auto-backgrounded, read the output file it prints to fetch the verdict and error output. 输出纪律(硬规则,违反会直接判死本会话):思考占输出预算,写太长会顶穿预算、本轮 content 为空,连续几轮会话就被终止 —— 每轮只想「下一步动作」并立刻输出一个 tool call;不要把完整方案设计或整份文件草稿写进思考。写代码分小块:先写能编译的粗版(每个 Write/Edit 只写一段或一个函数),再逐段补全;拿不准的地方先写出代码跑出真实报错再对着改,不要在思考里预解决所有问题。如果收到「Output token limit hit」提示:不要重新规划、不要从头再想,立即用更小的块直接重试输出。"
+    disallowed_tools: "AskUserQuestion CronCreate CronDelete CronList EnterPlanMode EnterWorktree ExitPlanMode ExitWorktree NotebookEdit ScheduleWakeup TaskCreate TaskGet TaskList TaskOutput TaskStop TaskUpdate TodoWrite WebFetch WebSearch Workflow"
+    append_system_prompt: "Follow ./CLAUDE.md. The user instruction provides the concrete operator name; reference is at input/{op_name}.py. 产出 {op_name}/ 工程并打成单个 tarball 到 output/submission/{op_name}_impl.tar.gz。Do not ask user questions in this non-interactive run. \u5b8c\u6210\u5224\u5b9a(\u786c\u89c4\u5219):\u56fa\u5b9a\u5165\u53e3\u56de\u663e success=true \u4f46 speedup \u4f4e\u4e8e\u5b83\u56de\u663e\u7684\u76ee\u6807\u7ebf\u3001\u4e14 optimization \u9884\u7b97\u672a\u7528\u5b8c\u65f6,\u4e0d\u5f97\u8f93\u51fa\u603b\u7ed3\u7ed3\u675f\u4f1a\u8bdd \u2014\u2014 \u5fc5\u987b\u7ee7\u7eed\u4f18\u5316 kernel \u5e76\u91cd\u8dd1\u56fa\u5b9a\u5165\u53e3\u3002\u76ee\u6807\u7ebf\u4e0e\u5269\u4f59\u9884\u7b97\u4ee5\u56fa\u5b9a\u5165\u53e3\u7684 [ascendc-eval] \u56de\u663e\u6216 judge_out/metrics.json \u7684 next_step \u4e3a\u51c6;\u4e24\u8005\u90fd\u6ca1\u62ff\u5230\u5c31\u5148\u91cd\u8dd1\u56fa\u5b9a\u5165\u53e3\uff0c\u4e0d\u8981\u81ea\u884c\u5224\u5b9a\u5df2\u5b8c\u6210\u3002 Run the fixed validation entry in the foreground, never run_in_background;调用它时 Bash 的 timeout 参数必须显式填 1800000(30 分钟)——禁止省略 timeout、禁止填 180000/120000 等较小值(小于实际耗时会被自动转后台);if it still gets auto-backgrounded, read the output file it prints to fetch the verdict and error output. 输出纪律(硬规则,违反会直接判死本会话):思考占输出预算,写太长会顶穿预算、本轮 content 为空,连续几轮会话就被终止 —— 每轮只想「下一步动作」并立刻输出一个 tool call;不要把完整方案设计或整份文件草稿写进思考。写代码分小块:先写能编译的粗版(每个 Write/Edit 只写一段或一个函数),再逐段补全;拿不准的地方先写出代码跑出真实报错再对着改,不要在思考里预解决所有问题。如果收到「Output token limit hit」提示:不要重新规划、不要从头再想,立即用更小的块直接重试输出。"
   evaluator:
     # ← delta 3+4:AscendC 判分入口 + tarball 提交(golden model.py 在 tarball 内,无需 --task)
     judge_command: "bash tools/ascendc_eval_pipeline.sh --op_name {op_name} --impl output/submission/{op_name}_impl.tar.gz --out_dir judge_out"

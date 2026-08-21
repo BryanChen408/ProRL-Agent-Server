@@ -165,8 +165,8 @@ def _assert_payload_contract(
     if leaked_prompt_terms:
         raise SystemExit(f"agent append_system_prompt leaked control/hardening terms: {leaked_prompt_terms}")
     banned_tools = set(str(settings.get("disallowed_tools", "")).split())
-    if "Agent" in banned_tools or "Workflow" in banned_tools:
-        raise SystemExit("sub-agent smoke config must not ban Agent or Workflow")
+    if "Agent" in banned_tools:
+        raise SystemExit("sub-agent smoke config must not ban Agent")
     required_plan_bans = {
         "TaskCreate",
         "TaskGet",
