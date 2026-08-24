@@ -71,7 +71,8 @@ if _DEPS:
 
         async def download_dir(self, remote_path: str, local_path: str) -> None: ...
 
-    def _run(metrics, *, impl=True, exec_rc=0, refresh=True, with_fresh=True, agent_files=None, traces=None):
+    def _run(metrics, *, impl=True, exec_rc=0, refresh=True, with_fresh=True, agent_files=None, traces=None,
+             process_info=None, budget_status=None):
         ev = OperatorJudgeEvaluator(op_name=OP, judge_command="bash pipeline.sh", metrics_path=METRICS)
         if agent_files is None:
             agent_files = {SUB: "# kernel"} if impl else {}
@@ -79,6 +80,10 @@ if _DEPS:
         judge = FakeRuntime(files=({METRICS: json.dumps(metrics)} if metrics is not None else {}),
                             exec_rc=exec_rc)
         with tempfile.TemporaryDirectory() as d:
+            if process_info is not None:
+                Path(d, "process_info.json").write_text(json.dumps(process_info))
+            if budget_status is not None:
+                Path(d, "pipeline_budget_status.json").write_text(json.dumps(budget_status))
             return asyncio.run(ev.evaluate(
                 Trajectory(status="COMPLETED", traces=list(traces or [])),
                 runtime=agent,
@@ -94,6 +99,150 @@ def test_success_speedup_reward():
     assert res.outcome_reward == 0.9   # 0.75+0.25*(s^2-1)/(s^2+1), s=2 -> 0.9
     assert res.metadata["success"] is True and res.metadata["error_type"] is None
     assert len(judge.uploaded) == 1 and len(judge.execs) == 1  # impl crossed + judge ran
+    # 无 process_info.json:分量 0,与改造前逐分一致(优雅回退)
+    assert res.metadata["process_reward"] == 0.0
+    assert res.metadata["process_validation"] == "missing"
+
+
+# ------------------------- process reward(dev_04/dev_05)-------------------------
+
+_PROCESS_ENVS = ("POLAR_PROCESS_REWARD", "POLAR_PROCESS_REWARD_CAP")
+
+
+def _mk_process_info(specs, budget=6):
+    """(stage, status, error_type, speedup) 列表 -> 合法 process_info dict。"""
+    sub = {
+        "compile": {"ast": "pass", "compile": "fail", "verify": "skip", "benchmark": "skip"},
+        "verify": {"ast": "pass", "compile": "pass", "verify": "fail", "benchmark": "skip"},
+        "done": {"ast": "pass", "compile": "pass", "verify": "pass", "benchmark": "pass"},
+    }
+    events, seen_pass = [], False
+    for i, (stage, status, et, sp) in enumerate(specs, start=1):
+        events.append({
+            "global_step": i, "kind": "eval",
+            "phase": "optimization" if seen_pass else "generation",
+            "phase_step": i, "phase_limit": budget,
+            "stage": stage, "status": status, "error_type": et,
+            "substeps": sub[stage], "speedup_vs_torch": sp,
+        })
+        seen_pass = seen_pass or status == "pass"
+    return {"schema_version": 1, "events": events, "milestones": []}
+
+
+def _process_env_saved():
+    return {k: os.environ.pop(k, None) for k in _PROCESS_ENVS}
+
+
+def _process_env_restore(saved):
+    for k, v in saved.items():
+        if v is None:
+            os.environ.pop(k, None)
+        else:
+            os.environ[k] = v
+
+
+def test_process_reward_merges_into_score():
+    # 一次通过(k=1)+ 进 optimization 且 speedup 1.0->1.2 拿满:process = 0.06+0.04 = 0.10(cap)
+    saved = _process_env_saved()
+    try:
+        info = _mk_process_info([("done", "pass", None, 1.0), ("done", "pass", None, 1.2)])
+        res, *_ = _run({"success": True, "perf_data": {"speedup_vs_torch": 1.2}},
+                       process_info=info)
+        raw = 0.75 + 0.25 * (1.2**2 - 1) / (1.2**2 + 1)
+        assert abs(res.metadata["reward_outcome_raw"] - raw) < 1e-9
+        assert abs(res.metadata["process_reward"] - 0.10) < 1e-9
+        assert res.metadata["process_validation"] == "ok"
+        assert abs(res.outcome_reward - min(raw + 0.10, 1.0)) < 1e-9
+        comp = res.metadata["process_components"]
+        assert abs(comp["b_first_pass"] - 0.06) < 1e-9
+        assert abs(comp["b_opt_gain"] - 0.04) < 1e-9
+        assert comp["p_repeat"] == 0.0
+    finally:
+        _process_env_restore(saved)
+
+
+def test_process_reward_same_outcome_different_path():
+    # 同样最终 1.0x:一次通过 vs 压哨连挂 5 次 compile,两条轨迹必须拉开
+    saved = _process_env_saved()
+    try:
+        metrics = {"success": True, "perf_data": {"speedup_vs_torch": 1.0}}
+        clean, *_ = _run(metrics, process_info=_mk_process_info([("done", "pass", None, 1.0)]))
+        messy, *_ = _run(metrics, process_info=_mk_process_info(
+            [("compile", "fail", "ascendc_compile_failed", None)] * 5
+            + [("done", "pass", None, 1.0)]))
+        assert clean.outcome_reward > messy.outcome_reward
+        # clean:b_fp 满 0.06;raw=0.75 -> 0.81
+        assert abs(clean.outcome_reward - 0.81) < 1e-9, clean.outcome_reward
+        # messy:k=6,b_fp=0.06*(6+1-6)/6=0.01;p_repeat=0.04 -> raw+0.01-0.04=0.72
+        assert abs(messy.outcome_reward - 0.72) < 1e-9, messy.outcome_reward
+    finally:
+        _process_env_restore(saved)
+
+
+def test_process_info_forged_zeroes_component_not_outcome():
+    # 过程记录虚报成功,但 judge 实测 correctness_failed:terminal_mismatch ->
+    # process 分量 0,outcome 不受影响(0.35 原样),不 retry、不额外罚
+    saved = _process_env_saved()
+    try:
+        forged = _mk_process_info([("done", "pass", None, 1.5)])
+        res, *_ = _run({"success": False, "ast_check_ok": True, "correctness_ok": False,
+                        "error_type": "correctness_failed"},
+                       process_info=forged)
+        assert res.outcome_reward == 0.35
+        assert res.metadata["process_reward"] == 0.0
+        assert res.metadata["process_validation"] == "terminal_mismatch"
+        assert res.metadata["process_components"] == {"disabled": "terminal_mismatch"}
+    finally:
+        _process_env_restore(saved)
+
+
+def test_process_v2_budget_count_mismatch():
+    # 预算计数器(gen=5)比事件数(1)多 = 删过事件 -> 分量 0
+    saved = _process_env_saved()
+    try:
+        info = _mk_process_info([("done", "pass", None, 1.0)])
+        res, *_ = _run({"success": True, "perf_data": {"speedup_vs_torch": 1.0}},
+                       process_info=info,
+                       budget_status={"gen_count": 5, "opt_count": 0})
+        assert res.metadata["process_validation"] == "budget_count_mismatch"
+        assert res.metadata["process_reward"] == 0.0
+        assert res.outcome_reward == 0.75
+    finally:
+        _process_env_restore(saved)
+
+
+def test_process_reward_env_off():
+    # POLAR_PROCESS_REWARD=0 整体回退纯 outcome(校验仍跑,便于遥测观察)
+    saved = _process_env_saved()
+    os.environ["POLAR_PROCESS_REWARD"] = "0"
+    try:
+        info = _mk_process_info([("done", "pass", None, 1.0)])
+        res, *_ = _run({"success": True, "perf_data": {"speedup_vs_torch": 1.0}},
+                       process_info=info)
+        assert res.outcome_reward == 0.75
+        assert res.metadata["process_reward"] == 0.0
+        assert res.metadata["process_validation"] == "ok"
+        assert res.metadata["process_components"] == {"disabled": "env"}
+    finally:
+        _process_env_restore(saved)
+
+
+def test_process_reward_then_truncation_penalty_order():
+    # 合并顺序:先 process 再截断。fail 0.35 + process(连挂 3 次 verify:
+    # b_fp=0.06(k=1,compile 首过) − p_rep=0.02 = +0.04) − 截断 2 次 0.02 = 0.37
+    saved = _process_env_saved()
+    saved.update({k: os.environ.pop(k, None) for k in _PENALTY_ENVS})
+    try:
+        info = _mk_process_info([("verify", "fail", "correctness_failed", None)] * 3)
+        res, *_ = _run({"success": False, "ast_check_ok": True, "correctness_ok": False,
+                        "error_type": "correctness_failed"},
+                       process_info=info,
+                       traces=[Trace(finish_reason="length"), Trace(finish_reason="length")])
+        assert abs(res.metadata["process_reward"] - 0.04) < 1e-9
+        assert abs(res.metadata["truncation_penalty"] - 0.02) < 1e-9
+        assert abs(res.outcome_reward - 0.37) < 1e-9, res.outcome_reward
+    finally:
+        _process_env_restore(saved)
 
 
 _PENALTY_ENVS = ("POLAR_TRUNCATION_PENALTY", "POLAR_TRUNCATION_PENALTY_CAP", "POLAR_TRUNCATION_PENALTY_FLOOR")

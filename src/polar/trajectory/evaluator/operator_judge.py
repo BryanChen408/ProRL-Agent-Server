@@ -46,6 +46,8 @@ from polar.trajectory.evaluator.operator_reward import (
     apply_truncation_penalty,
     classify_infra_error_text,
     judge_outcome,
+    process_reward,
+    validate_process_info,
 )
 from polar.trajectory.models import EvalResult, Trajectory
 
@@ -565,6 +567,37 @@ class OperatorJudgeEvaluator(BaseTrajectoryEvaluator):
             return metrics
         return {**metrics, "original_error_type": metrics.get("error_type"), "error_type": infra_type}
 
+    def _load_process_events(
+        self, artifacts_dir: Path, metrics: dict
+    ) -> tuple[list[dict] | None, str]:
+        """读 process_info.json(agent 侧固定入口经 $ARTIFACTS_DIR bind mount 直落宿主机,
+        与 metrics.json 同目录),跑 V1-V5 校验;任一不过 -> (None, 原因),process 分量记 0,
+        不影响 outcome、不产生 infra retry。详见 operator_reward.validate_process_info。
+        """
+        raw_path = artifacts_dir / "process_info.json"
+        if not raw_path.is_file():
+            return None, "missing"  # V5:未接入/被删/老 session —— 与改造前行为一致
+        try:
+            data = json.loads(raw_path.read_text(encoding="utf-8"))
+        except Exception:  # noqa: BLE001
+            return None, "unreadable"  # V1
+        events, why = validate_process_info(data, metrics)
+        if events is None:
+            return None, why
+        # V2:与 pipeline_budget_status.json 交叉比对(同一 artifacts_dir)。只查「计数器
+        # 比事件多 = 删过事件」一个方向:计数器在脚本尾才 +1,最后一次评测中途崩溃会少 1,
+        # 不能用 != 冤枉正常轨迹。文件缺席(老 run/cannbot)跳过此校验。
+        budget_path = artifacts_dir / "pipeline_budget_status.json"
+        if budget_path.is_file():
+            try:
+                budget = json.loads(budget_path.read_text(encoding="utf-8"))
+                counted = int(budget.get("gen_count") or 0) + int(budget.get("opt_count") or 0)
+                if counted > len(events):
+                    return None, "budget_count_mismatch"
+            except Exception:  # noqa: BLE001 —— 预算文件损坏不株连 process 分
+                pass
+        return events, "ok"
+
     def _scored(
         self,
         metrics: dict,
@@ -582,16 +615,29 @@ class OperatorJudgeEvaluator(BaseTrajectoryEvaluator):
                 f"operator_judge infra failure ({outcome['error_type']}) -> retry; "
                 f"metrics at {artifacts_dir / 'metrics.json'}"
             )
+        # 过程奖励(dev_04/dev_05):infra retry 分支在上面已经 raise,走不到这里(C4)。
+        # 合并顺序:先 process 塑形(±Δ,floor 0.15 / ceil 1.0),再截断惩罚(独立作用于
+        # 最终分,其内部 floor 依然兜底)。校验不过/文件缺失 -> 分量 0,与改造前逐分一致。
+        events, process_why = self._load_process_events(artifacts_dir, metrics)
+        if events is not None:
+            r_proc, process_components = process_reward(events, metrics)
+        else:
+            r_proc, process_components = 0.0, {"disabled": process_why}
+        base_reward = min(max(outcome["reward"] + r_proc, 0.15), 1.0)
         # 截断事件轻扣(空截断在阶梯里原本零成本,salvage 救回后与干净 session 同分 -> 无负
         # 方向 -> 永不收敛;见 operator_reward.apply_truncation_penalty)。截断段 token 本体
         # 仍不过梯度。扣量写进 metadata,原 reward 可还原(reward + truncation_penalty)。
-        reward, truncated_deduction = apply_truncation_penalty(outcome["reward"], truncation_events)
+        reward, truncated_deduction = apply_truncation_penalty(base_reward, truncation_events)
         return EvalResult(
             outcome_reward=reward,
             metadata={
                 "mode": self.MODE,
                 "op_name": self.op_name,
                 "reward": reward,
+                "reward_outcome_raw": outcome["reward"],  # 原 outcome 分;R = raw + process_reward - truncation_penalty
+                "process_reward": r_proc,
+                "process_components": process_components,
+                "process_validation": process_why,
                 "success": bool(metrics.get("success", False)),
                 "error_type": outcome["error_type"],
                 "speedup_vs_torch": (metrics.get("perf_data") or {}).get("speedup_vs_torch"),
