@@ -1030,25 +1030,35 @@ def _parse_msprof_duration_quick(prof_group_dir: str):
             with open(task_time_files[0], "r", encoding="utf-8", errors="replace") as f:
                 reader = csv.DictReader(f)
                 rows = list(reader)
-            # 汇总所有真实计算 kernel 的耗时
-            # 参考实现可能包含大量 PyTorch native kernel；AscendC 实现也可能拆分为多个 kernel。
-            # 只累加 kernel_type 为实际计算类型的行，排除 PROFILING_ENABLE / TASK_TIMEOUT_SET 等。
-            COMPUTE_KERNEL_TYPES = {"AI_VECTOR_CORE", "AI_CORE", "MIX_AIV", "MIX"}
-            compute_rows = []
+            # 收集所有非元事件的 kernel 行，按 kernel_name 分组
+            kernel_times: Dict[str, List[float]] = {}
             for r in rows:
                 kernel_type = r.get("kernel_type", "")
                 task_time = r.get("task_time(us)", "")
-                if kernel_type in COMPUTE_KERNEL_TYPES and task_time:
+                if kernel_type not in (
+                    "PROFILING_ENABLE",
+                    "PROFILING_DISABLE",
+                    "TASK_TIMEOUT_SET",
+                    "",
+                ) and task_time:
                     try:
                         duration = float(task_time)
                         if duration > 0:
-                            compute_rows.append((duration, r.get("kernel_name", "unknown")))
+                            kernel_name = r.get("kernel_name", "unknown")
+                            kernel_times.setdefault(kernel_name, []).append(duration)
                     except ValueError:
                         continue
-            if compute_rows:
-                total_duration = sum(d for d, _ in compute_rows)
+            if kernel_times:
+                # 汇总所有 kernel 的耗时
+                all_durations = []
+                all_kernel_names = set()
+                for times in kernel_times.values():
+                    all_durations.extend(times)
+                for name in kernel_times.keys():
+                    all_kernel_names.add(name)
+                total_duration = sum(all_durations)
                 if total_duration > 0:
-                    kernel_name = compute_rows[0][1] if len(compute_rows) == 1 else "multiple_kernels"
+                    kernel_name = list(all_kernel_names)[0] if len(all_kernel_names) == 1 else "multiple_kernels"
                     return total_duration, kernel_name, None
         except Exception:
             pass
