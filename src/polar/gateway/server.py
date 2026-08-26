@@ -510,15 +510,11 @@ async def inference_inflight_status():
 @app.post("/admin/inference/pause")
 async def pause_inference_generation(timeout_seconds: float = 300.0):
     state = get_state()
-    try:
-        status = await state.inference.pause_generation(timeout_seconds=timeout_seconds)
-    except TimeoutError as exc:
-        raise HTTPException(
-            status_code=504,
-            detail=f"Timed out waiting for inference requests to drain after {timeout_seconds}s",
-        ) from exc
-    logger.info(
-        "Paused inference generation proxy for weight update; inflight=%s",
+    status = await state.inference.pause_generation(timeout_seconds=timeout_seconds)
+    log = logger.info if status["drained"] else logger.warning
+    log(
+        "Paused inference generation proxy for weight update; drained=%s inflight=%s",
+        status["drained"],
         status["inflight"],
     )
     return status

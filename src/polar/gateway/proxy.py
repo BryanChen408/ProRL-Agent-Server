@@ -221,15 +221,31 @@ class InferenceClient:
             self._generation_condition.notify_all()
 
     async def pause_generation(self, *, timeout_seconds: float = 300.0) -> dict[str, Any]:
-        """Block new generation requests and wait for current inference calls to drain."""
+        """Block new generations and report whether existing calls drained in time.
+
+        Reaching the drain timeout does *not* reopen admission and is not a transport
+        failure: callers may deliberately abort the remaining engine requests before a
+        colocated weight update.  Keep ``paused=True`` and expose the two states
+        independently so orchestration can make that decision without guessing from a
+        504 response.
+        """
         async with self._generation_condition:
             self._generation_paused = True
             self._generation_condition.notify_all()
-            await asyncio.wait_for(
-                self._generation_condition.wait_for(lambda: self._inflight_generations == 0),
-                timeout=timeout_seconds,
-            )
-            return self.generation_status()
+            timed_out = False
+            try:
+                await asyncio.wait_for(
+                    self._generation_condition.wait_for(
+                        lambda: self._inflight_generations == 0
+                    ),
+                    timeout=timeout_seconds,
+                )
+            except TimeoutError:
+                timed_out = True
+
+            status = self.generation_status()
+            status["timed_out"] = timed_out
+            return status
 
     async def resume_generation(self) -> dict[str, Any]:
         async with self._generation_condition:
@@ -240,6 +256,7 @@ class InferenceClient:
     def generation_status(self) -> dict[str, Any]:
         return {
             "paused": self._generation_paused,
+            "drained": self._inflight_generations == 0,
             "inflight": self._inflight_generations,
             "base_url": self.base_url,
             "engine": self.engine.name,

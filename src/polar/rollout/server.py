@@ -155,10 +155,32 @@ async def rollout_status():
 
 @app.post("/rollout/admin/inference/pause")
 async def pause_gateway_generation(timeout_seconds: float = 300.0):
-    return await _forward_gateway_admin(
+    result = await _forward_gateway_admin(
         "/admin/inference/pause",
         params={"timeout_seconds": timeout_seconds},
     )
+    nodes = result["nodes"]
+    successful = [
+        item["response"]
+        for item in nodes
+        if item["status"] == "ok" and isinstance(item.get("response"), dict)
+    ]
+    all_paused = len(successful) == len(nodes) and all(
+        response.get("paused") is True for response in successful
+    )
+    all_drained = all_paused and all(
+        response.get("drained") is True for response in successful
+    )
+    inflight = sum(
+        int(response.get("inflight", 0) or 0)
+        for response in successful
+    )
+    return {
+        "all_paused": all_paused,
+        "all_drained": all_drained,
+        "inflight": inflight,
+        "nodes": nodes,
+    }
 
 
 @app.post("/rollout/admin/inference/resume")

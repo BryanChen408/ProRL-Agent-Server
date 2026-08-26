@@ -84,12 +84,17 @@ gateway:
     async def noop() -> None:
         return None
 
+    gateway_responses = iter([
+        {"paused": True, "drained": True, "timed_out": False, "inflight": 0},
+        {"paused": True, "drained": False, "timed_out": True, "inflight": 3},
+    ])
+
     class _Response:
         def raise_for_status(self) -> None:
             return None
 
         def json(self) -> dict[str, object]:
-            return {"paused": True}
+            return next(gateway_responses)
 
     class _Client:
         def __init__(self, *args, **kwargs) -> None:
@@ -120,7 +125,30 @@ gateway:
         ("http://127.0.0.1:8100/admin/inference/pause", {"timeout_seconds": 12.0}),
         ("http://127.0.0.1:8101/admin/inference/pause", {"timeout_seconds": 12.0}),
     ]
-    assert response.json()["nodes"] == [
-        {"node_id": "n1", "status": "ok", "response": {"paused": True}},
-        {"node_id": "n2", "status": "ok", "response": {"paused": True}},
-    ]
+    assert response.json() == {
+        "all_paused": True,
+        "all_drained": False,
+        "inflight": 3,
+        "nodes": [
+            {
+                "node_id": "n1",
+                "status": "ok",
+                "response": {
+                    "paused": True,
+                    "drained": True,
+                    "timed_out": False,
+                    "inflight": 0,
+                },
+            },
+            {
+                "node_id": "n2",
+                "status": "ok",
+                "response": {
+                    "paused": True,
+                    "drained": False,
+                    "timed_out": True,
+                    "inflight": 3,
+                },
+            },
+        ],
+    }
