@@ -133,6 +133,61 @@ def apply_deltas(text: str) -> str:
         ".claude/skills/tilelang2ascend-tilelang-designer/script/evaluate_tilelang.sh",
         ".claude/skills/tilelang2ascend-tilelang-designer/scripts/evaluate_tilelang.sh",
     )
+
+    # [D8] 与 RL 相斥:固定入口的 inject_baseline 在两个无条件调用点(解包后/对拍前)都用
+    #      数据集原版 input/{op}.json 覆盖工程副本,agent 自检与 judge 判分都不例外 ——
+    #      Phase 2(用例精简)与 Phase 6(全量恢复验证)在判分链上零作用,只烧 turn;
+    #      Phase 6 还额外消耗一次固定入口评测预算。且用例精简已在线下数据集侧完成
+    #      (src_simple/,每算子 10 case)。整节删除,编号不重排(交叉引用太多),
+    #      覆盖区声明「已移除,不要自行精简」。
+    # a) frontmatter skills 列表
+    text = _sub(text, "  - tilelang2ascend-case-simplifier\n", "")
+    # b) 工作流总览图:删两行 + 图后加注
+    text = _sub(text, "Phase 2: 测试用例精简           (tilelang2ascend-case-simplifier)\n", "")
+    text = _sub(text, "Phase 6: 全量用例验证\n", "")
+    text = _sub(
+        text,
+        "Phase 7: Trace 记录            (tilelang2ascend-trace-recorder)\n```",
+        "Phase 7: Trace 记录            (tilelang2ascend-trace-recorder)\n```\n\n"
+        "注：Phase 2（测试用例精简）与 Phase 6（全量用例验证）已从工作流移除 —— "
+        "判分恒用数据集原版用例（每次评测自动覆盖工程目录副本），用例精简已在线下数据集侧完成；"
+        "阶段编号保持原样不重排。",
+    )
+    # c) 任务目录结构:json 注释改为「数据集原版」,删 .bak 行
+    text = _sub(
+        text,
+        "├── <op_name>.json               # 测试用例 (JSON Lines, 精简后)",
+        "├── <op_name>.json               # 测试用例 (JSON Lines, 数据集原版;判分时被数据集原件覆盖,改它无效)",
+    )
+    text = _sub(text, "├── <op_name>.json.bak           # 原始用例备份\n", "")
+    # d) Phase 2 整节(连同节前的 --- 分隔线一起去掉,避免残留双分隔线)
+    text = _cut(text, "---\n\n## Phase 2: 测试用例精简", "## Phase 3: 设计表达", "Phase 2 判分链零作用")
+    # e) Phase 5 收尾:流转目标从 Phase 6 改为 Phase 7
+    text = _sub(
+        text,
+        """- 存在 → 继续 Phase 6
+- 不存在 → 视为 Phase 5 执行失败，重新调用 ops-profiling skill 一次
+- 若仍失败，记录失败原因到 trace.md，继续 Phase 6（不阻塞）
+
+**Phase 5 → Phase 6 → Phase 7 流转规则（不可跳过）**：
+无论 Phase 5 结果如何（加速比达标/未达标），都必须执行 Phase 6 和 Phase 7：
+- Phase 6 不是可选步骤：即使精简用例有 1 个失败，全量验证也可能发现更多问题，也可能发现精简用例的 failure 是 false positive
+- Phase 7 不是可选步骤：无论 Phase 6 通过与否，都必须生成 trace.md
+- 禁止以"性能已测试""任务已完成""进化优化已准备"等任何理由跳过 Phase 6 和 Phase 7""",
+        """- 存在 → 继续 Phase 7
+- 不存在 → 视为 Phase 5 执行失败，重新调用 ops-profiling skill 一次
+- 若仍失败，记录失败原因到 trace.md，继续 Phase 7（不阻塞）
+
+**Phase 5 → Phase 7 流转规则（不可跳过）**：
+无论 Phase 5 结果如何（加速比达标/未达标），都必须执行 Phase 7：
+- Phase 7 不是可选步骤：无论结果如何，都必须生成 trace.md
+- 禁止以"性能已测试""任务已完成""进化优化已准备"等任何理由跳过 Phase 7""",
+    )
+    # f) Phase 6 整节
+    text = _cut(text, "---\n\n## Phase 6: 全量用例验证", "## Phase 7: Trace 记录", "Phase 6 判分链零作用")
+    # g) 错误处理表两行
+    text = _sub(text, "| Phase 2 | 无需精简 | 跳过，继续后续阶段 |\n", "")
+    text = _sub(text, "| Phase 6 | 全量验证失败 | 记录结果，不修复，继续 Phase 7 |\n", "")
     return text
 
 

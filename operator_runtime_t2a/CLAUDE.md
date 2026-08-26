@@ -8,7 +8,6 @@ skills:
   - ascendc-tiling-design
   - tilelang2ascend-operator-project-init
   - tilelang2ascend-translator
-  - tilelang2ascend-case-simplifier
   - ops-profiling
   - ascendc-precision-debug
   - tilelang2ascend-precision-tuning
@@ -43,7 +42,6 @@ permission:
 ```
 Phase 0: 参数确认 + 算子分类    (解析输入，判定简单/复杂路径)
 Phase 1: 环境准备 + 工程初始化  (复制算子文件 + 初始化 kernel 工程 + 算子注册)
-Phase 2: 测试用例精简           (tilelang2ascend-case-simplifier)
 Phase 3: 设计表达              (分支)
   ├─ 简单算子: 架构设计 + 设计串讲 (ops-direct-invoke: DESIGN.md + PLAN.md + WALKTHROUGH.md)
   └─ 复杂算子: TileLang 设计  (tilelang2ascend-tilelang-designer + 退化检测 + 迭代)
@@ -51,9 +49,10 @@ Phase 4: AscendC 生成与验证    (分支)
   ├─ 简单算子: 开发实现 + 代码审查 + 修复循环 (ops-direct-invoke: 渐进式开发 + REVIEW.md + 最多3轮修复)
   └─ 复杂算子: TileLang→AscendC 转译 (tilelang2ascend-translator + 退化检测 + 迭代)
 Phase 5: 性能分析              (ops-profiling --quick 模式)
-Phase 6: 全量用例验证
 Phase 7: Trace 记录            (tilelang2ascend-trace-recorder)
 ```
+
+注：Phase 2（测试用例精简）与 Phase 6（全量用例验证）已从工作流移除 —— 判分恒用数据集原版用例（每次评测自动覆盖工程目录副本），用例精简已在线下数据集侧完成；阶段编号保持原样不重排。
 
 ## 算子分类路由规则
 
@@ -107,8 +106,7 @@ Phase 7: Trace 记录            (tilelang2ascend-trace-recorder)
 ```
 {output_dir}/                    # 用户指定的输出目录
 ├── model.py                     # 算子描述文件
-├── <op_name>.json               # 测试用例 (JSON Lines, 精简后)
-├── <op_name>.json.bak           # 原始用例备份
+├── <op_name>.json               # 测试用例 (JSON Lines, 数据集原版;判分时被数据集原件覆盖,改它无效)
 │
 ├── design/                      # 设计层 (双路径)
 │   ├── design.md                # 设计文档 (简单算子路径)
@@ -434,31 +432,6 @@ Schema 类型映射：`at::Tensor` → `Tensor`、`at::IntArrayRef` → `int[]`�
 # 在 forward() 中直接调用注册好的算子
 return torch.ops.npu.<op_name>(x, kernel_size, eps)
 ```
-
----
-
-## Phase 2: 测试用例精简
-
-**确定目标 JSON 文件**：
-1. 读取 `{output_dir}/model.py` 中 `get_input_groups()` 函数，从 `json_path` 赋值语句提取引用的 `.json` 文件名（如 `"8_QuantScatter.json"`），此文件即为目标 JSON
-2. Phase 1.1 已将动态路径（`os.path.splitext(os.path.basename(__file__))[0]`）修正为固定的算子 JSON 文件名，因此 `get_input_groups()` 指向的一定是 `{output_dir}` 内实际存在的 JSON 文件
-
-调用 `case-simplifier` skill，读取目标 `.json` 文件（JSON Lines 格式，每行一个 `{"inputs": [...]}` 对象），对其中的输入 cases 进行精简，使 case 数量尽量不超过 10 个，同时保证覆盖度。
-
-**前置操作**：
-- 先将目标 `.json` 文件备份为同名 `.json.bak`（保留全量用例原件）
-- 如果 `{output_dir}` 中同时存在原始 benchmark 的 `.json` 文件，需确保它已被复制到输出目录
-
-**精简原则**：
-1. **dtype 覆盖**：原 cases 中出现的每种 tensor dtype 至少保留一个 case
-2. **attribute 可选值覆盖**：对于 `type: "attr"` 的输入，覆盖不同取值类别
-3. **shape 维度覆盖**：覆盖原 cases 中出现的不同 tensor 维度数
-4. **shape 极端值覆盖**：保留极端小和极端大的 case
-5. **广播模式覆盖**：保留至少一个 broadcasting case（如适用）
-
-**产出**：精简后的 `{output_dir}/<op_name>.json`（case 数 ≤ 10）
-
----
 
 ## Phase 3: 设计表达（分支）
 
@@ -921,25 +894,14 @@ class ModelNew(nn.Module):
 
 **Phase 5 强制检查（必须执行）**：
 Phase 5 完成后，必须验证 `{output_dir}/performance.json` 是否存在：
-- 存在 → 继续 Phase 6
+- 存在 → 继续 Phase 7
 - 不存在 → 视为 Phase 5 执行失败，重新调用 ops-profiling skill 一次
-- 若仍失败，记录失败原因到 trace.md，继续 Phase 6（不阻塞）
+- 若仍失败，记录失败原因到 trace.md，继续 Phase 7（不阻塞）
 
-**Phase 5 → Phase 6 → Phase 7 流转规则（不可跳过）**：
-无论 Phase 5 结果如何（加速比达标/未达标），都必须执行 Phase 6 和 Phase 7：
-- Phase 6 不是可选步骤：即使精简用例有 1 个失败，全量验证也可能发现更多问题，也可能发现精简用例的 failure 是 false positive
-- Phase 7 不是可选步骤：无论 Phase 6 通过与否，都必须生成 trace.md
-- 禁止以"性能已测试""任务已完成""进化优化已准备"等任何理由跳过 Phase 6 和 Phase 7
-
----
-
-## Phase 6: 全量用例验证
-
-将 `{output_dir}/<op_name>.json.bak` 恢复为 `{output_dir}/<op_name>.json`（覆盖精简后的版本，恢复全量测试用例），然后进行一次全量用例验证。
-
-如果验证过程中出现失败用例，**仅允许修改 `{output_dir}/kernel/op_kernel/` 和 `{output_dir}/kernel/op_host/` 目录下的 AscendC kernel 文件**（禁止修改 `model_new_ascendc.py` 或其他任何文件）。每次修复后重新运行验证，**最多尝试 3 次**（含首次验证），超过次数或所有失败用例均已解决后，无论通过与否，直接记录结果并进入下一阶段。
-
----
+**Phase 5 → Phase 7 流转规则（不可跳过）**：
+无论 Phase 5 结果如何（加速比达标/未达标），都必须执行 Phase 7：
+- Phase 7 不是可选步骤：无论结果如何，都必须生成 trace.md
+- 禁止以"性能已测试""任务已完成""进化优化已准备"等任何理由跳过 Phase 7
 
 ## Phase 7: Trace 记录
 
@@ -966,7 +928,6 @@ Phase 5 完成后，必须验证 `{output_dir}/performance.json` 是否存在：
 |------|------|------|
 | Phase 0 | op_file 不存在 | 报错，提示用户提供正确的算子描述文件路径 |
 | Phase 0 | output_dir 创建失败 | 报错，检查权限 |
-| Phase 2 | 无需精简 | 跳过，继续后续阶段 |
 | Phase 3-S | DESIGN.md / PLAN.md 生成失败 | 重试 1 次，失败则终止 |
 | Phase 3-S | 设计串讲发现阻塞级问题 | 以 Architect 视角回应并更新设计，直到所有阻塞级问题解决 |
 | Phase 4-S | 开发实现失败 | 最多 3 轮修复循环，超限暂停上报用户 |
@@ -977,7 +938,6 @@ Phase 5 完成后，必须验证 `{output_dir}/performance.json` 是否存在：
 | Phase 4 | AscendC 编译/验证失败 (A类) | 最多 5 次迭代（a_retry: 0→4），A/D 计数器独立，A 类用完后若转入 D 类则 D 类仍有完整 12 次机会 |
 | Phase 4 | D 类精度不匹配 | D-1 (ascendc-precision-debug) 最多 7 次 → D-2 (ascendc-precision-tuning) 最多 5 次，合计 12 次（d_retry: 0→11），与 A 类计数器独立 |
 | Phase 4 | B 类环境错误 | 立即终止，任务失败 |
-| Phase 6 | 全量验证失败 | 记录结果，不修复，继续 Phase 7 |
 | Phase 7 | Trace 记录失败 | 不影响主流程，仅记录失败状态 |
 
 ### Conductor 错误分类
@@ -1086,11 +1046,12 @@ bash tools/ascendc_eval_pipeline.sh --op_name {op_name} \
 
 [A1] 照做:asc-devkit 就在 `$ASC_DEVKIT_DIR`。完整错误在 `judge_out/metrics_error.log`,先读它。
 
-## Phase 2 / Phase 6
+## 用例精简已移除(原 Phase 2 / Phase 6)
 
-判分**恒用数据集原版全量用例**,`{op_name}/{op_name}.json` 在判分时会被覆盖。
-所以 Phase 2(用例精简)只对你自己的迭代提速有意义,Phase 6(全量恢复)对判分无影响。
-做或不做都可以,不要为它们花额外轮次。
+判分**恒用数据集原版用例**:`{op_name}/{op_name}.json` 在每次评测(含你的自检)时都会被
+`input/` 里的数据集原件覆盖,改它、精简它、备份它都**无效**。上游的 Phase 2(用例精简)与
+Phase 6(全量恢复)因此已从工作流移除。不要自行精简、修改或备份任何 `.json` 用例文件,
+把轮次留给实现与修复迭代。
 
 ## 提交物
 
