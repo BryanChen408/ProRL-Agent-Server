@@ -55,7 +55,7 @@ gateway:
   node_id: ascend-node-01
   max_init_workers: 8
   max_run_workers: 64
-  max_postrun_workers: 8
+  max_postrun_workers: 16
   completion_persistence:
     enabled: true
     max_field_bytes: 67108864
