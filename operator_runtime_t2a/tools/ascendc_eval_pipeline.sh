@@ -79,12 +79,16 @@ write_metrics() {  # ast_ok corr_ok success fw impl speedup error [完整日志�
   [[ -n "$error" ]] && printf "%s\n" "$error" >> "$OUT_DIR/metrics_error.log"
   [[ -n "$log_src" && -f "$log_src" ]] && cat "$log_src" >> "$OUT_DIR/metrics_error.log"
   AST_OK="$ast_ok" CORR_OK="$corr_ok" SUCCESS="$success" FW="$fw" IMPL="$impl" SP="$sp" \
+  CASES_PASSED="${CASES_PASSED:-}" CASES_TOTAL="${CASES_TOTAL:-}" \
   FORCE_TYPE="$force_type" \
   ERR_FILE="$OUT_DIR/metrics_error.log" OUT_DIR="$OUT_DIR" OP="$OP_NAME" python3 - <<'PY'
 import json, os, hashlib, re
 from pathlib import Path
 out = Path(os.environ["OUT_DIR"])
 def b(x): return str(x).lower() in ("1","true","yes")
+def i(x):
+    try: return int(x)
+    except (TypeError, ValueError): return None
 fw, impl, sp = os.environ.get("FW",""), os.environ.get("IMPL",""), os.environ.get("SP","")
 ef = Path(os.environ.get("ERR_FILE","")); full = ef.read_text(errors="replace") if ef.exists() else ""
 def classify(t):
@@ -126,6 +130,9 @@ metrics = {
     "schema_version": 2, "op_name": os.environ.get("OP",""),
     "success": b(os.environ["SUCCESS"]), "ast_check_ok": b(os.environ["AST_OK"]),
     "correctness_ok": b(os.environ["CORR_OK"]), "perf_data": perf,
+    # 对拍 case 统计(Step2b --json-file 产出;缺失为 null,reward 侧回退固定档)
+    "cases_passed": i(os.environ.get("CASES_PASSED","")),
+    "cases_total": i(os.environ.get("CASES_TOTAL","")),
     "error": None, "error_type": (os.environ.get("FORCE_TYPE") or "").strip() or classify(full),
     "error_file": "metrics_error.log" if full else None,
     "error_bytes": len(full.encode("utf-8")) if full else 0,
@@ -156,6 +163,26 @@ PY
       --op-name "$OP_NAME" \
       >>"$OUT_DIR/process_track.log" 2>&1 || true
   fi
+}
+
+# 从 verify_report.json(Step2b --json-file 产出)提取对拍 case 统计到
+# CASES_PASSED/CASES_TOTAL,供 write_metrics 落进 metrics.json。
+# 缺失/异常(脚本被杀、report 未写、无 case_oks 字段)→ 置空 → metrics 里为 null,
+# reward 侧回退固定档,不影响旧行为。
+extract_case_stats() {
+  CASES_PASSED=""; CASES_TOTAL=""
+  [[ -f "$OUT_DIR/verify_report.json" ]] || return 0
+  local stats
+  stats=$("$PY_BIN" -c "
+import json
+try:
+    oks = (json.load(open('$OUT_DIR/verify_report.json')) or {}).get('case_oks')
+except Exception:
+    oks = None
+print('%d %d' % (sum(1 for x in oks if x), len(oks)) if isinstance(oks, list) and oks else '')
+" 2>/dev/null || true)
+  [[ -n "$stats" ]] && { CASES_PASSED="${stats%% *}"; CASES_TOTAL="${stats##* }"; }
+  return 0
 }
 
 fail_hint() {
@@ -615,7 +642,7 @@ fi
 echo "[ascendc-eval] Step2b verify (NPU lease)"
 VER="$SK/$TRANS_SKILL/scripts/verification_ascendc.py"
 if ! VER_OUT=$(cd "$WORK" && export WORKDIR="$WORK" PYTHONPATH="$SK/$TRANS_SKILL/scripts:${PYTHONPATH:-}" \
-      && run_npu_phase verify "$PY_BIN" "$VER" "$OP_DIR_NAME" 2>&1); then
+      && run_npu_phase verify "$PY_BIN" "$VER" "$OP_DIR_NAME" --json-file "$OUT_DIR/verify_report.json" 2>&1); then
   printf "%s\n" "$VER_OUT" > "$OUT_DIR/verify.log"
   # 在这里就判定,不交给 classify() 的文本推断 —— verify.log 里带 PATH 环境 dump
   # (含 ccec_compiler),classify() 的 "ccec"/"compil" 分支在 对拍 分支之前命中,
@@ -640,6 +667,7 @@ if ! VER_OUT=$(cd "$WORK" && export WORKDIR="$WORK" PYTHONPATH="$SK/$TRANS_SKILL
   else
     _VER_TYPE="ascendc_run_crashed"
   fi
+  extract_case_stats
   write_metrics true false false "" "" "" "数值对拍失败(Result: fail;完整对拍输出如下)" "$OUT_DIR/verify.log" \
     "$_VER_TYPE"
   # 改动3扩展: 对拍失败把 Comparison 段直接打到 stderr(进工具结果)。否则 agent 只拿到
@@ -694,6 +722,7 @@ if [[ -z "$SP" ]]; then
   echo "[ascendc-eval] benchmark FAILED"; fail_hint; exit 1
 fi
 
+extract_case_stats
 write_metrics true true true "$FW" "$IMPL" "$SP" ""
 echo "[ascendc-eval] done — success=true correctness_ok=true speedup_vs_torch=$SP"
 fail_hint

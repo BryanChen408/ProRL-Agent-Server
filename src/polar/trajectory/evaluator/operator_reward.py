@@ -6,7 +6,7 @@ openhands_agent._reward_from_metrics ladder), with the key TRAINING-CORRECTNESS 
   INFRA failures (judge container / task-setup broke) are NOT scored 0 — they map to a RETRY
   signal (status=ERROR), so infra flakes do not poison training with false negatives. This is the
   same discipline as 'no zero-fill' on logprobs: never fabricate a bad signal from an infra failure.
-  OPERATOR failures (the agent's kernel is bad/missing) get the real 0.2..1.0 reward ladder.
+  OPERATOR failures (the agent's kernel is bad/missing) get the real 0..1.0 reward ladder.
 
 Pure + dependency-free; unit-tested standalone (`python operator_reward.py`) or via pytest.
 The Polar `operator_judge` evaluator imports `judge_outcome` to turn judge metrics into
@@ -67,38 +67,69 @@ def classify_infra_error_text(text: str | None) -> str | None:
     return None
 
 
-def reward_from_metrics(metrics: dict) -> float:
-    """Authoritative ladder (mirrors openhands_agent._reward_from_metrics).
+# --------------------- 用例通过率旋钮(correctness 失败档)---------------------
+#
+# correctness_failed / output_precheck_failed(对拍跑完但未全过)不再是固定分:
+#   reward = 0.3 + α × (cases_passed / cases_total)
+# 分子分母来自 judge fresh 容器对数据集原版用例的实测(inject_baseline 覆盖工程副本,
+# agent 无法操纵);只对「对拍跑完」的两档生效 —— 崩溃/编译挂时对拍未完成,case 统计
+# 不可信,不给通过率分。档内渐近 0.4 不触碰:全过即离开本档(correctness_ok=true),
+# 0.4 恒留给「全对但 benchmark 挂」。统计缺失(旧格式/脚本被杀)回退 0.35 = 旧固定档。
+
+POLAR_CASE_PASS_WEIGHT_ENV = "POLAR_CASE_PASS_WEIGHT"   # α,默认 0.10;<=0 回退固定 0.35
+CASE_PASS_FALLBACK = 0.35
+
+
+def case_pass_weight(env: dict | None = None) -> float:
+    source = os.environ if env is None else env
+    try:
+        return float(source.get(POLAR_CASE_PASS_WEIGHT_ENV, "0.10") or "0.10")
+    except (TypeError, ValueError):
+        return 0.10
+
+
+def reward_from_metrics(metrics: dict, env: dict | None = None) -> float:
+    """Authoritative ladder(2026-08 版:失败侧 [0, 0.4],correctness 失败档接入通过率).
 
     not success:  correctness_ok -> 0.4
                   ast_check_ok  -> 按 error_type 细分「编译→能跑→跑完」的进度:
-                      ascendc_compile_failed                 -> 0.25  (AST 过、编译没过)
-                      op_not_registered / ascendc_run_crashed -> 0.3   (编译过但没能有效跑完)
-                      correctness_failed                     -> 0.35  (跑完但精度错,真 D类)
-                      其他(阶段挂但类型未知)                 -> 0.3   (兜底中间档)
-                  else          -> 0.2  (AST 没过 / 没调真 op)
+                      ascendc_compile_failed                 -> 0.1  (AST 过、编译没过)
+                      op_not_registered / ascendc_run_crashed -> 0.2  (编译过但没能有效跑完)
+                      correctness_failed / output_precheck_failed
+                        -> 0.3 + α×用例通过率  (对拍跑完、结果不对;统计缺失回退 0.35)
+                      其他(阶段挂但类型未知)                 -> 0.25 (兜底中间档)
+                  else          -> 0.0  (AST 没过 / 没调真 op:没产出真算子,记 0)
     success:      0.75 + 0.25*tanh(ln speedup)   # 0.5(<-0x) .. 0.75(1x hold) .. ->1.0(soft, no cap)
 
-    0.3 档的拆分动机:原 0.3 把「编译挂 / 注册挂 / 崩溃 / 精度错」混装,GRPO 组内方差=0
-    的 dead group 来源。拆成 0.25/0.3/0.35 后,中档题组内即可拉开;且崩溃(A类)不再和
-    精度错(D类)同分,与 fail_hint 的分类口径一致。
+    档间距拉大的动机:失败侧从 [0.2,0.4] 扩到 [0,0.4],且 0.35 固定档改 10 刻度连续档
+    (10-case 集),消灭「挂 1 个 case 与全挂同分」的组内零方差 dead group。(0.4, 0.5)
+    空挡不动:任何「未全过」严格劣于「全过但 benchmark 挂」,正确性门控语义不变。
     """
     if not bool(metrics.get("success", False)):
         if bool(metrics.get("correctness_ok", False)):
             return 0.4
         if not bool(metrics.get("ast_check_ok", False)):
-            return 0.2
+            return 0.0
         et = str(metrics.get("error_type") or "")
         if et == "ascendc_compile_failed":
-            return 0.25
+            return 0.1
         if et in ("op_not_registered", "ascendc_run_crashed"):
-            return 0.3
+            return 0.2
         # correctness_failed(数值差异)与 output_precheck_failed(形状/dtype/NaN 前置
-        # 检查不通过)同分:两者都是「对拍跑完了、结果不对」,只是给 agent 的修改方向
-        # 不同(调数值 vs 查输出形状推导),那个区分由 fail_hint 的 label 承担。
+        # 检查不通过)同档同公式:两者都是「对拍跑完了、结果不对」,通过率天然区分
+        # 「差点全对」与「全错」;给 agent 的修改方向区分仍由 fail_hint 的 label 承担。
         if et in ("correctness_failed", "output_precheck_failed"):
-            return 0.35
-        return 0.3
+            w = case_pass_weight(env)
+            if w <= 0.0:
+                return CASE_PASS_FALLBACK
+            passed, total = metrics.get("cases_passed"), metrics.get("cases_total")
+            if (isinstance(passed, int) and isinstance(total, int)
+                    and not isinstance(passed, bool) and 0 <= passed <= total and total > 0):
+                # min(...,0.999) 只防脏数据(ratio==1 却判 correctness_failed 的不一致),
+                # 正常档内 ratio ≤ (N-1)/N 由分档互斥保证,不触碰 0.4 档。
+                return 0.3 + w * min(passed / total, 0.999)
+            return CASE_PASS_FALLBACK
+        return 0.25
     try:
         speedup = float((metrics.get("perf_data") or {}).get("speedup_vs_torch", 1.0))
     except (TypeError, ValueError):
@@ -122,7 +153,7 @@ def judge_outcome(metrics: dict | None) -> dict:
     """judge metrics -> {status, retry, reward, error_type, reason} for the Polar evaluator.
 
     infra failure  -> status='ERROR',     retry=True,  reward=None   (rllm retries; NOT a 0-reward episode)
-    operator result-> status='COMPLETED', retry=False, reward=0.2..1.0
+    operator result-> status='COMPLETED', retry=False, reward=0..1.0
     """
     if is_infra_failure(metrics):
         et = (metrics or {}).get("error_type") or "no_metrics"
@@ -175,7 +206,9 @@ def truncation_penalty_knobs(env: dict | None = None) -> tuple[float, float, flo
     return (
         _f(POLAR_TRUNCATION_PENALTY_ENV, "0.01"),
         _f(POLAR_TRUNCATION_PENALTY_CAP_ENV, "0.05"),
-        _f(POLAR_TRUNCATION_PENALTY_FLOOR_ENV, "0.15"),
+        # 阶梯 floor 降到 0(AST 档=0)后,floor 默认必须同步为 0:
+        # max(0 - 扣分, 0.15) 会把重截断的 0 档轨迹倒挂着抬到 0.15。
+        _f(POLAR_TRUNCATION_PENALTY_FLOOR_ENV, "0.0"),
     )
 
 
@@ -534,16 +567,30 @@ def test_terminal_stage_status_table():
 
 def test_ladder_not_success():
     assert reward_from_metrics({"success": False, "correctness_ok": True, "ast_check_ok": True}) == 0.4
-    assert reward_from_metrics({"success": False, "correctness_ok": False, "ast_check_ok": False}) == 0.2
-    # ast 过后的 error_type 细分(六档阶梯)
-    assert reward_from_metrics({"success": False, "ast_check_ok": True, "error_type": "ascendc_compile_failed"}) == 0.25
-    assert reward_from_metrics({"success": False, "ast_check_ok": True, "error_type": "op_not_registered"}) == 0.3
-    assert reward_from_metrics({"success": False, "ast_check_ok": True, "error_type": "ascendc_run_crashed"}) == 0.3
-    assert reward_from_metrics({"success": False, "ast_check_ok": True, "error_type": "correctness_failed"}) == 0.35
-    # 形状/dtype/NaN 前置检查不通过:对拍跑完了、结果不对 -> 与数值差异同档 0.35,
-    # 不是崩溃的 0.30(实测 195351 有 9 个这类被旧判据误判成崩溃)。
-    assert reward_from_metrics({"success": False, "ast_check_ok": True, "error_type": "output_precheck_failed"}) == 0.35
-    assert reward_from_metrics({"success": False, "ast_check_ok": True, "error_type": None}) == 0.3  # 未知类型兜底中间档
+    assert reward_from_metrics({"success": False, "correctness_ok": False, "ast_check_ok": False}) == 0.0
+    # ast 过后的 error_type 细分(新阶梯:0.1/0.2/0.25 + 通过率档)
+    assert reward_from_metrics({"success": False, "ast_check_ok": True, "error_type": "ascendc_compile_failed"}) == 0.1
+    assert reward_from_metrics({"success": False, "ast_check_ok": True, "error_type": "op_not_registered"}) == 0.2
+    assert reward_from_metrics({"success": False, "ast_check_ok": True, "error_type": "ascendc_run_crashed"}) == 0.2
+    assert reward_from_metrics({"success": False, "ast_check_ok": True, "error_type": None}) == 0.25  # 未知类型兜底中间档
+    # 对拍跑完但未全过:0.3 + 0.10×通过率;统计缺失/越界 → 回退 0.35(旧固定档)
+    base = {"success": False, "ast_check_ok": True, "error_type": "correctness_failed"}
+    assert reward_from_metrics(base) == 0.35
+    assert reward_from_metrics({**base, "cases_passed": 0, "cases_total": 10}) == 0.3
+    assert abs(reward_from_metrics({**base, "cases_passed": 5, "cases_total": 10}) - 0.35) < 1e-9
+    assert abs(reward_from_metrics({**base, "cases_passed": 9, "cases_total": 10}) - 0.39) < 1e-9
+    assert reward_from_metrics({**base, "cases_passed": None, "cases_total": 10}) == 0.35
+    assert reward_from_metrics({**base, "cases_passed": 11, "cases_total": 10}) == 0.35  # 越界脏数据
+    assert reward_from_metrics({**base, "cases_passed": 0, "cases_total": 0}) == 0.35    # 空 case 集
+    # 形状/dtype/NaN 前置检查不通过与数值差异同档同公式(通过率天然区分全错与差点全对)
+    pre = {"success": False, "ast_check_ok": True, "error_type": "output_precheck_failed"}
+    assert pre and abs(reward_from_metrics({**pre, "cases_passed": 8, "cases_total": 9}) - (0.3 + 0.1 * 8 / 9)) < 1e-9
+    # ratio==1 的不一致脏数据(clamp 到 0.999):严格低于 0.4 档,不破「未全过 < 全过」的序
+    assert reward_from_metrics({**base, "cases_passed": 10, "cases_total": 10}) < 0.4
+    # 旋钮关闭(灰度回滚)→ 固定 0.35
+    assert reward_from_metrics({**base, "cases_passed": 9, "cases_total": 10},
+                               env={POLAR_CASE_PASS_WEIGHT_ENV: "0"}) == 0.35
+    assert case_pass_weight({POLAR_CASE_PASS_WEIGHT_ENV: "garbage"}) == 0.10  # 垃圾值回落默认
 
 
 def test_ladder_success_speedup():
@@ -584,7 +631,7 @@ def test_classify_infra_error_text_detects_npu_init_not_shape_mismatch():
 
 def test_judge_outcome_operator_failure_scored():
     o = judge_outcome({"success": False, "ast_check_ok": False, "error_type": "correctness_failed"})
-    assert o["status"] == "COMPLETED" and o["retry"] is False and o["reward"] == 0.2
+    assert o["status"] == "COMPLETED" and o["retry"] is False and o["reward"] == 0.0
     o2 = judge_outcome({"success": False, "correctness_ok": True, "error_type": "benchmark_failed"})
     assert o2["reward"] == 0.4 and o2["status"] == "COMPLETED"
 
@@ -612,9 +659,12 @@ def test_truncation_penalty_deduct_cap_floor():
         # cap=0.05:10 次截断只扣 0.05
         adj, ded = apply_truncation_penalty(0.35, 10)
         assert abs(adj - 0.30) < 1e-9 and abs(ded - 0.05) < 1e-9
-        # floor=0.15:0.2 档重截断最多压到 0.15,不穿到 0
+        # floor=0.0(默认,配合 AST 档=0):cap 生效后 0.2 档重截断压到 0.15;0 档轨迹
+        # 扣分被 floor 兜底在 0,不会倒挂抬分
         adj, ded = apply_truncation_penalty(0.2, 10)
         assert abs(adj - 0.15) < 1e-9 and abs(ded - 0.05) < 1e-9
+        adj, ded = apply_truncation_penalty(0.0, 3)
+        assert abs(adj - 0.0) < 1e-9
         # 无截断不动
         assert apply_truncation_penalty(0.35, 0) == (0.35, 0.0)
         # env=0 整体回退
