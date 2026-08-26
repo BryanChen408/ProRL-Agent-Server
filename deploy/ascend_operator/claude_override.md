@@ -60,11 +60,12 @@ bash tools/ascendc_eval_pipeline.sh --op_name {op_name} \
 
 [A1] 照做:asc-devkit 就在 `$ASC_DEVKIT_DIR`。完整错误在 `judge_out/metrics_error.log`,先读它。
 
-## Phase 2 / Phase 6
+## 用例精简已移除(原 Phase 2 / Phase 6)
 
-判分**恒用数据集原版全量用例**,`{op_name}/{op_name}.json` 在判分时会被覆盖。
-所以 Phase 2(用例精简)只对你自己的迭代提速有意义,Phase 6(全量恢复)对判分无影响。
-做或不做都可以,不要为它们花额外轮次。
+判分**恒用数据集原版用例**:`{op_name}/{op_name}.json` 在每次评测(含你的自检)时都会被
+`input/` 里的数据集原件覆盖,改它、精简它、备份它都**无效**。上游的 Phase 2(用例精简)与
+Phase 6(全量恢复)因此已从工作流移除。不要自行精简、修改或备份任何 `.json` 用例文件,
+把轮次留给实现与修复迭代。
 
 ## 提交物
 

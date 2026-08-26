@@ -43,13 +43,6 @@ argument-hint: >
 - 设计路径: {design.md (简单算子) / TileLang (复杂算子)}
 - 最终结果: SKIP / PASS / FAIL (tilelang) | PASS / FAIL (ascendc)
 
-## 阶段零: Case 精简
-
-- 结果: 通过 / 失败 / 跳过
-- 原始 case 数: {n}
-- 精简后 case 数: {n}
-- 备注: {如有异常情况}
-
 ## 阶段〇.五: 设计文档 (仅简单算子路径)
 
 - 结果: 通过 / 失败 / 跳过
