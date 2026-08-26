@@ -285,14 +285,14 @@ def test_truncation_events_penalize_reward():
 def test_truncation_penalty_cap_and_floor():
     saved = _penalty_env_saved()
     try:
-        # 总扣分封顶 0.05:0.35 档 10 次截断 -> 0.30(不无限叠加)
+        # 总扣分封顶 0.05:0.35 档(correctness_failed 无 case 统计,回退固定档)10 次截断 -> 0.30(不无限叠加)
         many = [Trace(finish_reason="length") for _ in range(10)]
         res, *_ = _run({"success": False, "ast_check_ok": True, "correctness_ok": False,
                         "error_type": "correctness_failed"}, traces=many)
         assert abs(res.outcome_reward - 0.30) < 1e-9, res.outcome_reward
-        # 下限 0.15:submission_missing 的 0.2 档重压不穿到 0
+        # 下限 0.0:submission_missing 落到 0 档(AST 不过),重截断被 floor 兜底在 0,不倒挂抬分
         res2, *_ = _run(None, impl=False, traces=many)
-        assert abs(res2.outcome_reward - 0.15) < 1e-9, res2.outcome_reward
+        assert abs(res2.outcome_reward - 0.0) < 1e-9, res2.outcome_reward
         assert res2.metadata["error_type"] == "submission_missing"
     finally:
         _penalty_env_restore(saved)
@@ -316,7 +316,7 @@ def test_truncation_penalty_env_off():
 def test_operator_failure_scored_not_raised():
     res, *_ = _run({"success": False, "ast_check_ok": False, "correctness_ok": False,
                     "error_type": "correctness_failed"})
-    assert res.outcome_reward == 0.2 and res.metadata["error_type"] == "correctness_failed"
+    assert res.outcome_reward == 0.0 and res.metadata["error_type"] == "correctness_failed"
     res2, *_ = _run({"success": False, "correctness_ok": True, "error_type": "benchmark_failed"})
     assert res2.outcome_reward == 0.4
 
@@ -400,7 +400,7 @@ def test_infra_timeout_raises():
 
 def test_submission_missing_is_operator_floor():
     res, _agent, judge = _run({"success": True}, impl=False)  # agent wrote no kernel
-    assert res.outcome_reward == 0.2 and res.metadata["error_type"] == "submission_missing"
+    assert res.outcome_reward == 0.0 and res.metadata["error_type"] == "submission_missing"
     assert len(judge.execs) == 0  # judge never ran (nothing to score)
 
 
@@ -487,7 +487,7 @@ def test_missing_submission_artifact_scores_without_judge_runtime():
             task_id="t",
             submission_missing=True,
         ))
-    assert res.outcome_reward == 0.2
+    assert res.outcome_reward == 0.0
     assert res.metadata["error_type"] == "submission_missing"
 
 
@@ -637,7 +637,7 @@ def test_cannbot_judge_verify_crash_without_json_scores_operator_failure():
             task_id="t",
         ))
 
-    assert res.outcome_reward == 0.2
+    assert res.outcome_reward == 0.0
     assert res.metadata["error_type"] == "correctness_failed"
     assert len(judge.execs) == 2
 

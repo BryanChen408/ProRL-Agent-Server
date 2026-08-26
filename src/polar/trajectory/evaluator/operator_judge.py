@@ -615,14 +615,16 @@ class OperatorJudgeEvaluator(BaseTrajectoryEvaluator):
                 f"metrics at {artifacts_dir / 'metrics.json'}"
             )
         # 过程奖励(dev_04/dev_05):infra retry 分支在上面已经 raise,走不到这里(C4)。
-        # 合并顺序:先 process 塑形(±Δ,floor 0.15 / ceil 1.0),再截断惩罚(独立作用于
+        # 合并顺序:先 process 塑形(±Δ,floor 0.0 / ceil 1.0),再截断惩罚(独立作用于
         # 最终分,其内部 floor 依然兜底)。校验不过/文件缺失 -> 分量 0,与改造前逐分一致。
         events, process_why = self._load_process_events(artifacts_dir, metrics)
         if events is not None:
             r_proc, process_components = process_reward(events, metrics)
         else:
             r_proc, process_components = 0.0, {"disabled": process_why}
-        base_reward = min(max(outcome["reward"] + r_proc, 0.15), 1.0)
+        # floor 0.0:阶梯已含 0 档(AST 不过),max(0 + 负 process, 0.15) 会倒挂着抬分;
+        # clamp 到 0 保持 reward 非负的对外约定。
+        base_reward = min(max(outcome["reward"] + r_proc, 0.0), 1.0)
         # 截断事件轻扣(空截断在阶梯里原本零成本,salvage 救回后与干净 session 同分 -> 无负
         # 方向 -> 永不收敛;见 operator_reward.apply_truncation_penalty)。截断段 token 本体
         # 仍不过梯度。扣量写进 metadata,原 reward 可还原(reward + truncation_penalty)。
@@ -640,6 +642,16 @@ class OperatorJudgeEvaluator(BaseTrajectoryEvaluator):
                 "success": bool(metrics.get("success", False)),
                 "error_type": outcome["error_type"],
                 "speedup_vs_torch": (metrics.get("perf_data") or {}).get("speedup_vs_torch"),
+                # 对拍 case 统计(通过率档的输入;缺失为 None,reward 侧已回退固定档)
+                "cases_passed": metrics.get("cases_passed"),
+                "cases_total": metrics.get("cases_total"),
+                "case_pass_ratio": (
+                    round(metrics["cases_passed"] / metrics["cases_total"], 6)
+                    if isinstance(metrics.get("cases_passed"), int)
+                    and isinstance(metrics.get("cases_total"), int)
+                    and metrics["cases_total"] > 0
+                    else None
+                ),
                 "truncation_events": truncation_events,
                 "truncation_penalty": truncated_deduction,
                 "submission_used": submission_used,  # which impl scored (best-so-far vs final)

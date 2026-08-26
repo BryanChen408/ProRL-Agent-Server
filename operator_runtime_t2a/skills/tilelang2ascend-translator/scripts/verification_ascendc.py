@@ -1536,10 +1536,15 @@ def main():
 
     report = _run_verification(args.op, non_compute=args.non_compute)
 
-    # JSON 文件输出模式（供批量模式子进程使用，不受 stdout 污染影响）
+    # JSON 文件输出模式（供批量模式子进程与固定评测入口使用）
     if args.json_file:
         with open(args.json_file, 'w') as f:
             json.dump(report, f, default=str)
+        # 人类可读报告照常打印:固定入口(ascendc_eval_pipeline.sh)靠 stdout 里的
+        # case[N]:/max_abs_diff= 行做错误分类与失败详情转储,json 只是并行产出物;
+        # 批量模式子进程 stdout 被 capture_output 收走,不受影响。
+        _print_report(report,
+                      extra_header_lines=[f"Kernel    : {report['kernel_build_dir']}"])
         raise SystemExit(0 if report["ok"] else 1)
 
     # JSON stdout 输出模式（保留向后兼容）

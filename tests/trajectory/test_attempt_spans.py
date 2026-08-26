@@ -1,7 +1,7 @@
 """P3 attempt-span segment model tests (plan §6.2/§6.3)— 与 polar_zxp 原版对齐。
 
 差异适配:pipeline 名 ascendc_eval_pipeline.sh、verdict 前缀 [ascendc-eval]、
-ladder 用本仓六档(0.2-0.75 soft-saturating):correctness_failed → 0.35;
+ladder 用本仓新阶梯(0-0.75 soft-saturating):correctness_failed 无 case 统计 → 回退 0.35;
 success + speedup=2.0 → 0.75+0.25*(4-1)/(4+1) = 0.9。
 原版 trapped-recovery 跨链用例改写为通用前缀断链(本仓无 trapped_recovery)。
 
@@ -31,7 +31,7 @@ _VERDICT_OK = (
 _VERDICT_FAIL = (
     "[ascendc-eval] verdict — success=False ast_check_ok=True correctness_ok=False "
     "error_type=correctness_failed speedup_vs_torch=None"
-)  # 本仓 ladder: 0.35
+)  # 本仓 ladder: correctness_failed 无 case 统计回退 0.35
 
 
 def _tool_calls(name: str, call_id: str, command: str | None = None) -> list[dict]:
