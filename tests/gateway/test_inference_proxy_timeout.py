@@ -79,3 +79,22 @@ def test_pause_reports_drained_when_no_generation_is_active() -> None:
         assert status["inflight"] == 0
 
     asyncio.run(run())
+
+
+def test_pause_can_close_admission_without_waiting_for_drain() -> None:
+    async def run() -> None:
+        client = InferenceClient("http://127.0.0.1:30000", SGLangEngine())
+        client._inflight_generations = 1
+
+        status = await client.pause_generation(
+            timeout_seconds=300.0,
+            wait_for_drain=False,
+        )
+
+        assert status["paused"] is True
+        assert status["drained"] is False
+        assert status["timed_out"] is False
+        assert status["wait_for_drain"] is False
+        assert status["inflight"] == 1
+
+    asyncio.run(run())

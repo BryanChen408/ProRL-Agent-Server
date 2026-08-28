@@ -109,6 +109,7 @@ class GatewayNodeManager:
         self._heartbeat_interval_seconds = heartbeat_interval_seconds
         self._control_client: httpx.AsyncClient | None = None
         self._heartbeat_task: asyncio.Task[None] | None = None
+        self._policy_cleanup_tasks: set[asyncio.Task[None]] = set()
 
     async def start(self) -> None:
         await self._dispatcher.start()
@@ -128,6 +129,10 @@ class GatewayNodeManager:
             await self._control_client.aclose()
             self._control_client = None
         await self._dispatcher.stop()
+        cleanup_tasks = list(self._policy_cleanup_tasks)
+        if cleanup_tasks:
+            await asyncio.gather(*cleanup_tasks, return_exceptions=True)
+        self._policy_cleanup_tasks.clear()
         await self._client.aclose()
 
     async def _register_with_rollout_server(self) -> None:
@@ -226,10 +231,53 @@ class GatewayNodeManager:
             raise
 
     async def cancel(self, session_id: str, *, reason: str | None = None) -> bool:
-        cancelled = await self._dispatcher.cancel(session_id, reason=reason)
+        managed = await self._dispatcher.cancel(session_id, reason=reason)
+        cancelled = managed is not None
         if cancelled and reason != "pipeline_budget_exceeded":
             await self._close_inflight_generations(session_id, reason=reason or "cancel")
+        if managed is not None and reason == "policy_cutoff":
+            cleanup_task = asyncio.create_task(
+                self._cleanup_policy_cutoff_session(managed),
+                name=f"polar-policy-cutoff-{session_id}",
+            )
+            cleanup_tasks = getattr(self, "_policy_cleanup_tasks", None)
+            if cleanup_tasks is None:
+                cleanup_tasks = set()
+                self._policy_cleanup_tasks = cleanup_tasks
+            cleanup_tasks.add(cleanup_task)
+            cleanup_task.add_done_callback(cleanup_tasks.discard)
         return cancelled
+
+    async def _cleanup_policy_cutoff_session(self, managed: ManagedSession) -> None:
+        """Stop agent/evaluator containers after a logical policy cutoff.
+
+        The DELETE request returns after this task is scheduled, so training waits for
+        the inference fence but not Docker teardown.  Runtime ``stop`` is idempotent;
+        normal POSTRUN cleanup may race this task safely.
+        """
+        prewarm = managed.eval_prewarm_task
+        if prewarm is not None and not prewarm.done():
+            prewarm.cancel()
+
+        runtimes: list[BaseRuntime] = []
+        for runtime in (managed.runtime, managed.eval_runtime):
+            if runtime is not None and all(runtime is not existing for existing in runtimes):
+                runtimes.append(runtime)
+        if runtimes:
+            results = await asyncio.gather(
+                *(runtime.cancel() for runtime in runtimes),
+                return_exceptions=True,
+            )
+            for runtime, result in zip(runtimes, results, strict=True):
+                if isinstance(result, BaseException):
+                    logger.warning(
+                        "Policy-cutoff cleanup failed for runtime %s session %s: %s",
+                        runtime.runtime_id,
+                        managed.session_id,
+                        result,
+                    )
+        if prewarm is not None:
+            await asyncio.gather(prewarm, return_exceptions=True)
 
     async def active_sessions(self) -> int:
         return await self._dispatcher.active_count()
@@ -257,10 +305,18 @@ class GatewayNodeManager:
         self._start_execution_deadline(managed)
         managed.timer.mark("init", "started")
         try:
+            if managed.cancel_requested:
+                return
             runtime_spec = self._resolve_runtime_spec(request)
             runtime = create_runtime(runtime_spec, request.session_id, managed.session_dir)
             managed.runtime = runtime
+            if managed.cancel_requested:
+                await runtime.cancel()
+                return
             await self._await_with_budget(runtime.start(), managed)
+            if managed.cancel_requested:
+                await runtime.cancel()
+                return
             # Run ordered prepare actions
             await self._run_runtime_prepare(runtime, runtime_spec, request, managed)
         except GatewayExecutionTimeout as exc:
@@ -549,6 +605,8 @@ class GatewayNodeManager:
         self, managed: ManagedSession
     ) -> BaseRuntime | None:
         """Create and prepare a fresh runtime for the evaluator. Returns None on failure."""
+        if managed.cancel_reason == "policy_cutoff":
+            return None
         request = managed.request
         runtime_spec = self._resolve_eval_runtime_spec(request)
         eval_session_dir = managed.session_dir / "eval_runtime"
@@ -558,7 +616,13 @@ class GatewayNodeManager:
         eval_runtime = create_runtime(
             runtime_spec, f"{request.session_id}-eval", eval_session_dir
         )
+        managed.eval_runtime = eval_runtime
         try:
+            if managed.cancel_reason == "policy_cutoff":
+                await eval_runtime.cancel()
+                if managed.eval_runtime is eval_runtime:
+                    managed.eval_runtime = None
+                return None
             await self._await_with_budget(eval_runtime.start(), managed)
             eval_actions = (
                 runtime_spec.eval_prepare
@@ -581,10 +645,17 @@ class GatewayNodeManager:
             # pipeline 一跑就 input_load_failed、整个 session 被判重试。在这里先核对,
             # 没传上就按 prepare 动作补传,把 golden missing 挡在 pipeline 开跑之前。
             await self._verify_eval_golden_input(eval_runtime, request, eval_actions)
+            if managed.cancel_reason == "policy_cutoff":
+                await eval_runtime.cancel()
+                if managed.eval_runtime is eval_runtime:
+                    managed.eval_runtime = None
+                return None
             return eval_runtime
         except asyncio.CancelledError:
             with suppress(Exception):
                 await eval_runtime.stop()
+            if managed.eval_runtime is eval_runtime:
+                managed.eval_runtime = None
             raise
         except Exception as exc:
             logger.warning(
@@ -594,6 +665,8 @@ class GatewayNodeManager:
             )
             with suppress(Exception):
                 await eval_runtime.stop()
+            if managed.eval_runtime is eval_runtime:
+                managed.eval_runtime = None
             return None
 
     async def _acquire_prepared_eval_runtime(
@@ -657,6 +730,8 @@ class GatewayNodeManager:
                         eval_runtime, request.session_id, "eval runtime"
                     )
                 )
+                if managed.eval_runtime is eval_runtime:
+                    managed.eval_runtime = None
             if managed.runtime is not None:
                 stop_tasks.append(
                     self._stop_runtime_best_effort(
@@ -846,6 +921,10 @@ class GatewayNodeManager:
         evaluator_spec = request.evaluator
         if evaluator_spec is None:
             return trajectory
+        if managed.cancel_reason == "policy_cutoff":
+            return trajectory.model_copy(
+                update={"status": "ERROR", "error": "cancelled at policy cutoff"}
+            )
 
         live_runtime = managed.runtime
         if live_runtime is None:
@@ -884,6 +963,9 @@ class GatewayNodeManager:
         last_exc: Exception | None = None
         evaluator = self.evaluators.create(strategy_spec)
         for attempt in range(1, max_attempts + 1):
+            if managed.cancel_reason == "policy_cutoff":
+                last_exc = RuntimeError("cancelled at policy cutoff")
+                break
             try:
                 eval_result = await self._await_with_budget(
                     evaluator.evaluate(
@@ -906,6 +988,8 @@ class GatewayNodeManager:
                 break
             except Exception as exc:  # noqa: BLE001
                 last_exc = exc
+                if managed.cancel_reason == "policy_cutoff":
+                    break
                 if attempt >= max_attempts or not _is_retryable_judge_infra(exc):
                     break
                 # judge 级重试: infra 失败(golden 缺失/NPU 不可用/容器传输/超时)只重起
@@ -920,6 +1004,8 @@ class GatewayNodeManager:
                     if isinstance(judge_rt, BaseRuntime):
                         with suppress(Exception):
                             await judge_rt.stop()
+                        if managed.eval_runtime is judge_rt:
+                            managed.eval_runtime = None
                     judge_rt = await self._prepare_eval_runtime(managed)
                     if judge_rt is None:
                         logger.warning(
@@ -934,6 +1020,8 @@ class GatewayNodeManager:
             # prewarm 那个;在这里显式停掉,避免容器泄漏。
             with suppress(Exception):
                 await judge_rt.stop()
+            if managed.eval_runtime is judge_rt:
+                managed.eval_runtime = None
 
         if last_exc is not None:
             logger.exception(
@@ -959,6 +1047,10 @@ class GatewayNodeManager:
         evaluator_spec = request.evaluator
         if evaluator_spec is None:
             return trajectory
+        if managed.cancel_reason == "policy_cutoff":
+            return trajectory.model_copy(
+                update={"status": "ERROR", "error": "cancelled at policy cutoff"}
+            )
 
         live_runtime = managed.runtime
         if live_runtime is None:
@@ -1015,6 +1107,9 @@ class GatewayNodeManager:
             max_attempts = 1 + self._judge_infra_retries(evaluator_spec)
             evaluator = self.evaluators.create(strategy_spec)
             for attempt in range(1, max_attempts + 1):
+                if managed.cancel_reason == "policy_cutoff":
+                    last_exc = RuntimeError("cancelled at policy cutoff")
+                    break
                 try:
                     eval_result = await self._await_with_budget(
                         evaluator.evaluate(
@@ -1038,6 +1133,8 @@ class GatewayNodeManager:
                     break
                 except Exception as exc:  # noqa: BLE001
                     last_exc = exc
+                    if managed.cancel_reason == "policy_cutoff":
+                        break
                     if attempt >= max_attempts or not _is_retryable_judge_infra(exc):
                         break
                     # judge 级重试: infra 失败只重起 judge runtime 重判,不牵连 session。
@@ -1051,6 +1148,8 @@ class GatewayNodeManager:
                     if isinstance(judge_rt, BaseRuntime):
                         with suppress(Exception):
                             await judge_rt.stop()
+                        if managed.eval_runtime is judge_rt:
+                            managed.eval_runtime = None
                     judge_rt = await self._prepare_eval_runtime(managed)
                     if judge_rt is None:
                         logger.warning(
@@ -1072,6 +1171,8 @@ class GatewayNodeManager:
                 await self._stop_runtime_best_effort(
                     judge_rt, request.session_id, "eval runtime"
                 )
+                if managed.eval_runtime is judge_rt:
+                    managed.eval_runtime = None
 
         if last_exc is not None:
             return trajectory.model_copy(
@@ -1392,6 +1493,8 @@ class GatewayNodeManager:
         )
 
     async def _run_postrun_steps(self, managed: ManagedSession) -> None:
+        if managed.cancel_reason == "policy_cutoff":
+            return
         if not managed.postrun_steps or managed.runtime is None:
             return
         log_dir = managed.session_dir / "logs" / "teardown"

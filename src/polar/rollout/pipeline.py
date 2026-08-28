@@ -166,6 +166,18 @@ class Pipeline:
                 future,
                 state_callback,
             )
+        except asyncio.CancelledError:
+            # A policy cutoff cancels the owning task.  Close the concrete gateway
+            # session before allowing cancellation to unwind so an already accepted
+            # request cannot remain queued and resume under the next policy.
+            await asyncio.shield(
+                self._cleanup_session(
+                    session,
+                    reason=session.cancel_reason or "task_cancelled",
+                    strict=True,
+                )
+            )
+            raise
         except TimeoutError as exc:
             logger.warning("Session %s timed out in rollout pipeline", session.session_id)
             result = self._failure_result(session, status=SessionStatus.TIMEOUT, error=str(exc))
@@ -192,6 +204,8 @@ class Pipeline:
             raise RuntimeError("pipeline has not been started")
 
         while True:
+            if session.cancel_requested:
+                raise asyncio.CancelledError
             node = self.scheduler.acquire_node()
             if node is None:
                 remaining_timeout = self._remaining_timeout_seconds(session)
@@ -220,6 +234,12 @@ class Pipeline:
                     timeout=min(30.0, dispatch_timeout),
                 )
                 response.raise_for_status()
+                if session.cancel_requested:
+                    await self._cleanup_session(
+                        session,
+                        reason=session.cancel_reason or "task_cancelled",
+                    )
+                    raise asyncio.CancelledError
                 return dispatch_request
             except Exception as exc:
                 if await self._accepted_duplicate_dispatch(
@@ -429,17 +449,32 @@ class Pipeline:
             raise TimeoutError("session callback deadline expired")
         return remaining
 
-    async def _cleanup_session(self, session: SessionContext) -> None:
+    async def _cleanup_session(
+        self,
+        session: SessionContext,
+        *,
+        reason: str | None = None,
+        strict: bool = False,
+    ) -> None:
         if self._client is None or session.gateway_url is None:
+            if reason:
+                session.cancel_acknowledged = True
             return
 
         try:
             response = await self._client.delete(
-                f"{session.gateway_url}/sessions/{session.session_id}"
+                f"{session.gateway_url}/sessions/{session.session_id}",
+                params={"reason": reason} if reason else None,
             )
             if response.status_code not in {200, 404}:
                 response.raise_for_status()
-        except Exception:
+            if reason:
+                session.cancel_acknowledged = True
+        except Exception as exc:
+            if reason:
+                session.cancel_error = f"{type(exc).__name__}: {exc}"
+            if strict:
+                raise
             logger.warning(
                 "Failed to clean up session %s on gateway %s",
                 session.session_id,

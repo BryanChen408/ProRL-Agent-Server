@@ -69,6 +69,8 @@ class ManagedSession:
     final_result: SessionResult | None = None
     postrun_steps: list[ExecInput] = field(default_factory=list)
     eval_prewarm_task: asyncio.Task | None = None
+    eval_runtime: BaseRuntime | None = None
+    ready_slot_held: bool = False
     cancel_requested: bool = False
     cancel_reason: str | None = None
     cancel_event: asyncio.Event = field(default_factory=asyncio.Event)
@@ -105,6 +107,7 @@ class SessionDispatcher:
         self._postrun_queue: asyncio.Queue[str | object] = asyncio.Queue()
         self._ready_slots = asyncio.Semaphore(max_run_workers)
         self._sessions: dict[str, ManagedSession] = {}
+        self._cancelled_before_enqueue: set[str] = set()
         self._lock = asyncio.Lock()
         self._workers: list[asyncio.Task[None]] = []
         self._started = False
@@ -141,26 +144,45 @@ class SessionDispatcher:
         if not self._started:
             raise RuntimeError("dispatcher has not been started")
         async with self._lock:
+            if managed.session_id in self._cancelled_before_enqueue:
+                raise ValueError(
+                    f"session {managed.session_id} was cancelled before enqueue"
+                )
             if managed.session_id in self._sessions:
                 raise ValueError(f"session {managed.session_id} is already enqueued")
             self._sessions[managed.session_id] = managed
         await self._init_queue.put(managed.session_id)
 
-    async def cancel(self, session_id: str, *, reason: str | None = None) -> bool:
+    async def cancel(
+        self,
+        session_id: str,
+        *,
+        reason: str | None = None,
+    ) -> ManagedSession | None:
         should_enqueue_postrun = False
         async with self._lock:
             managed = self._sessions.get(session_id)
             if managed is None:
-                return False
+                if reason == "policy_cutoff":
+                    # DELETE may race the dispatch coroutine between registry creation
+                    # and dispatcher enqueue. Keep a tombstone under the same lock used
+                    # by enqueue so that a successfully acknowledged cutoff cannot be
+                    # followed by a newly live session/container.
+                    self._cancelled_before_enqueue.add(session_id)
+                return None
             if managed.cancel_requested:
-                return True
+                if reason == "policy_cutoff":
+                    managed.cancel_reason = reason
+                return managed
             managed.cancel_requested = True
             managed.cancel_reason = reason
             managed.cancel_event.set()
             # If the session is parked in READY (holding a ready slot), release it
             # and transition to POSTRUN so the postrun worker picks it up.
             if managed.stage == SessionStage.READY and not managed.inflight:
-                self._ready_slots.release()
+                if managed.ready_slot_held:
+                    self._ready_slots.release()
+                    managed.ready_slot_held = False
                 managed.stage = SessionStage.POSTRUN
                 managed.inflight = False
                 should_enqueue_postrun = True
@@ -168,12 +190,12 @@ class SessionDispatcher:
                 managed.stage = SessionStage.POSTRUN
                 managed.inflight = False
                 should_enqueue_postrun = True
-        if managed.runtime is not None:
+        if managed.runtime is not None and reason != "policy_cutoff":
             await managed.runtime.cancel()
         if should_enqueue_postrun:
             self._notify_stage_change(managed)
             await self._postrun_queue.put(session_id)
-        return True
+        return managed
 
     async def active_count(self) -> int:
         return (await self.snapshot()).active_count
@@ -268,9 +290,15 @@ class SessionDispatcher:
             managed = self._sessions.get(session_id)
             if managed is None:
                 return None
+            expected_stage = SessionStage.READY if from_ready else stage
+            if managed.stage != expected_stage:
+                # Cancellation can move a queued INIT/READY item to POSTRUN while
+                # its old queue entry is still waiting.  Never let that stale item
+                # move the session backwards or enqueue POSTRUN twice.
+                return None
             if from_ready:
-                # READY slot was granted via semaphore; RUNNING consumes it.
-                pass
+                if not managed.ready_slot_held:
+                    return None
             managed.stage = stage
             managed.inflight = True
         self._notify_stage_change(managed)
@@ -298,7 +326,9 @@ class SessionDispatcher:
     async def _transition_to_postrun(self, managed: ManagedSession) -> None:
         # The RUN callback is done (or was skipped). The ready slot is released
         # back to the pool on exit of RUNNING.
-        self._ready_slots.release()
+        if managed.ready_slot_held:
+            self._ready_slots.release()
+            managed.ready_slot_held = False
         await self._move_to_postrun(managed, release_ready=False)
 
     async def _move_to_postrun(
@@ -310,8 +340,9 @@ class SessionDispatcher:
                 return
             if managed.stage == SessionStage.POSTRUN:
                 return
-            if release_ready and managed.stage == SessionStage.READY and not managed.inflight:
+            if release_ready and managed.ready_slot_held:
                 self._ready_slots.release()
+                managed.ready_slot_held = False
             managed.stage = SessionStage.POSTRUN
             managed.inflight = False
             transitioned = True
@@ -337,9 +368,12 @@ class SessionDispatcher:
         # If we managed to acquire the semaphore despite cancellation, release it
         # so it doesn't leak to a later session.
         acquired = acquire_task in done and not acquire_task.cancelled() and acquire_task.exception() is None
+        if acquired:
+            managed.ready_slot_held = True
         if managed.cancel_event.is_set() or managed.final_result is not None:
             if acquired:
                 self._ready_slots.release()
+                managed.ready_slot_held = False
             return False
         return acquired
 

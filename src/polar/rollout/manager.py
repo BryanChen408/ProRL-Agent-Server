@@ -43,6 +43,10 @@ class _TaskRecord:
     results: list[SessionResult] = field(default_factory=list)
     result_paths: list[str] = field(default_factory=list)
     session_states: dict[str, str] = field(default_factory=dict)
+    sessions: dict[str, SessionContext] = field(default_factory=dict)
+    background_task: asyncio.Task[None] | None = None
+    cancel_requested: bool = False
+    cancel_reason: str | None = None
 
 
 def _harness_from_request(request: TaskRequest) -> str | None:
@@ -104,6 +108,7 @@ class RolloutManager:
         self.scheduler = scheduler
         self.event_bus = event_bus or EventBus()
         self._tasks: dict[str, _TaskRecord] = {}
+        self._cancelled_before_submit: dict[str, str] = {}
         self._lock = threading.RLock()
         self._loop: asyncio.AbstractEventLoop | None = None
 
@@ -121,6 +126,22 @@ class RolloutManager:
         """Register a task and run it in the background. Returns task_id immediately."""
         self._loop = asyncio.get_running_loop()
         with self._lock:
+            pre_cancel_reason = self._cancelled_before_submit.get(request.task_id)
+            if pre_cancel_reason is not None:
+                self._tasks[request.task_id] = _TaskRecord(
+                    task_id=request.task_id,
+                    status="cancelled",
+                    total_sessions=request.num_samples,
+                    harness=_harness_from_request(request),
+                    model=_model_from_request(request),
+                    cancel_requested=True,
+                    cancel_reason=pre_cancel_reason,
+                )
+                logger.info(
+                    "Task %s arrived after policy-cutoff cancellation; not starting",
+                    request.task_id,
+                )
+                return request.task_id
             existing = self._tasks.get(request.task_id)
             if existing is not None and existing.status == "running":
                 raise ValueError(f"task {request.task_id} is already running")
@@ -141,7 +162,12 @@ class RolloutManager:
                 "num_samples": request.num_samples,
             },
         )
-        asyncio.create_task(self._run_task_background(request))
+        background_task = asyncio.create_task(
+            self._run_task_background(request),
+            name=f"polar-rollout-{request.task_id}",
+        )
+        with self._lock:
+            self._tasks[request.task_id].background_task = background_task
         return request.task_id
 
     async def _run_task_background(self, request: TaskRequest) -> None:
@@ -149,6 +175,17 @@ class RolloutManager:
         try:
             result = await self._execute_task(request)
             logger.info("Task %s completed with %d results", request.task_id, len(result.results))
+        except asyncio.CancelledError:
+            with self._lock:
+                record = self._tasks.get(request.task_id)
+                if record is not None:
+                    record.status = "cancelled"
+                    record.updated_at = time.time()
+            self._emit(
+                "task.completed",
+                {"task_id": request.task_id, "status": "cancelled"},
+            )
+            return
         except Exception:
             logger.exception("Background task %s failed", request.task_id)
             self._emit("task.completed", {"task_id": request.task_id, "status": "failed"})
@@ -189,6 +226,102 @@ class RolloutManager:
                 record.session_states[session_id] = status
                 record.updated_at = time.time()
 
+    async def cancel_tasks(
+        self,
+        task_ids: list[str],
+        *,
+        reason: str = "policy_cutoff",
+    ) -> dict[str, Any]:
+        """Logically cancel tasks and wait only for gateway cancellation acknowledgement.
+
+        Cancelling the background task propagates into every ``Pipeline`` session.  Each
+        session's cancellation handler closes its gateway session (which fences inference
+        immediately); runtime/container teardown remains gateway-owned background cleanup.
+        Late callbacks find no pending future and cannot resurrect a cancelled task.
+        """
+        requested = list(dict.fromkeys(str(task_id) for task_id in task_ids))
+        tasks_to_cancel: list[asyncio.Task[None]] = []
+        cancelled: list[str] = []
+        already_terminal: list[str] = []
+        cancelled_before_submit: list[str] = []
+        missing: list[str] = []
+        session_count = 0
+
+        with self._lock:
+            for task_id in requested:
+                record = self._tasks.get(task_id)
+                if record is None:
+                    if reason == "policy_cutoff":
+                        # The VIME asyncio worker can publish its local task ID just
+                        # before the HTTP submit reaches us. Fence that single-use ID
+                        # now so a late submit cannot create an orphan session after
+                        # the boundary has already been acknowledged.
+                        self._cancelled_before_submit[task_id] = reason
+                        cancelled_before_submit.append(task_id)
+                    else:
+                        missing.append(task_id)
+                    continue
+                if record.status in {"completed", "failed", "cancelled"}:
+                    already_terminal.append(task_id)
+                    continue
+
+                record.cancel_requested = True
+                record.cancel_reason = reason
+                record.status = "cancelled"
+                record.updated_at = time.time()
+                for session in record.sessions.values():
+                    session.cancel_requested = True
+                    session.cancel_reason = reason
+                session_count += len(record.sessions)
+                background_task = record.background_task
+                if background_task is not None and not background_task.done():
+                    tasks_to_cancel.append(background_task)
+                cancelled.append(task_id)
+
+        for task in tasks_to_cancel:
+            task.cancel()
+        if tasks_to_cancel:
+            await asyncio.gather(*tasks_to_cancel, return_exceptions=True)
+
+        cancel_errors: dict[str, str] = {}
+        with self._lock:
+            for task_id in cancelled:
+                record = self._tasks[task_id]
+                for session in record.sessions.values():
+                    if (
+                        not session.cancel_acknowledged
+                        and (
+                            session.gateway_url is None
+                            or session.rollout_result is not None
+                        )
+                    ):
+                        # No gateway assignment means the session never existed remotely;
+                        # a terminal rollout_result means normal completion won the cancel
+                        # race and normal Pipeline cleanup already owns its teardown.
+                        session.cancel_acknowledged = True
+                    if session.cancel_error:
+                        cancel_errors[session.session_id] = session.cancel_error
+                    elif not session.cancel_acknowledged:
+                        cancel_errors[session.session_id] = (
+                            "gateway cancellation was not acknowledged"
+                        )
+
+        return {
+            "requested": len(requested),
+            "cancelled": len(cancelled),
+            "already_terminal": len(already_terminal),
+            "cancelled_before_submit": len(cancelled_before_submit),
+            "missing": missing,
+            "sessions_cancel_requested": session_count,
+            "all_acknowledged": not missing and not cancel_errors,
+            "errors": cancel_errors,
+            "task_ids": {
+                "cancelled": cancelled,
+                "already_terminal": already_terminal,
+                "cancelled_before_submit": cancelled_before_submit,
+            },
+        }
+
     async def _execute_task(self, request: TaskRequest) -> TaskResult:
         sessions = [
             SessionContext(
@@ -199,6 +332,13 @@ class RolloutManager:
             )
             for _ in range(request.num_samples)
         ]
+        with self._lock:
+            record = self._tasks[request.task_id]
+            record.sessions = {session.session_id: session for session in sessions}
+            if record.cancel_requested:
+                for session in sessions:
+                    session.cancel_requested = True
+                    session.cancel_reason = record.cancel_reason
 
         async def _on_result(result: SessionResult) -> None:
             result_path = self.pipeline.result_path_for(
@@ -208,6 +348,8 @@ class RolloutManager:
             )
             with self._lock:
                 record = self._tasks[request.task_id]
+                if record.cancel_requested:
+                    return
                 record.completed_sessions += 1
                 if result.status in {SessionStatus.ERROR, SessionStatus.TIMEOUT}:
                     record.errored_sessions += 1
@@ -253,6 +395,13 @@ class RolloutManager:
         ordered_results = list(results)
         with self._lock:
             record = self._tasks[request.task_id]
+            if record.cancel_requested:
+                return TaskResult(
+                    task_id=request.task_id,
+                    status="cancelled",
+                    results=[],
+                    result_paths=[],
+                )
             record.status = "completed"
             record.completed_sessions = len(ordered_results)
             record.results = ordered_results

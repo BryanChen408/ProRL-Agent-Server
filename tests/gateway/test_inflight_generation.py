@@ -86,6 +86,39 @@ def test_inflight_tracker_session_close_cancels_active_generation() -> None:
     asyncio.run(_run())
 
 
+def test_inflight_tracker_session_close_fences_future_generation() -> None:
+    """DELETE-before-register cannot leave an old request parked until resume."""
+
+    async def _run() -> None:
+        tracker = InflightGenerationTracker()
+        calls = 0
+
+        async def factory() -> dict:
+            nonlocal calls
+            calls += 1
+            return {"choices": []}
+
+        closed = await tracker.close_session("sess1", reason="policy_cutoff")
+        assert closed == 0
+
+        try:
+            await tracker.run(
+                "sess1",
+                {"model": "served", "messages": []},
+                factory,
+            )
+        except UpstreamError as exc:
+            assert "session closed" in str(exc)
+            assert "policy_cutoff" in str(exc)
+        else:
+            raise AssertionError("expected future generation to be fenced")
+
+        assert calls == 0
+        assert tracker.status()["closed_sessions"] == 1
+
+    asyncio.run(_run())
+
+
 def test_non_streaming_handler_coalesces_duplicate_request_and_saves_once(monkeypatch) -> None:
     async def _run() -> None:
         tracker = InflightGenerationTracker()
@@ -94,8 +127,16 @@ def test_non_streaming_handler_coalesces_duplicate_request_and_saves_once(monkey
         calls = 0
 
         class FakeInference:
-            async def completion(self, request: dict) -> dict:
+            base_url = "http://engine"
+
+            async def completion(
+                self,
+                request: dict,
+                *,
+                trace_headers: dict[str, str] | None = None,
+            ) -> dict:
                 nonlocal calls
+                del trace_headers
                 calls += 1
                 await release.wait()
                 return {

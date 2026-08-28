@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 
 from fastapi.testclient import TestClient
@@ -122,8 +123,14 @@ gateway:
 
     assert response.status_code == 200
     assert calls == [
-        ("http://127.0.0.1:8100/admin/inference/pause", {"timeout_seconds": 12.0}),
-        ("http://127.0.0.1:8101/admin/inference/pause", {"timeout_seconds": 12.0}),
+        (
+            "http://127.0.0.1:8100/admin/inference/pause",
+            {"timeout_seconds": 12.0, "wait_for_drain": True},
+        ),
+        (
+            "http://127.0.0.1:8101/admin/inference/pause",
+            {"timeout_seconds": 12.0, "wait_for_drain": True},
+        ),
     ]
     assert response.json() == {
         "all_paused": True,
@@ -152,3 +159,51 @@ gateway:
             },
         ],
     }
+
+
+def test_rollout_admin_resume_reports_partial_gateway_failure(monkeypatch) -> None:
+    async def forward(path, *, params=None):  # noqa: ANN001, ANN202
+        assert path == "/admin/inference/resume"
+        assert params is None
+        return {
+            "nodes": [
+                {
+                    "node_id": "n1",
+                    "status": "ok",
+                    "response": {"paused": False},
+                },
+                {"node_id": "n2", "status": "error", "error": "offline"},
+            ]
+        }
+
+    monkeypatch.setattr(server, "_forward_gateway_admin", forward)
+
+    payload = asyncio.run(server.resume_gateway_generation())
+
+    assert payload["all_resumed"] is False
+
+
+def test_rollout_admin_policy_version_requires_every_gateway(monkeypatch) -> None:
+    async def forward(path, *, params=None):  # noqa: ANN001, ANN202
+        assert path == "/admin/policy_version"
+        assert params == {"version": 4}
+        return {
+            "nodes": [
+                {
+                    "node_id": "n1",
+                    "status": "ok",
+                    "response": {"policy_version": 4},
+                },
+                {
+                    "node_id": "n2",
+                    "status": "ok",
+                    "response": {"policy_version": 3},
+                },
+            ]
+        }
+
+    monkeypatch.setattr(server, "_forward_gateway_admin", forward)
+
+    payload = asyncio.run(server.set_gateway_policy_version(4))
+
+    assert payload["all_updated"] is False

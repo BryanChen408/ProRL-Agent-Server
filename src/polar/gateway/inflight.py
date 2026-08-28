@@ -44,6 +44,12 @@ class InflightGenerationTracker:
     def __init__(self) -> None:
         self._lock = asyncio.Lock()
         self._entries: dict[tuple[str, str], _GenerationEntry] = {}
+        # Rollout session IDs are single-use.  Remember a closed ID even when there
+        # was no tracked request at close time: otherwise DELETE can race between
+        # the server's storage.closed check and ``run()`` registering its entry,
+        # leaving an old-session request parked behind the generation pause and
+        # able to execute after the next-policy resume.
+        self._closed_sessions: dict[str, str | None] = {}
         self._coalesced_request_count = 0
         self._closed_generation_count = 0
 
@@ -56,6 +62,12 @@ class InflightGenerationTracker:
         fingerprint = request_fingerprint(request)
         key = (session_id, fingerprint)
         async with self._lock:
+            if session_id in self._closed_sessions:
+                reason = self._closed_sessions[session_id]
+                raise UpstreamError(
+                    "Upstream generation rejected because session closed"
+                    f" ({reason or 'closed'})"
+                )
             entry = self._entries.get(key)
             if entry is None or (entry.task.done() and entry.waiters == 0):
                 entry = self._create_entry(session_id, fingerprint, key, factory)
@@ -94,6 +106,7 @@ class InflightGenerationTracker:
     async def close_session(self, session_id: str, *, reason: str | None = None) -> int:
         """Mark and cancel active upstream generations for a finalized session."""
         async with self._lock:
+            self._closed_sessions[session_id] = reason
             entries = [
                 (key, entry)
                 for key, entry in self._entries.items()
@@ -111,6 +124,7 @@ class InflightGenerationTracker:
     def status(self) -> dict[str, Any]:
         return {
             "active": len(self._entries),
+            "closed_sessions": len(self._closed_sessions),
             "coalesced_request_count": self._coalesced_request_count,
             "closed_generation_count": self._closed_generation_count,
             "entries": [

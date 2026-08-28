@@ -203,6 +203,27 @@ class TaskStatus(BaseModel):
     result_paths: list[str] = Field(default_factory=list)
 
 
+class TaskCancelRequest(BaseModel):
+    """Cancel trainer-owned rollout tasks at a policy boundary."""
+
+    task_ids: list[str] = Field(min_length=1)
+    reason: str = "policy_cutoff"
+
+    @field_validator("task_ids")
+    @classmethod
+    def _validate_task_ids(cls, values: list[str]) -> list[str]:
+        normalized: list[str] = []
+        seen: set[str] = set()
+        for value in values:
+            task_id = str(value).strip()
+            if not task_id:
+                raise ValueError("task_ids must not contain empty values")
+            if task_id not in seen:
+                normalized.append(task_id)
+                seen.add(task_id)
+        return normalized
+
+
 class NodeRegistrationRequest(BaseModel):
     """Payload sent by a gateway node when registering with the rollout server."""
 
@@ -274,3 +295,7 @@ class SessionContext:
         default=None,
         repr=False,
     )
+    cancel_requested: bool = False
+    cancel_reason: str | None = None
+    cancel_acknowledged: bool = False
+    cancel_error: str | None = None

@@ -21,6 +21,7 @@ from polar.rollout.models import (
     NodeRegistrationRequest,
     OperatorSampleRequest,
     SessionResult,
+    TaskCancelRequest,
     TaskRequest,
     TaskStatus,
 )
@@ -148,16 +149,42 @@ async def get_task(task_id: str):
     return task
 
 
+@app.post("/rollout/admin/tasks/cancel")
+async def cancel_rollout_tasks(request: TaskCancelRequest):
+    """Cancel trainer-owned tasks without waiting for sessions to finish naturally."""
+    result = await get_state().manager.cancel_tasks(
+        request.task_ids,
+        reason=request.reason,
+    )
+    if not result["all_acknowledged"]:
+        raise HTTPException(status_code=409, detail=result)
+    logger.info(
+        "Cancelled rollout tasks at policy boundary: requested=%s cancelled=%s "
+        "terminal=%s sessions=%s",
+        result["requested"],
+        result["cancelled"],
+        result["already_terminal"],
+        result["sessions_cancel_requested"],
+    )
+    return result
+
+
 @app.get("/rollout/status")
 async def rollout_status():
     return get_state().manager.status()
 
 
 @app.post("/rollout/admin/inference/pause")
-async def pause_gateway_generation(timeout_seconds: float = 300.0):
+async def pause_gateway_generation(
+    timeout_seconds: float = 300.0,
+    wait_for_drain: bool = True,
+):
     result = await _forward_gateway_admin(
         "/admin/inference/pause",
-        params={"timeout_seconds": timeout_seconds},
+        params={
+            "timeout_seconds": timeout_seconds,
+            "wait_for_drain": wait_for_drain,
+        },
     )
     nodes = result["nodes"]
     successful = [
@@ -185,17 +212,41 @@ async def pause_gateway_generation(timeout_seconds: float = 300.0):
 
 @app.post("/rollout/admin/inference/resume")
 async def resume_gateway_generation():
-    return await _forward_gateway_admin("/admin/inference/resume")
+    result = await _forward_gateway_admin("/admin/inference/resume")
+    nodes = result["nodes"]
+    successful = [
+        item["response"]
+        for item in nodes
+        if item["status"] == "ok" and isinstance(item.get("response"), dict)
+    ]
+    all_resumed = len(successful) == len(nodes) and all(
+        response.get("paused") is False for response in successful
+    )
+    return {"all_resumed": all_resumed, "nodes": nodes}
 
 
 @app.post("/rollout/admin/policy_version")
 async def set_gateway_policy_version(version: int):
     # version-span: forward the trainer's new weight version to the gateway(s) so per-turn
     # policy_version stamping + span rejection can fire. Mirrors pause/resume forwarding.
-    return await _forward_gateway_admin(
+    result = await _forward_gateway_admin(
         "/admin/policy_version",
         params={"version": version},
     )
+    nodes = result["nodes"]
+    successful = [
+        item["response"]
+        for item in nodes
+        if item["status"] == "ok" and isinstance(item.get("response"), dict)
+    ]
+    all_updated = len(successful) == len(nodes) and all(
+        response.get("policy_version") == version for response in successful
+    )
+    return {
+        "all_updated": all_updated,
+        "policy_version": version,
+        "nodes": nodes,
+    }
 
 
 @app.post("/nodes/register", response_model=GatewayNodeInfo)
@@ -298,7 +349,9 @@ async def _forward_gateway_admin(
     if not nodes:
         raise HTTPException(status_code=503, detail="No gateway nodes configured")
 
-    timeout = httpx.Timeout(10.0, read=max(float(params.get("timeout_seconds", 0)) + 5.0, 10.0) if params else 10.0)
+    wait_for_drain = bool(params.get("wait_for_drain", True)) if params else False
+    drain_timeout = float(params.get("timeout_seconds", 0)) if params and wait_for_drain else 0.0
+    timeout = httpx.Timeout(10.0, read=max(drain_timeout + 5.0, 10.0))
     async with httpx.AsyncClient(timeout=timeout) as client:
         responses = []
         for node in nodes:
@@ -307,7 +360,11 @@ async def _forward_gateway_admin(
                 response.raise_for_status()
                 responses.append({"node_id": node.id, "status": "ok", "response": response.json()})
             except Exception as exc:
-                responses.append({"node_id": node.id, "status": "error", "error": str(exc)})
+                responses.append({
+                    "node_id": node.id,
+                    "status": "error",
+                    "error": f"{type(exc).__name__}: {exc}",
+                })
 
     if all(item["status"] == "error" for item in responses):
         raise HTTPException(status_code=502, detail={"nodes": responses})

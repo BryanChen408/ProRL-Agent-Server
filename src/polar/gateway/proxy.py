@@ -220,31 +220,39 @@ class InferenceClient:
             self._inflight_generations -= 1
             self._generation_condition.notify_all()
 
-    async def pause_generation(self, *, timeout_seconds: float = 300.0) -> dict[str, Any]:
-        """Block new generations and report whether existing calls drained in time.
+    async def pause_generation(
+        self,
+        *,
+        timeout_seconds: float = 300.0,
+        wait_for_drain: bool = True,
+    ) -> dict[str, Any]:
+        """Block new generations and optionally wait for existing calls to drain.
 
         Reaching the drain timeout does *not* reopen admission and is not a transport
         failure: callers may deliberately abort the remaining engine requests before a
         colocated weight update.  Keep ``paused=True`` and expose the two states
         independently so orchestration can make that decision without guessing from a
-        504 response.
+        504 response. ``wait_for_drain=False`` is the synchronous-training admission
+        fence: it returns immediately so the trainer can abort engines itself.
         """
         async with self._generation_condition:
             self._generation_paused = True
             self._generation_condition.notify_all()
             timed_out = False
-            try:
-                await asyncio.wait_for(
-                    self._generation_condition.wait_for(
-                        lambda: self._inflight_generations == 0
-                    ),
-                    timeout=timeout_seconds,
-                )
-            except TimeoutError:
-                timed_out = True
+            if wait_for_drain and self._inflight_generations != 0:
+                try:
+                    await asyncio.wait_for(
+                        self._generation_condition.wait_for(
+                            lambda: self._inflight_generations == 0
+                        ),
+                        timeout=timeout_seconds,
+                    )
+                except TimeoutError:
+                    timed_out = True
 
             status = self.generation_status()
             status["timed_out"] = timed_out
+            status["wait_for_drain"] = wait_for_drain
             return status
 
     async def resume_generation(self) -> dict[str, Any]:
