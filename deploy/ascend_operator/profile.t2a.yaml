@@ -44,7 +44,7 @@ operator_runtime:
     interval_seconds: 2
   npu_lease:
     enabled: true
-    pool: [0, 1, 2, 3]
+    pool: [0, 1, 2, 3, 4, 5, 6, 7]
     lock_dir: /dev/shm/npu-locks
 
 observer:
