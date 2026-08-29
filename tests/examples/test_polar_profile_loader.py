@@ -54,6 +54,7 @@ def test_profile_loader_derives_topology_and_sidecar_env(tmp_path: Path) -> None
                 "observer": {"host": "0.0.0.0", "port": 18088},
                 "gateway": {
                     "node_id": "node-a",
+                    "release_session_affinity": True,
                     "max_init_workers": 2,
                     "max_run_workers": 4,
                     "max_postrun_workers": 6,
@@ -101,6 +102,9 @@ def test_profile_loader_derives_topology_and_sidecar_env(tmp_path: Path) -> None
     assert env["POLAR_PIPELINE_WATCH_INTERVAL"] == "7"
     assert topology["rollout"]["save_dir"] == str((repo / "out" / "runs" / "unit-run" / "rollout_results").resolve())
     assert topology["gateway"]["nodes"][0]["inference"]["base_url"] == "http://10.0.0.2:4077"
+    assert topology["gateway"]["nodes"][0]["session_affinity_release_url"] == (
+        "http://10.0.0.2:4077/vime/release_sticky_session"
+    )
     assert topology["gateway"]["nodes"][0]["max_run_workers"] == 4
     assert topology["gateway"]["completion_persistence"] == {
         "enabled": True,
@@ -157,6 +161,7 @@ def test_profile_loader_derives_cannbot_runtime_from_workflow(tmp_path: Path) ->
     topology = yaml.safe_load(Path(env["POLAR_TOPOLOGY"]).read_text(encoding="utf-8"))
     op_profile = topology["rollout"]["operator_profiles"]["operator_npu"]
 
+    assert "session_affinity_release_url" not in topology["gateway"]["nodes"][0]
     assert op_profile["operator_runtime_dir"] == str(runtime.resolve())
     assert op_profile["runtime"]["kwargs"]["volumes"] == [f"{runtime.resolve()}:/opt/canonical:ro"]
     assert op_profile["runtime"]["prepare"] == [

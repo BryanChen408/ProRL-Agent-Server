@@ -120,6 +120,7 @@ def _build_state(topology: TopologyConfig, node_id: str | None) -> GatewayState:
         # 默认 None(=/tmp,仅适用无 DooD 的 LocalRuntime)。
         session_base_dir=os.environ.get("POLAR_SESSION_BASE_DIR") or None,
         inflight=inflight,
+        session_affinity_release_url=node.session_affinity_release_url,
     )
     return GatewayState(
         topology=topology,
@@ -722,6 +723,7 @@ async def delete_session(session_id: str, reason: str | None = Query(default=Non
         raise HTTPException(status_code=404, detail="Session not found")
 
     if not preserve_for_postrun:
+        await state.node_manager.release_session_affinity_best_effort(safe_session_id)
         state.session_registry.remove(safe_session_id)
     return SessionDeleteResponse(
         session_id=safe_session_id,

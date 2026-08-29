@@ -53,6 +53,9 @@ observer:
 
 gateway:
   node_id: ascend-node-01
+  # session 终态后通知 VIME LB 精确删除该 session 的 sticky/KV 压力记账；
+  # 通知失败只告警，仍由 LB TTL 与权重边界清理兜底，不影响结果回传。
+  release_session_affinity: true
   max_init_workers: 16
   max_run_workers: 96
   max_postrun_workers: 32

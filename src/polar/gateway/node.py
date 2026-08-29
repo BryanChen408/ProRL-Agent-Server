@@ -81,6 +81,7 @@ class GatewayNodeManager:
         rollout_server_url: str | None = None,
         heartbeat_interval_seconds: int = 30,
         inflight: InflightGenerationTracker | None = None,
+        session_affinity_release_url: str | None = None,
     ) -> None:
         self.node_id = node_id
         self.gateway_url = gateway_url.rstrip("/")
@@ -110,6 +111,11 @@ class GatewayNodeManager:
         self._control_client: httpx.AsyncClient | None = None
         self._heartbeat_task: asyncio.Task[None] | None = None
         self._policy_cleanup_tasks: set[asyncio.Task[None]] = set()
+        self._session_affinity_release_url = (
+            session_affinity_release_url.rstrip("/")
+            if session_affinity_release_url
+            else None
+        )
 
     async def start(self) -> None:
         await self._dispatcher.start()
@@ -761,6 +767,7 @@ class GatewayNodeManager:
             await self._close_inflight_generations(request.session_id, reason="postrun_result")
             self.storage.mark_session_closed(request.session_id, reason="postrun_result")
             self.storage.delete_session(request.session_id)
+            await self.release_session_affinity_best_effort(request.session_id)
             if await self._push_result(request.callback_url, normalized):
                 # Rollout server has acked; free the heavy payload but keep
                 # status/task_id visible for debugging via the polling endpoint.
@@ -784,6 +791,31 @@ class GatewayNodeManager:
             logger.warning(
                 "Failed to close inflight generations for session %s",
                 session_id,
+                exc_info=True,
+            )
+
+    async def release_session_affinity_best_effort(self, session_id: str) -> None:
+        """Tell an optional external inference router that a session is terminal.
+
+        This is performance-only cleanup.  A missing or unhealthy endpoint must
+        never change the session result, callback, reward, or teardown path; the
+        router's TTL and policy-boundary clear remain the fallback.
+        """
+        url = self._session_affinity_release_url
+        if url is None:
+            return
+        try:
+            response = await self._client.post(
+                url,
+                json={"session_id": session_id},
+                timeout=1.0,
+            )
+            response.raise_for_status()
+        except Exception:
+            logger.warning(
+                "Failed to release inference affinity for terminal session %s via %s",
+                session_id,
+                url,
                 exc_info=True,
             )
 

@@ -272,3 +272,52 @@ def test_node_manager_close_inflight_generations_is_best_effort() -> None:
         assert inflight.calls == [("sess1", "postrun_result")]
 
     asyncio.run(_run())
+
+
+def test_node_manager_releases_terminal_session_affinity_best_effort() -> None:
+    async def _run() -> None:
+        class FakeResponse:
+            def raise_for_status(self) -> None:
+                return None
+
+        class FakeClient:
+            def __init__(self) -> None:
+                self.calls = []
+
+            async def post(self, url, **kwargs):
+                self.calls.append((url, kwargs))
+                return FakeResponse()
+
+        manager = GatewayNodeManager.__new__(GatewayNodeManager)
+        manager._session_affinity_release_url = (
+            "http://127.0.0.1:8011/vime/release_sticky_session"
+        )
+        manager._client = FakeClient()
+
+        await manager.release_session_affinity_best_effort("sess1")
+
+        assert manager._client.calls == [
+            (
+                "http://127.0.0.1:8011/vime/release_sticky_session",
+                {"json": {"session_id": "sess1"}, "timeout": 1.0},
+            )
+        ]
+
+    asyncio.run(_run())
+
+
+def test_node_manager_affinity_release_failure_does_not_escape() -> None:
+    async def _run() -> None:
+        class FailingClient:
+            async def post(self, *args, **kwargs):
+                raise RuntimeError("router unavailable")
+
+        manager = GatewayNodeManager.__new__(GatewayNodeManager)
+        manager._session_affinity_release_url = (
+            "http://127.0.0.1:8011/vime/release_sticky_session"
+        )
+        manager._client = FailingClient()
+
+        await manager.release_session_affinity_best_effort("sess1")
+
+    asyncio.run(_run())

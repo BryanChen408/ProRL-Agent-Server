@@ -365,6 +365,25 @@ def main() -> int:
                 "builder": {"strategy": "prefix_merging", "config": {}},
             }
         }
+    gateway_node = {
+        "id": str(gateway.get("node_id", "ascend-node-01")),
+        "host": bind_host,
+        "port": gateway_port,
+        "public_url": gateway_url,
+        "max_init_workers": int(gateway.get("max_init_workers", 8)),
+        "max_run_workers": int(gateway.get("max_run_workers", 32)),
+        "max_postrun_workers": int(gateway.get("max_postrun_workers", 32)),
+        "model_served": str(service.get("model_served", "")),
+        "inference": {
+            "engine": str(service.get("inference_engine", "sglang")),
+            "base_url": router_url,
+        },
+    }
+    if bool(gateway.get("release_session_affinity", False)):
+        gateway_node["session_affinity_release_url"] = (
+            f"{router_url.rstrip('/')}/vime/release_sticky_session"
+        )
+
     topology = {
         "rollout": rollout_cfg,
         "gateway": {
@@ -375,22 +394,7 @@ def main() -> int:
                 "max_field_bytes": int(completion_persistence.get("max_field_bytes", 64 * 1024 * 1024)),
                 "queue_size": int(completion_persistence.get("queue_size", 4096)),
             },
-            "nodes": [
-                {
-                    "id": str(gateway.get("node_id", "ascend-node-01")),
-                    "host": bind_host,
-                    "port": gateway_port,
-                    "public_url": gateway_url,
-                    "max_init_workers": int(gateway.get("max_init_workers", 8)),
-                    "max_run_workers": int(gateway.get("max_run_workers", 32)),
-                    "max_postrun_workers": int(gateway.get("max_postrun_workers", 32)),
-                    "model_served": str(service.get("model_served", "")),
-                    "inference": {
-                        "engine": str(service.get("inference_engine", "sglang")),
-                        "base_url": router_url,
-                    },
-                }
-            ],
+            "nodes": [gateway_node],
         },
     }
     topology_path.write_text(yaml.safe_dump(topology, sort_keys=False), encoding="utf-8")

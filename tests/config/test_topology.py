@@ -90,6 +90,9 @@ def test_inference_block_selects_engine_and_base_url(tmp_path: Path) -> None:
                         "id": "node-a",
                         "public_url": "http://127.0.0.1:8100",
                         "inference": {"engine": "vllm", "base_url": "http://127.0.0.1:8000"},
+                        "session_affinity_release_url": (
+                            "http://127.0.0.1:8000/vime/release_sticky_session"
+                        ),
                     }
                 ],
             },
@@ -98,6 +101,10 @@ def test_inference_block_selects_engine_and_base_url(tmp_path: Path) -> None:
     node = TopologyConfig.load(path).gateway.nodes[0]
     assert node.engine == "vllm"
     assert node.inference_base_url == "http://127.0.0.1:8000"
+    assert (
+        node.session_affinity_release_url
+        == "http://127.0.0.1:8000/vime/release_sticky_session"
+    )
 
 
 def test_inference_engine_defaults_to_sglang(tmp_path: Path) -> None:

@@ -108,10 +108,14 @@ def test_budget_delete_preserves_active_storage(monkeypatch) -> None:
     class FakeNodeManager:
         def __init__(self):
             self.calls = []
+            self.affinity_releases = []
 
         async def cancel(self, session_id: str, *, reason: str | None = None) -> bool:
             self.calls.append((session_id, reason))
             return True
+
+        async def release_session_affinity_best_effort(self, session_id: str) -> None:
+            self.affinity_releases.append(session_id)
 
     class FakeInflight:
         def __init__(self):
@@ -144,6 +148,7 @@ def test_budget_delete_preserves_active_storage(monkeypatch) -> None:
     assert response.deleted is True
     assert response.messages_deleted == 0
     assert node_manager.calls == [("s", "pipeline_budget_exceeded")]
+    assert node_manager.affinity_releases == []
     assert inflight.calls == []
     assert registry.get("s") is not None
     assert len(storage.load_completion_session("s").completions) == 1
@@ -156,10 +161,14 @@ def test_manual_delete_removes_storage(monkeypatch) -> None:
     class FakeNodeManager:
         def __init__(self):
             self.calls = []
+            self.affinity_releases = []
 
         async def cancel(self, session_id: str, *, reason: str | None = None) -> bool:
             self.calls.append((session_id, reason))
             return True
+
+        async def release_session_affinity_best_effort(self, session_id: str) -> None:
+            self.affinity_releases.append(session_id)
 
     class FakeInflight:
         def __init__(self):
@@ -192,6 +201,7 @@ def test_manual_delete_removes_storage(monkeypatch) -> None:
     assert response.deleted is True
     assert response.messages_deleted == 1
     assert node_manager.calls == [("s", None)]
+    assert node_manager.affinity_releases == ["s"]
     assert inflight.calls == [("s", "delete_session")]
     assert registry.get("s") is None
     assert storage.load_completion_session("s").completions == []

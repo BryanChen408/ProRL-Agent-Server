@@ -36,6 +36,7 @@ class GatewayNodeConfig(_StrictModel):
     public_url: str
     model_served: str = ""
     inference: _InferenceConfig = Field(default_factory=_InferenceConfig)
+    session_affinity_release_url: str | None = None
     max_init_workers: int = Field(default=4, gt=0)
     max_run_workers: int = Field(default=2, gt=0)
     max_postrun_workers: int = Field(default=4, gt=0)
@@ -67,6 +68,16 @@ class GatewayNodeConfig(_StrictModel):
     @classmethod
     def _validate_public_url(cls, value: str) -> str:
         return _normalize_http_url(value, "gateway.nodes[].public_url")
+
+    @field_validator("session_affinity_release_url")
+    @classmethod
+    def _validate_session_affinity_release_url(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        return _normalize_http_url(
+            value,
+            "gateway.nodes[].session_affinity_release_url",
+        )
 
     @property
     def inference_base_url(self) -> str:
