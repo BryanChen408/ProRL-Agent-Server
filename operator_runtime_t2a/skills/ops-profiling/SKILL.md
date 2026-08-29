@@ -1,152 +1,94 @@
 ---
 name: ops-profiling
-description: NPU 性能采集与分析，融合 msprof 算子级瓶颈定位与 kernel-level 对比测试，用于采集算子性能数据、对比自定义算子 vs 标杆加速比、定位性能瓶颈并给出优化建议。当用户在算子开发过程中提到"上板性能"、"算子性能测试"、"硬件性能验证"、"NPU性能采集"、"NPU profiling"、"性能对比"、"加速比"等场景时触发。
+description: 基于固定评测入口产出的真实逐 case 性能证据，定位 AscendC 瓶颈并实施一项通用优化；用于正确性通过但 speedup 尚未达到目标时。
 ---
 
-# 上板性能采集与调优
+# AscendC 性能诊断与优化
 
-在真实 NPU 上采集算子性能数据，系统化解读指标文件，判定性能是否达标，定位瓶颈类型，并给出可操作的优化建议。
+## 职责边界
 
-本技能基于 **msprof** 工具链，统一入口为两个脚本：
-- **`msprof_profile_run.sh`** — 性能采集（标准采集 / 对比测试 / 批量并行）
-- **`msprof_perf_summary.py`** — 结果解析（瓶颈分析 / 对比报告 / 批量汇总）
+本 skill 负责“读证据、改实现”，不负责另起一套计时流程。
 
-| 工具 | 流程文档 | 用途 |
-|------|----------|------|
-| **`msprof_profile_run.sh`** | [`references/msprof-guide.md`](references/msprof-guide.md) | 统一采集入口：标准采集、对比测试、批量并行 |
-| **`msprof_perf_summary.py`** | [`references/msprof-guide.md`](references/msprof-guide.md) | 统一解析入口：瓶颈分析、对比报告生成、批量汇总 |
-| **`perf_summary.py`** | [`references/msprof-op-guide.md`](references/msprof-op-guide.md) | msprof op 归档（需 msopprof） |
+- 唯一有效测速入口是工作目录 `CLAUDE.md` 规定的
+  `/opt/workspace/agent_workdir/tools/ascendc_eval_pipeline.sh`。
+- 不直接运行仓库底层 benchmark、msprof 或自建计时脚本。
+- 不修改固定入口、评测脚本、参考实现和测试输入。
+- 不用单个算子的特判换取分数；优化必须对同类 shape、dtype 和边界输入成立。
+- 正确性没有通过时不得做性能优化，先按固定入口的 `next_step` 修复正确性。
 
----
+## 调用条件
 
-## 使用方式
+固定入口返回 `correctness_ok=true`，但 `perf_data.speedup_vs_torch < next_step.perf_target_speedup`（默认 `1.1`），且 `next_step.optimization_remaining > 0` 时必须调用本 skill。
 
-### 1. 标准采集模式（深度瓶颈分析）
+调用时至少提供或读取：
 
-对单个可执行文件采集 7 组 aic-metrics + sample-based：
+1. `judge_out/metrics.json` 与 `judge_out/performance.json`；
+2. `judge_out/perf.log` 中的逐 case 延迟；
+3. 当前 `*_host.cpp`、`*_kernel.cpp` 及必要的头文件；
+4. 固定入口给出的 `attempt`、`limit`、`remaining` 和 `next_step`。
 
-```bash
-bash scripts/msprof_profile_run.sh --warm-up=3 --output=./msprof_output -- \
-    ./matmul_tutorial_mxfp4_pingpong 8448 4096 4096
+缺少细粒度硬件计数器时，不得伪装成已经确认某一种 bound；只能把源码结构和逐 case 延迟支持的判断标为“优化假设”，并由下一次固定入口验证。
 
-# 解析结果
-python3 scripts/msprof_perf_summary.py ./msprof_output/PROF_GROUP_* <ops_dir>
-```
+## 单轮优化流程
 
-### 2. 对比测试模式（kernel-level 加速比）
+### 1. 找到主要损失
 
-对算子目录下的 `model.py` vs `model_new_ascendc.py` 做对比测试：
+- 先确认当前正确实现和 `.best` 的状态。
+- 比较全部有效 case，优先处理拖累整体 speedup 的慢 case，而不是只看最好 case。
+- 结合 shape、dtype、尾块比例和源码，判断最可能的通用瓶颈类别。
 
-```bash
-bash scripts/msprof_profile_run.sh --compare --output-dir=./output/GELU --warm-up=3 --device=0
-```
+### 2. 读取完整优化指导
 
-输出：`performance.json` + `performance.log` + `perf_report.md`
+每次调用本 skill 都完整读取
+[optimization_quickref.md](references/optimization_quickref.md)，包括 Vector、MTE、Cube、
+Scalar、负载均衡、Bank Conflict、DoubleBuffer、流水线、L2 Cache，以及 GroupedMatmul、
+Matmul、FlashAttention 和 MC² 案例。当前算子看似简单也不跳过，避免后续融合算子或复杂
+数据流被过早归类。
 
-### 3. 快速模式（1 轮采集，只获取 kernel 时间）
+结合当前证据时优先使用最相关的章节：
 
-对算子目录做快速对比测试，只跑 1 轮 msprof，不采集 7 个 aic-metrics：
+- 多核切分、尾块或各核工作量差异：负载均衡；
+- 搬运次数、非连续访问、UB 往返：MTE/内存；
+- Vector 指令、Cast、循环或标量控制过多：Vector/Scalar；
+- Cube 利用率或矩阵分块不合理：Cube；
+- 流水重叠不足：双缓冲与流水。
 
-```bash
-bash scripts/msprof_profile_run.sh --quick --output-dir=./output/GELU --warm-up=3 --device=0
-```
+如果工作区已经存在由受控评测流程产出的深度 profiling 结果，再按数据类型读取对应资料：
 
-输出：`performance.json` + `performance.log` + `perf_report.md`
+- 已有 `PROF_GROUP_*`、`op_summary_*.csv` 或 `task_time.csv`：读取
+  [msprof-guide.md](references/msprof-guide.md) 的相关采集口径和 Bound 判定章节；
+- 已有 `OPPROF_*` 或逐核 msprof-op 结果：读取
+  [msprof-op-guide.md](references/msprof-op-guide.md) 的相关分析章节；
+- 需要解释 `PipeUtilization.csv`、`ArithmeticUtilization.csv`、`Memory*.csv`、
+  `L2Cache.csv` 或 `ResourceConflictRatio.csv` 字段时：读取
+  [csv_fields_reference.md](references/csv_fields_reference.md) 的对应字段章节。
 
-### 4. 批量并行模式（多 NPU）
+上述三份深度 profiling 手册仍以真实产物为前提：没有对应产物时不要为了“走流程”通读，
+也不要绕过固定入口主动采集深度 profiling。完整优化速查表不受此限制。
 
-扫描目录下所有算子子目录，多 NPU 并行执行对比测试：
+### 3. 实施一项可验证改动
 
-```bash
-bash scripts/msprof_profile_run.sh --batch --base-dir=./output_performance --max-jobs=7 --device-start=1
-```
+每轮只选收益预期最高、正确性风险最低的一项结构性改动，例如：
 
-输出：各子目录 `performance.json` + `batch_performance.log` + `batch_report.md` + `batch_summary.json`
+- 改善多核切分和尾块分配；
+- 调整 tile/UB 大小，减少重复搬运；
+- 合并相邻 CopyIn/CopyOut，保持连续访问；
+- 在满足容量与同步约束时启用双缓冲；
+- 减少不必要的 Cast、标量循环或重复中间结果。
 
----
+改动必须保留预生成工程骨架、注册入口和公开函数签名。记录“证据 → 假设 → 改动”，不要堆叠多个无法归因的优化。
 
-## 输入目录结构（对比模式）
+### 4. 有变化才复测
 
-**传统模式（端到端自动开发）：**
-```
-{output_dir}/
-├── model.py              # 参考 PyTorch 实现
-├── model_new_ascendc.py  # AscendC 实现
-├── <op_name>.json        # 测试用例（JSON Lines）
-└── kernel/               # AscendC kernel + whl 包
-```
+- 修改后确认 AscendC 源码内容确实变化，再运行一次固定入口。
+- 若 `speedup >= next_step.perf_target_speedup`，停止优化并保留该正确实现。
+- 若仍未达标且有优化预算，使用新结果再次调用本 skill。
+- 若预算耗尽，停止调用工具并提交 `.best` 保存的最佳正确实现。
 
-**JSONL 模式（ascend-kernel 工程结构）：**
-```
-csrc/ops/<op>/test/
-├── <op>_perf_cases.jsonl   # JSONL 用例
-├── model.py                # 参考实现
-├── model_new_ascendc.py    # AscendC 实现
-└── kernel/                 # kernel 工程
-```
+同一份未变化源码不得重复测速。固定入口是 attempt 计数和是否继续的唯一权威。
 
-### 用例加载优先级
+## 安全约束
 
-1. **优先**：`<op>_perf_cases.jsonl`（标准 JSONL 命名）
-2. **回退**：任意 `*.jsonl` 文件
-3. **回退**：任意 `*.json` 文件（非 `.bak`，JSON Lines 格式）
-4. **回退**：从 `model.py` 的 `get_input_groups()` 加载
-
----
-
-## 输出格式（对比模式）
-
-Markdown 报告包含：
-- **对比表**：`Case | Shape | DType | 自定义算子(us) | 标杆(us) | 加速比`
-- **全量汇总**：用例数、平均加速比、自定义/标杆更优条数
-- **按数据类型汇总**：分 dtype 的统计
-- **简短分析**：整体趋势结论
-- **深度瓶颈分析入口**：提供 msprof 深度分析命令
-
-额外输出：
-- `performance.json` — 结构化数据（含 geomean/mean/median/min/max 加速比）
-- `performance.log` — 打屏日志
-
----
-
-## 深度分析：msprof / msprof op
-
-当性能不达标或需要根因分析时，使用深度分析流程。
-
-### 选用哪个工具：决策树
-
-1. **用户显式指定工具**
-   - 指定 `msprof op` / msopprof → 加载 [`references/msprof-op-guide.md`](references/msprof-op-guide.md)
-   - 指定 `msprof` → 加载 [`references/msprof-guide.md`](references/msprof-guide.md)
-
-2. **用户未指定** — 先判定算子类型，再探测环境：
-   - **MC² / 多 rank 算子**（算子通过 `fork()` 创建多个子进程绑定不同 NPU 卡，子进程间通过 SHMEM UDMA / BarrierAll / CrossCoreFlag 协同通信，如 alltoall_matmul、allgather_matmul、matmul_reducescatter）→ **必须使用 `msprof`**，禁止使用 `msprof op`（`msprof op` 对 fork 程序的采集行为未定义，数据不可靠）。加载 [`references/msprof-guide.md`](references/msprof-guide.md) 的「MC² 多 rank 算子采集」章节，同时参考 `ascendc-perf-optimize` skill 的 `references/comm-compute/index.md`「性能采集方法」章节
-   - 仅 `msopprof` 可用 → [`references/msprof-op-guide.md`](references/msprof-op-guide.md)
-   - 仅 `msprof` 可用 → [`references/msprof-guide.md`](references/msprof-guide.md)
-   - 两者皆可用 → 须向用户确认或按项目约定选用其一
-   - 两者皆不可用 → 报错，提示检查 CANN / `ASCEND_HOME` 安装
-
-### 参考资源
-
-| 文件 | 内容 | 何时查阅 |
-|------|------|---------|
-| [`references/msprof-guide.md`](references/msprof-guide.md) | `msprof`：构建 / 采集 / 归档 / **主 Bound 判定** / 瓶颈 + **MC² 多 rank 采集**（文末章节） | 选用 `msprof` 时，或 MC² / fork 多进程算子 |
-| [`references/msprof-op-guide.md`](references/msprof-op-guide.md) | `msprof op`：构建 / 采集 / 归档 / 判定 / 瓶颈 / 回归 | 选用 `msprof op` 时（不适用于 MC²） |
-| [`references/csv_fields_reference.md`](references/csv_fields_reference.md) | CSV 字段定义与阈值 | 理解指标含义时 |
-| [`references/optimization_quickref.md`](references/optimization_quickref.md) | 瓶颈类型与优化方法 | 定位瓶颈后 |
-
----
-
-## 适用场景总览
-
-| 场景 | 推荐命令 | 说明 |
-|------|----------|------|
-| **MC² 多 rank 算子采集** | `msprof --aic-mode=task-based` | **必须用 msprof，禁止 msprof op**，详见 msprof-guide.md「MC² 多 rank 算子采集」章节 |
-| 算子开发完成后的性能验收 | `msprof_profile_run.sh --compare` | 快速对比自定义算子 vs 标杆 |
-| 性能问题定位 | `msprof_profile_run.sh` + `msprof_perf_summary.py` | 深度瓶颈分析 |
-| 优化效果验证 | `msprof_profile_run.sh` + `msprof_perf_summary.py` | 对比优化前后的归档数据 |
-| 算子生成阶段快速测试 | `msprof_profile_run.sh --quick` | 快速对比测试（1 轮采集，只获取时间） |
-| Agent team 测试阶段 | `--quick` / `--compare` + 标准采集 | 先快速对比，不达标再深度分析 |
-| 端到端自动开发 Phase 5 | `msprof_profile_run.sh --quick` | 集成到 tilelang2ascendc-ops-generator 流程（只获取加速比） |
-| 进化优化前基线测试 | `msprof_profile_run.sh --quick` | 快速获取基线加速比 |
-| 批量性能测试 | `msprof_profile_run.sh --batch` | 多 NPU 并行批量测试 |
+- 禁止把计算搬回 CPU/host，或在 Python/host wrapper 中调用框架算子伪装 AscendC 实现。
+- 禁止通过读取输出、硬编码 case 或放宽误差阈值获得 speedup。
+- 新实现变慢或失去正确性时，立即以 `.best` 为基线继续，不要覆盖已知最佳正确版本。

@@ -28,20 +28,26 @@ def _instruction(op_name: str, model_rel: str) -> str:
     # (对齐 triton;两侧行为按有无 {op}/ 源目录自适应)。它把
     # 预算计数 / 内容哈希短路 / NPU 抢卡 / 自动打包收在一起,对齐 triton 的
     # tools/triton_eval_pipeline.sh。tools/ 是只读挂载,agent 改不了。
-    val = (f"bash tools/ascendc_eval_pipeline.sh --op_name {op_name} "
+    val = (f"bash /opt/workspace/agent_workdir/tools/ascendc_eval_pipeline.sh --op_name {op_name} "
            f"--impl output/submission/{op_name}_impl.tar.gz --out_dir judge_out")
     return (
         f"Implement an AscendC operator for Ascend NPU. The reference task is at {model_rel} "
-        f"(class Model + get_input_groups). Produce a self-contained project directory `{op_name}/`.\n\n"
-        f"The `{op_name}/` project must contain:\n"
+        f"(class Model + get_input_groups/get_init_inputs). Complete the pre-generated project directory `{op_name}/` "
+        "in place.\n\n"
+        f"Polar has already created the `{op_name}/` skeleton from the reference signature before the "
+        "session starts. Reuse those files as the only project skeleton: do not initialize a second "
+        "project, copy another task/template over it, or rewrite mechanism files merely to create the "
+        "project.\n\n"
+        f"The completed `{op_name}/` project must contain:\n"
         "- model_new_ascendc.py (class ModelNew whose forward ONLY calls torch.ops.npu.<op> plus tensor "
         "create/reshape; no plain-torch compute)\n"
         "- kernel/ (op_host/ + op_kernel/ + register.cpp + ops.h + self-contained CMakeLists.txt + setup.py)\n"
         "You do NOT need to ship model.py or the case-spec .json: the judge injects the dataset originals "
         "and overwrites whatever you submit. Do NOT ship build/, dist/, *.so, *.a or *.whl: the judge "
         "rebuilds from source in a fresh container and ignores prebuilt artifacts.\n\n"
-        "Follow the ascendc-* skills workflow: simple ops via case-simplifier -> code-gen; complex ops via "
-        "ascendc-tilelang-designer -> ascendc-translator. SoC uses SOC_VERSION env (910B2C / A2); "
+        "Follow `./CLAUDE.md` as the sole workflow and judging contract. It is also the authority for "
+        "simple/complex routing and the exact skills available in this runtime; do not infer or search "
+        "for a separate project-initialization workflow. SoC uses SOC_VERSION env (910B2C / A2); "
         "CMakeLists paths use x86_64-linux.\n\n"
         "Use this fixed validation entry as the only executable validation path:\n"
         f"  {val}\n"
@@ -63,7 +69,7 @@ def _instruction(op_name: str, model_rel: str) -> str:
         "path, and the only thing allowed to acquire an NPU card. Never set ASCEND_RT_VISIBLE_DEVICES "
         "yourself.\n"
         "- Do not read, modify, inspect, or delete anything under tools/, the verifier scripts under "
-        ".claude/skills/ascendc-*/scripts/, or pipeline parameters (SOC_VERSION / warmup / repeats / "
+        ".claude/skills/*/scripts/, or pipeline parameters (SOC_VERSION / warmup / repeats / "
         "precision thresholds are fixed by the entry).\n"
         # 目标线与 CLAUDE.md 4-S.4 / ascendc_eval_pipeline.sh 的 PERF_TARGET 是同一个数,三处要同步。
         # 只写"实现算子"时实测中位 speedup 0.859x、58.8% 慢于 torch:agent 精度一过就收工,

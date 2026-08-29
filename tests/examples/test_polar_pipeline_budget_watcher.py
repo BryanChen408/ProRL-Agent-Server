@@ -104,6 +104,20 @@ def test_status_over_limit_cancels(tmp_path: Path) -> None:
     assert "attempt=7>6" in reason
 
 
+def test_generation_and_optimization_budgets_are_independent() -> None:
+    module = _load_module()
+
+    generation_at_limit = module.BudgetState("s1", [], 8, 0, None)
+    generation_over_limit = module.BudgetState("s1", [], 9, 0, None)
+    optimization_at_limit = module.BudgetState("s1", [], 8, 4, 8)
+    optimization_over_limit = module.BudgetState("s1", [], 8, 5, 8)
+
+    assert module.should_cancel(generation_at_limit, gen_max=8, opt_max=4) == (False, "")
+    assert module.should_cancel(generation_over_limit, gen_max=8, opt_max=4)[0]
+    assert module.should_cancel(optimization_at_limit, gen_max=8, opt_max=4) == (False, "")
+    assert module.should_cancel(optimization_over_limit, gen_max=8, opt_max=4)[0]
+
+
 def test_status_loads_from_host_session_base_by_json_session_id(tmp_path: Path) -> None:
     module = _load_module()
     session_id = "sk-polar-long-session-id"
@@ -314,7 +328,7 @@ def test_completion_parser_recognizes_cannbot_verify_execution() -> None:
     assert state.generation_calls == 1
 
 
-def test_completion_parser_counts_cd_wrapped_pipeline_and_ignores_shell_error() -> None:
+def test_completion_parser_counts_cd_wrapped_pipeline_and_shell_error() -> None:
     module = _load_module()
     record = {
         "original_request": {
@@ -371,6 +385,7 @@ def test_completion_parser_counts_cd_wrapped_pipeline_and_ignores_shell_error() 
 
     state = module.analyze_budget("s1", record)
 
-    assert len(state.pipeline_calls) == 1
-    assert state.generation_calls == 1
+    assert len(state.pipeline_calls) == 2
+    assert state.generation_calls == 2
     assert state.pipeline_calls[0].turn == 1
+    assert state.pipeline_calls[1].turn == 2

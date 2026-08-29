@@ -329,11 +329,19 @@ def main() -> int:
     }
     if skills_path:  # 键序保持与原来一致(harness/model_name/skills_path/settings)
         agent_block["skills_path"] = skills_path
-    agent_block["settings"] = {
+    agent_settings = {
         "max_turns": int(agent.get("max_turns", 45)),
         "disallowed_tools": str(agent.get("disallowed_tools", "")),
         "append_system_prompt": str(agent.get("append_system_prompt", "")),
     }
+    # `allowed_tools` is an optional allowlist.  Do not render an empty value:
+    # Claude Code interprets `--allowedTools ''` as an empty tool surface.  When
+    # configured (notably profile.t2a), it must survive profile -> topology ->
+    # AgentSpec so the harness can emit the intended `--allowedTools` flag.
+    allowed_tools = str(agent.get("allowed_tools") or "").strip()
+    if allowed_tools:
+        agent_settings["allowed_tools"] = allowed_tools
+    agent_block["settings"] = agent_settings
     # harness 侧 env(AgentSpec.env -> ExecInput.env,随 `claude` 那条 exec 下发)。
     # 与上面的 runtime.env 是两份、优先级不同:runtime.env 是容器 env,而 ExecInput.env
     # 覆盖它。凡是只有 CLI 进程读得到、且 claude_code preset 里有 setdefault 兜底的变量

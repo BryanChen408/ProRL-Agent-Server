@@ -198,4 +198,4 @@ Fixpipe(L0C→UB/GM)的参数结构体**因平台而异**(asc-devkit 公开文�
 | Fixpipe(L0C→UB)公开文档 | `asc-devkit/docs/api/SIMD-API/基础API/矩阵计算（ISASI）/矩阵计算的搬出/` |
 | 平台差异 / 架构基础 | `/npu-arch` |
 | Ascend C API 用法(Mmad / LoadData / Fixpipe / CrossCore)| `/ascendc-api-best-practices` |
-| 通用编码规范 / 入口属性 | `ops-direct-invoke` plugin `workflows/development-guide.md` |
+| 通用编码规范 / 入口属性 | 工作目录 `CLAUDE.md` 的预生成骨架契约与 `tilelang2ascend-translator` |

@@ -146,14 +146,17 @@ def test_prompt_says_not_met_below_target(tmp_path):
     assert "未达标" in out and "不要结束任务" in out
     assert "0.859x" in out and "1.1x" in out
     assert "剩 4 次" in out
+    assert "ops-profiling skill" in out
 
 
-def test_prompt_still_invites_optimization_above_target(tmp_path):
-    """1.34x ≥ 1.1x:达标了也要说清楚还能继续 —— 加速比没有上限。"""
+def test_prompt_stops_optimization_above_target(tmp_path):
+    """1.34x ≥ 1.1x:达标后停止，避免继续消耗上板预算。"""
+    f = _seed_metrics(tmp_path)
     out = _run("emit_optimization_prompt", 'emit_optimization_prompt "1.34"',
                _prompt_env(), tmp_path)
-    assert "已达标" in out and "未达标" not in out
-    assert "加速比越高得分越高" in out
+    assert "已达标" in out and "停止性能迭代" in out
+    assert "进入 optimization" not in out
+    assert json.loads(f.read_text(encoding="utf-8"))["next_step"]["phase_next"] == "complete"
 
 
 def test_prompt_silent_when_optimization_budget_gone(tmp_path):
@@ -213,8 +216,76 @@ def test_prompt_survives_missing_metrics_json(tmp_path):
 def test_perf_target_default_matches_claude_md():
     """三处目标线必须同一个数:pipeline / CLAUDE.md / 任务 prompt。"""
     assert 'PERF_TARGET="${POLAR_PERF_TARGET:-1.1}"' in PIPELINE.read_text(encoding="utf-8")
+    assert 'cp -f "$PERF_JSON" "$OUT_DIR/performance.json"' in PIPELINE.read_text(encoding="utf-8")
     claude = (ROOT / "operator_runtime_t2a" / "CLAUDE.md").read_text(encoding="utf-8")
     assert "加速比 **≥ 1.1x** PyTorch reference → 达标" in claude
     assert "0.6x PyTorch reference" not in claude
     tasks = (ROOT / "deploy" / "ascend_operator" / "gen_ascendc_tasks.py").read_text(encoding="utf-8")
     assert "1.1x the PyTorch reference" in tasks
+
+
+def test_over_limit_gate_precedes_all_evaluation_work():
+    script = PIPELINE.read_text(encoding="utf-8")
+    gate = '"$PIPELINE_ATTEMPT" -gt "$PIPELINE_LIMIT"'
+
+    assert gate in script
+    assert script.index("budget already exhausted; skip evaluation work") < script.index("# Step0")
+
+
+def test_only_in_budget_candidate_is_packed_for_best_comparison():
+    """limit+1 次的候选不能在早退前偷偷参与 best 比较。"""
+    script = PIPELINE.read_text(encoding="utf-8")
+    start = script.index("  pipeline_status_write\n  echo \"[pipeline-budget]")
+    end = script.index("\nfi\n\n_on_exit()", start)
+    setup_block = script[start:end]
+
+    guard = "if ! pipeline_over_limit; then"
+    assert guard in setup_block
+    assert setup_block.index(guard) < setup_block.index("    pack_best")
+
+
+def test_new_evaluation_discards_previous_source_results_after_cache_and_budget_gates():
+    """新源码开跑前清理旧结果；未改源码的缓存和超限收尾仍可先返回。"""
+    script = PIPELINE.read_text(encoding="utf-8")
+    cache_gate = "cached verdict"
+    budget_gate = "budget already exhausted; skip evaluation work"
+    stale_clear = 'rm -f "$OUT_DIR/metrics.json"'
+
+    assert script.index(cache_gate) < script.index(stale_clear)
+    assert script.index(budget_gate) < script.index(stale_clear)
+    assert script.index(stale_clear) < script.index("# Step0")
+
+
+def test_over_limit_exit_does_not_attach_stale_metrics_to_current_source(tmp_path):
+    """N+1 次未执行评测，不能用第 N 次的 metrics 认证当前源码。"""
+    metrics = {
+        "correctness_ok": True,
+        "perf_data": {"speedup_vs_torch": 1.2},
+    }
+    (tmp_path / "metrics.json").write_text(json.dumps(metrics), encoding="utf-8")
+    state_dir = tmp_path / "state"
+    state_dir.mkdir()
+    capture = tmp_path / "pack_args.txt"
+    script = "\n".join([
+        "set -uo pipefail",
+        'pack_best() { printf "%s|%s\\n" "${1:-}" "${2:-}" >> "$CAPTURE"; }',
+        _extract("pipeline_over_limit"),
+        _extract("pipeline_at_limit"),
+        _extract("_on_exit"),
+        "AGENT_SIDE=1",
+        f'OUT_DIR="{tmp_path}"',
+        f'STATE_DIR="{state_dir}"',
+        f'CAPTURE="{capture}"',
+        'OP_NAME="op_test"',
+        'CUR_HASH="new-source-hash"',
+        'PIPELINE_PHASE="generation"',
+        'PIPELINE_ATTEMPT=4',
+        'PIPELINE_LIMIT=3',
+        "_on_exit",
+    ])
+    proc = subprocess.run(
+        ["bash", "-c", script], capture_output=True, text=True, check=False
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert not capture.exists(), "超限退出仍然用旧 metrics 调用了 pack_best"
+    assert "LIMIT_EXHAUSTED" in proc.stdout

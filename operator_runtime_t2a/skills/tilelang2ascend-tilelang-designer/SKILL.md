@@ -15,15 +15,13 @@ argument-hint: >
 
 ## 适用场景
 
-本 skill 仅用于**复杂算子**路径（见 CLAUDE.md 路由规则）：
-- Attention: FlashAttention, SparseAttention, GQA 等
-- MatMul 变体: 带 fuse 的 MatMul (matmul+leakyrelu, quant_matmul 等)
-- Norm 变体: RMSNorm, LayerNorm (多 strategy)
+本 skill 仅用于 CLAUDE.md 结构路由判定出的**复杂算子**路径：计算图包含多个相互依赖阶段，
+需要显式描述中间张量、阶段边界、跨阶段流水或同步关系。某个 API、算子类别或名称的出现都
+不能单独决定是否使用本 skill。
 
-- Sort: Sort, TopK
-- 多输入融合: Concat, multi-tensor fused ops
-
-**简单算子**（Index, IndexPut, Gather, Scatter, Nonzero, RepeatInterleave, EmbeddingDenseBackward）走 ops-direct-invoke 工作流（Architect 设计 → Developer 实现 → Reviewer 审查），不使用本 skill。
+只在 Phase 0 根据实际计算图判定为 `fused` 或 `other` 的复杂路径使用本 skill；`single_op`
+路径跳过 TileLang，在下一阶段直接由 `tilelang2ascend-translator` 基于 `model.py` 补全 Polar
+预生成骨架。禁止按算子名称、文件名或历史白名单决定是否调用本 skill。
 
 ## 关键限制
 - 必须将核心计算融合成单个算子实现，不要拆分成多个独立算子。
@@ -39,8 +37,7 @@ argument-hint: >
 .
 ├── {output_dir}/         # 当前活跃任务目录
 │   ├── model.py          # 参考 PyTorch 模型，禁止修改
-│   ├── <op_name>.json    # 原始测试用例文件（备份保留）
-│   ├── <op_name>.json.bak# 原始 .json 备份
+│   ├── <op_name>.json    # 数据集原版测试用例，禁止修改、精简或备份
 │   ├── design/           # TileLang DSL 用于表达 kernel 设计
 │   │   ├── block_level/  # TileLang block-level 设计
 │   │   └── tile_level/   # TileLang tile-level 设计，用于表达完整 kernel 设计
@@ -55,7 +52,8 @@ argument-hint: >
 - `.claude/skills/tilelang2ascend-tilelang-designer/references/TileLangAscendProgrammingGuide.md` — TileLang Ascend 编程指南
 - `.claude/skills/tilelang2ascend-tilelang-designer/references/TileLangDebug.md` — TileLang 调试指南（仅在需要排查 DSL 表达问题时参考）
 - `.claude/skills/tilelang2ascend-tilelang-designer/references/attention-patterns/AttentionPatternIndex.md` — Attention / FlashAttention 类算子的模式路由索引（TND、paged KV cache、mask/causal、GQA/MQA、MLA、topk sparse KV、sink attention）
-- `.claude/skills/tilelang2ascend-tilelang-designer/scripts/evaluate_tilelang.sh` — TileLang 评测脚本（当前仅供可选调试，不作为流程 gate）
+- `.claude/skills/tilelang2ascend-tilelang-designer/scripts/validate_tilelang_impl.py` — TileLang AST 退化检查（不占卡）
+- `.claude/skills/tilelang2ascend-tilelang-designer/scripts/verification_tilelang.py` — TileLang 功能验证（占卡，必须经 NPU lease）
 
 除非用户明确指定其他目录，否则默认使用传入的 `output_dir` 作为当前任务目录。
 其他任务目录可以作为参考实现。
@@ -99,7 +97,7 @@ argument-hint: >
 
 0.3 🛑 只读取命中的文档（渐进式披露，只读需要的）:
     - 命中模式 → Read 对应文档顶部的"先读这个"部分
-    - 7 项全否定 → Read workflows/templates/archive_tasks/flash_attention/ 中的
+    - 7 项全否定 → Read .claude/workflows/templates/archive_tasks/flash_attention/design/ 中的
       block_level/flash_attention.py 和 tile_level/flash_attention.py
       重点理解: online softmax rescale、Q 分块循环、O 分块循环、C/V split 流水线
 
@@ -122,6 +120,30 @@ argument-hint: >
 2. `Tile 层级设计`
    在第一步基础上继续生成 `{output_dir}/design/tile_level/`。直接以 block-level 设计为骨架，在 tile-level 中补全各处 `TODO(tile-level)`，完成用于表达设计意图的 TileLang 设计与实现。
    参考文档：`.claude/skills/tilelang2ascend-tilelang-designer/references/TileLangAscendProgrammingGuide.md`
-3. `TileLang 自检（可选）`
-   如用户明确要求，或为了排查 DSL 语法 / 编译问题，可调用 `.claude/skills/tilelang2ascend-tilelang-designer/scripts/evaluate_tilelang.sh {output_dir}` 做辅助检查；但 TileLang 结果当前不作为 correctness gate，也不作为性能测试输入。若遇到框架语义缺陷、尾块处理异常或其他 TileLang 自身 bug，应保留设计表达并在最终说明中明确记录，不要为了通过 TileLang 验证而扭曲设计。
-   参考文档：`.claude/skills/tilelang2ascend-tilelang-designer/references/TileLangDebug.md`
+3. `TileLang AST 门禁（强制，不走 AscendC 固定入口）`
+   每次生成或修改 `model_new_tilelang.py` 后，必须直接运行不占卡的 AST 退化检查：
+
+   ```bash
+   python3 .claude/skills/tilelang2ascend-tilelang-designer/scripts/validate_tilelang_impl.py \
+       {output_dir}/model_new_tilelang.py
+   ```
+
+   AST 失败时必须使用脚本输出的 `regression_type` 与 `suggestion` 修复。首次生成计为第 1
+   份候选，复杂路径最多允许 3 份候选；禁止对未变化的候选重复运行检查。第 3 份仍失败时，
+   未通过 AST 的 wrapper 不得交给 translator，由主流程回退到 `model.py + 预生成骨架`。
+
+4. `TileLang 上板诊断（可选，不进入自动 pipeline）`
+   只有后续错误明确需要验证 DSL 语法或功能时，才允许经 Polar NPU lease 包装器运行：
+
+   ```bash
+   python3 tools/npu_lease_exec.py --pool "$POLAR_NPU_LEASE_POOL" \
+       --lock-dir "$POLAR_NPU_LOCK_DIR" -- \
+       python3 .claude/skills/tilelang2ascend-tilelang-designer/scripts/verification_tilelang.py \
+       {output_dir}
+   ```
+
+   禁止直接运行 `evaluate_tilelang.sh`。不要为了“完整走流程”自动执行上板诊断，也不要围绕
+   它建立重试或性能循环。TileLang 上板结果不作为 correctness gate，也不作为性能测试输入。
+   若遇到框架语义缺陷、尾块处理异常或其他 TileLang 自身 bug，应保留设计表达并在最终说明中明确记录，
+   不要为了通过 TileLang 验证而扭曲设计。调试时参考
+   `.claude/skills/tilelang2ascend-tilelang-designer/references/TileLangDebug.md`。

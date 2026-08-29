@@ -46,11 +46,14 @@ import subprocess
 import sys
 import tempfile
 import time
+from collections.abc import Mapping
 from pathlib import Path
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
 
 LOGGER = logging.getLogger(__name__)
+
+PERF_TARGET_SPEEDUP = 1.1
 
 METRICS = [
     "PipeUtilization",
@@ -583,19 +586,130 @@ def _move(v, d):
     import torch
     if isinstance(v, torch.Tensor):
         return v.to(d)
-    if isinstance(v, (list, tuple)):
-        return type(v)(_move(x, d) for x in v)
+    if isinstance(v, Mapping):
+        return {key: _move(value, d) for key, value in v.items()}
+    if isinstance(v, list):
+        return [_move(x, d) for x in v]
+    if isinstance(v, tuple):
+        return tuple(_move(x, d) for x in v)
     return v
 
 
 def _clone(v):
-    """Deep clone tensor / list of tensors."""
+    """Deep clone tensors nested in mappings, lists, or tuples."""
     import torch
     if isinstance(v, torch.Tensor):
         return v.clone()
-    if isinstance(v, (list, tuple)):
-        return type(v)(_clone(x) for x in v)
+    if isinstance(v, Mapping):
+        return {key: _clone(value) for key, value in v.items()}
+    if isinstance(v, list):
+        return [_clone(x) for x in v]
+    if isinstance(v, tuple):
+        return tuple(_clone(x) for x in v)
     return v
+
+
+def _resolve_input_groups(module):
+    """Return model input cases without conflating a case with its arguments.
+
+    ``get_input_groups()`` returns multiple cases.  CUDA-LLM's ``get_inputs()``
+    returns the arguments of exactly one case, so it must be wrapped once rather
+    than indexed as if each argument were a separate case.
+    """
+    if hasattr(module, "get_input_groups"):
+        groups = module.get_input_groups()
+        if not isinstance(groups, (list, tuple)) or not groups:
+            raise ValueError("get_input_groups() must return a non-empty list or tuple")
+        return list(groups)
+    if hasattr(module, "get_inputs"):
+        return [module.get_inputs()]
+    module_path = getattr(module, "__file__", repr(module))
+    raise AttributeError(
+        f"Neither get_input_groups() nor get_inputs() found in {module_path}"
+    )
+
+
+def _forward_signature(model_or_class):
+    """Return a callable signature for a bound model or an nn.Module class."""
+    target = getattr(model_or_class, "forward", model_or_class)
+    signature = inspect.signature(target)
+    parameters = list(signature.parameters.values())
+    if inspect.isclass(model_or_class) and parameters and parameters[0].name in ("self", "cls"):
+        signature = signature.replace(parameters=parameters[1:])
+    return signature
+
+
+def _bind_case(model_or_class, case):
+    """Bind one dataset case to ``forward`` and return ``(args, kwargs)``.
+
+    Mapping cases bind by parameter name.  Sequence cases retain the historical
+    positional contract, with any values after the declared positional slots
+    bound to keyword-only parameters in declaration order.  This covers both
+    CUDA-LLM's positional ``get_inputs()`` and NPUKernelBench Level-4 providers
+    that flatten positional and keyword-only values into one sequence.
+
+    The function validates the call before execution.  It deliberately never
+    catches a ``TypeError`` raised by the model body, because that is a genuine
+    model failure rather than evidence that another binding strategy is needed.
+    """
+    signature = _forward_signature(model_or_class)
+    if isinstance(case, Mapping):
+        args = ()
+        kwargs = dict(case)
+        signature.bind(*args, **kwargs)
+        return args, kwargs
+
+    if isinstance(case, (list, tuple)):
+        values = list(case)
+    else:
+        values = [case]
+
+    parameters = list(signature.parameters.values())
+    positional = [
+        parameter for parameter in parameters
+        if parameter.kind in (
+            inspect.Parameter.POSITIONAL_ONLY,
+            inspect.Parameter.POSITIONAL_OR_KEYWORD,
+        )
+    ]
+    keyword_only = [
+        parameter for parameter in parameters
+        if parameter.kind == inspect.Parameter.KEYWORD_ONLY
+    ]
+    has_varargs = any(
+        parameter.kind == inspect.Parameter.VAR_POSITIONAL for parameter in parameters
+    )
+
+    if has_varargs and keyword_only and len(values) > len(positional):
+        raise TypeError(
+            "flat input case is ambiguous for forward(*args, keyword-only...); "
+            "return a mapping from the input provider"
+        )
+
+    if has_varargs:
+        args = tuple(values)
+        kwargs = {}
+    else:
+        args = tuple(values[:len(positional)])
+        remaining = values[len(positional):]
+        if len(remaining) > len(keyword_only):
+            raise TypeError(
+                f"input case has {len(values)} values but forward accepts at most "
+                f"{len(positional) + len(keyword_only)}"
+            )
+        kwargs = {
+            parameter.name: value
+            for parameter, value in zip(keyword_only, remaining)
+        }
+
+    signature.bind(*args, **kwargs)
+    return args, kwargs
+
+
+def _invoke_model(model, case):
+    """Invoke a model with a case using the shared dataset binding contract."""
+    args, kwargs = _bind_case(model, case)
+    return model(*args, **kwargs)
 
 
 def _read_jsonl_file(path: Path):
@@ -672,99 +786,170 @@ def _case_has_empty_tensor(case):
     """判断 case 中是否包含 0 元素张量（空 tensor）。"""
     if not case:
         return False
+    if "_provider_has_empty_tensor" in case:
+        return bool(case["_provider_has_empty_tensor"])
     for inp in case.get("inputs", []):
         if inp.get("type") == "tensor":
             shape = inp.get("shape", [])
-            if not shape or any(s == 0 for s in shape):
+            # shape=[] is a scalar tensor (one element), while shape=None is an
+            # omitted optional tensor.  Only an explicit zero dimension is empty.
+            if isinstance(shape, (list, tuple)) and any(size == 0 for size in shape):
                 return True
     return False
 
 
-def _jsonl_scalar_value(inp):
-    """从 JSONL/KernelBench 标量描述中提取一个 Python 标量值。"""
-    val = inp.get("value")
-    if val is None:
-        rv = inp.get("range_values")
-        if isinstance(rv, (int, float, bool, complex)):
-            val = rv
-        elif isinstance(rv, list) and len(rv) > 0:
-            val = rv[0]
-        elif isinstance(rv, dict):
-            mean = rv.get("mean")
-            if isinstance(mean, list) and len(mean) > 0:
-                val = mean[0]
-    if val is None:
-        dtype_str = inp.get("dtype", "")
-        if dtype_str == "bool":
-            val = True
-        elif dtype_str.startswith("int") or dtype_str.startswith("uint"):
-            val = 1
-        else:
-            val = 1.0
+def _value_has_empty_tensor(value):
+    """Inspect a provider value recursively; provider data is authoritative."""
+    import torch
+    if isinstance(value, torch.Tensor):
+        return value.numel() == 0
+    if isinstance(value, Mapping):
+        return any(_value_has_empty_tensor(item) for item in value.values())
+    if isinstance(value, (list, tuple)):
+        return any(_value_has_empty_tensor(item) for item in value)
+    return False
 
-    dtype_str = inp.get("dtype", "")
+
+def _jsonl_scalar_value(inp):
+    """Resolve an attr/scalar while preserving its declared Python semantics."""
+    dtype_str = str(inp.get("dtype", "")).lower()
+    if "value" in inp:
+        value = inp.get("value")
+    else:
+        value = None
+        range_values = inp.get("range_values")
+        if isinstance(range_values, (int, float, bool, complex, str, list, tuple)):
+            if isinstance(range_values, list) and range_values and dtype_str not in ("list", "tuple"):
+                value = range_values[0]
+            else:
+                value = range_values
+        elif isinstance(range_values, dict):
+            mean = range_values.get("mean")
+            if isinstance(mean, list) and mean:
+                value = mean[0]
+
+    if value is None:
+        if "value" in inp:
+            return None
+        if dtype_str == "bool":
+            return True
+        if dtype_str.startswith(("int", "uint")):
+            return 1
+        if dtype_str in ("str", "string"):
+            return ""
+        if dtype_str == "tuple":
+            return ()
+        if dtype_str == "list":
+            return []
+        return 1.0
+
+    if dtype_str == "tuple":
+        return tuple(value)
+    if dtype_str == "list":
+        return list(value)
+    if dtype_str in ("str", "string", "dtype") or isinstance(value, str):
+        return str(value)
     if dtype_str == "bool":
-        return bool(val)
+        return bool(value)
     if dtype_str.startswith("complex"):
-        return complex(val)
-    if dtype_str.startswith("int") or dtype_str.startswith("uint"):
-        return int(val)
-    return float(val)
+        return complex(value)
+    if dtype_str.startswith(("int", "uint")):
+        return int(value)
+    if isinstance(value, (list, tuple, dict, bool)):
+        return value
+    return float(value)
+
+
+_JSONL_DTYPE_MAP = {
+    "fp16": "torch.float16", "float16": "torch.float16", "half": "torch.float16",
+    "fp32": "torch.float32", "float32": "torch.float32", "float": "torch.float32",
+    "fp64": "torch.float64", "float64": "torch.float64",
+    "bf16": "torch.bfloat16", "bfloat16": "torch.bfloat16",
+    "int8": "torch.int8", "int16": "torch.int16", "int32": "torch.int32",
+    "int": "torch.int32", "int64": "torch.int64", "long": "torch.int64",
+    "uint8": "torch.uint8", "uint16": "torch.uint16", "uint32": "torch.uint32",
+    "uint64": "torch.uint64", "bool": "torch.bool",
+    "complex64": "torch.complex64", "complex128": "torch.complex128",
+}
+
+_JSONL_DTYPE_ATTRIBUTE_MAP = {
+    **_JSONL_DTYPE_MAP,
+    # PyTorch exposes packed int4 through the quint4x2 dtype object.
+    "int4": "torch.quint4x2",
+}
 
 
 def _jsonl_tensor_code(shape, dtype_str: str) -> str:
     """根据 KernelBench 的 dtype/shape 生成构造 tensor 的代码。"""
-    dtype_map = {
-        "fp16": "torch.float16", "float16": "torch.float16", "half": "torch.float16",
-        "fp32": "torch.float32", "float32": "torch.float32", "float": "torch.float32",
-        "fp64": "torch.float64", "float64": "torch.float64",
-        "bf16": "torch.bfloat16", "bfloat16": "torch.bfloat16",
-        "int8": "torch.int8", "int16": "torch.int16", "int32": "torch.int32",
-        "int": "torch.int32", "int64": "torch.int64", "long": "torch.int64",
-        "uint8": "torch.uint8", "uint16": "torch.uint16", "uint32": "torch.uint32", "uint64": "torch.uint64",
-        "bool": "torch.bool",
-        "complex64": "torch.complex64", "complex128": "torch.complex128",
-    }
-    dtype = dtype_map.get(dtype_str, "torch.float32")
-    shape_expr = str(shape)
+    dtype_str = str(dtype_str).lower()
+    dtype = _JSONL_DTYPE_MAP.get(dtype_str, "torch.float32")
+    shape_expr = repr(tuple(shape))
 
     if dtype_str == "bool":
-        return f"inputs.append(torch.randint(0, 2, {shape_expr}, dtype={dtype}))"
+        return f"torch.randint(0, 2, {shape_expr}, dtype={dtype})"
     if dtype_str.startswith("int") or dtype_str.startswith("uint"):
         # 先以 int64 生成再转换到目标类型，避免 torch.randint 不支持 uint/低精度 int
-        return f"inputs.append(torch.randint(-100, 100, {shape_expr}, dtype=torch.int64).to({dtype}))"
+        return f"torch.randint(-100, 100, {shape_expr}, dtype=torch.int64).to({dtype})"
     if dtype_str.startswith("complex"):
-        return f"inputs.append(torch.randn({shape_expr}, dtype={dtype}))"
+        return f"torch.randn({shape_expr}, dtype={dtype})"
     # float/half/bf16
-    return f"inputs.append(torch.randn({shape_expr}, dtype={dtype}))"
+    return f"torch.randn({shape_expr}, dtype={dtype})"
+
+
+def _jsonl_value_code(inp):
+    """Return deterministic Python source for one JSON input descriptor."""
+    typ = inp.get("type", "tensor")
+    if typ == "tensor":
+        dtype_str = str(inp.get("dtype", "float16")).lower()
+        if inp.get("shape") is None and "value" not in inp:
+            return "None"
+        if "value" in inp:
+            value = inp.get("value")
+            if value is None:
+                return "None"
+            dtype = _JSONL_DTYPE_MAP.get(dtype_str, "torch.float32")
+            return f"torch.tensor({value!r}, dtype={dtype})"
+        return _jsonl_tensor_code(inp.get("shape", []), dtype_str)
+    if typ == "tensor_list":
+        values = []
+        for tensor_info in inp.get("value", []):
+            if "value" in tensor_info:
+                dtype_str = str(tensor_info.get("dtype", "float16")).lower()
+                dtype = _JSONL_DTYPE_MAP.get(
+                    dtype_str, "torch.float32"
+                )
+                values.append(f"torch.tensor({tensor_info.get('value')!r}, dtype={dtype})")
+            else:
+                values.append(_jsonl_tensor_code(
+                    tensor_info.get("shape", []), tensor_info.get("dtype", "float16")
+                ))
+        return "[" + ", ".join(values) + "]"
+    if typ in ("attr", "scalar"):
+        value = _jsonl_scalar_value(inp)
+        if str(inp.get("dtype", "")).lower() == "dtype" and isinstance(value, str):
+            normalized = value.removeprefix("torch.")
+            dtype_expr = _JSONL_DTYPE_ATTRIBUTE_MAP.get(normalized)
+            if dtype_expr is None:
+                raise ValueError(f"unsupported torch dtype attribute: {value}")
+            return dtype_expr
+        return repr(value)
+    if "value" in inp:
+        return repr(inp.get("value"))
+    raise ValueError(f"unsupported JSON input descriptor type: {typ}")
 
 
 def _serialize_jsonl_inputs(case):
-    import torch
-    lines = ["inputs = []"]
-    for inp in case.get("inputs", []):
-        typ = inp.get("type", "tensor")
-        if typ == "tensor":
-            shape = inp.get("shape", [])
-            dtype_str = inp.get("dtype", "float16")
-            lines.append(_jsonl_tensor_code(shape, dtype_str))
-        elif typ in ("attr", "scalar"):
-            val = _jsonl_scalar_value(inp)
-            if isinstance(val, str):
-                lines.append(f"inputs.append({repr(val)})")
-            else:
-                lines.append(f"inputs.append({repr(val)})")
-        elif typ == "tensor_list":
-            lines.append("_tensors = []")
-            for tinfo in inp.get("value", []):
-                shape = tinfo.get("shape", [])
-                dtype_str = tinfo.get("dtype", "float16")
-                _elem = _jsonl_tensor_code(shape, dtype_str).split("inputs.append(")[1].rstrip(")")
-                lines.append(f"_tensors.append({_elem})")
-            lines.append("inputs.append(_tensors)")
+    """Serialize JSON fallback inputs without losing names or Python types."""
+    descriptors = case.get("inputs", [])
+    names = [descriptor.get("name") for descriptor in descriptors]
+    use_mapping = bool(descriptors) and all(names) and len(set(names)) == len(names)
+    lines = ["fallback_case = {}" if use_mapping else "fallback_case = []"]
+    for descriptor in descriptors:
+        value_code = _jsonl_value_code(descriptor)
+        if use_mapping:
+            lines.append(f"fallback_case[{descriptor['name']!r}] = {value_code}")
         else:
-            val = _jsonl_scalar_value(inp)
-            lines.append(f"inputs.append({repr(val)})")
+            lines.append(f"fallback_case.append({value_code})")
     return "\n".join(lines)
 
 
@@ -778,20 +963,29 @@ class _WrapperConfig:
     device_id: int
     warmup: int
     jsonl_case: Optional[Dict[str, Any]] = None
+    case_cache_path: Optional[Path] = None
 
 
 _WRAPPER_SCRIPT_TEMPLATE = """\
 #!/usr/bin/env python3
 import importlib.util
+import inspect
 import os
 import sys
 import torch
+from collections.abc import Mapping
 from pathlib import Path
 
 out_dir = Path("{out_dir}")
 os.environ["ASCEND_RT_VISIBLE_DEVICES"] = "{device_id}"
 sys.path.insert(0, str(out_dir / "kernel" / "build"))
 sys.path.insert(0, str(out_dir))
+
+torch.manual_seed({seed})
+try:
+    torch.npu.manual_seed_all({seed})
+except Exception:
+    pass
 
 def _load(path, name):
     spec = importlib.util.spec_from_file_location(name, path)
@@ -809,30 +1003,75 @@ device = torch.device("npu")
 def _move(v):
     if isinstance(v, torch.Tensor):
         return v.to(device)
-    if isinstance(v, (list, tuple)):
-        return type(v)(_move(x) for x in v)
+    if isinstance(v, Mapping):
+        return {{key: _move(value) for key, value in v.items()}}
+    if isinstance(v, list):
+        return [_move(x) for x in v]
+    if isinstance(v, tuple):
+        return tuple(_move(x) for x in v)
     return v
-inputs = _move(inputs)
+
+{binding_code}
+
+input_case = _move(input_case)
+_call_args, _call_kwargs = _bind_case(_contract_cls, input_case)
 
 # ---- model construction (init 参数与对拍脚本 verification_ascendc.py 同一约定:扁平展开) ----
 # 能走到测速的模型都已被对拍用 cls(*get_init_inputs()) 成功建过,照抄该约定即对所有
 # 可测速算子兼容。init 来源先试实现模块(model_new 一般没有 get_init_inputs),没有再
 # 回落 model.py —— 构造参数属于任务定义,不属于实现。
-try:
-    _init_src = mod if hasattr(mod, "get_init_inputs") else _load(out_dir / "model.py", "init_ref")
-    _init_vals = _init_src.get_init_inputs() if hasattr(_init_src, "get_init_inputs") else []
-except Exception:
-    _init_vals = []
+_init_src = mod if hasattr(mod, "get_init_inputs") else _ref_mod
+_init_vals = _init_src.get_init_inputs() if hasattr(_init_src, "get_init_inputs") else []
 model = cls(*_init_vals).to(device).eval()
 
 for _ in range({warmup}):
     with torch.no_grad():
-        _ = model(*inputs)
+        _ = model(*_call_args, **_call_kwargs)
     torch.npu.synchronize()
 
 with torch.no_grad():
-    _ = model(*inputs)
+    _ = model(*_call_args, **_call_kwargs)
 torch.npu.synchronize()
+"""
+
+
+_WRAPPER_BINDING_CODE = """\
+def _forward_signature(model_or_class):
+    target = getattr(model_or_class, "forward", model_or_class)
+    signature = inspect.signature(target)
+    parameters = list(signature.parameters.values())
+    if inspect.isclass(model_or_class) and parameters and parameters[0].name in ("self", "cls"):
+        signature = signature.replace(parameters=parameters[1:])
+    return signature
+
+def _bind_case(model_or_class, case):
+    signature = _forward_signature(model_or_class)
+    if isinstance(case, Mapping):
+        args, kwargs = (), dict(case)
+        signature.bind(*args, **kwargs)
+        return args, kwargs
+    values = list(case) if isinstance(case, (list, tuple)) else [case]
+    parameters = list(signature.parameters.values())
+    positional = [p for p in parameters if p.kind in (
+        inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD)]
+    keyword_only = [p for p in parameters if p.kind == inspect.Parameter.KEYWORD_ONLY]
+    has_varargs = any(p.kind == inspect.Parameter.VAR_POSITIONAL for p in parameters)
+    if has_varargs and keyword_only and len(values) > len(positional):
+        raise TypeError(
+            "flat input case is ambiguous for forward(*args, keyword-only...); "
+            "return a mapping from the input provider")
+    if has_varargs:
+        args, kwargs = tuple(values), {}
+    else:
+        args = tuple(values[:len(positional)])
+        remaining = values[len(positional):]
+        if len(remaining) > len(keyword_only):
+            raise TypeError(
+                "input case has %d values but forward accepts at most %d" %
+                (len(values), len(positional) + len(keyword_only)))
+        kwargs = {p.name: value for p, value in zip(keyword_only, remaining)}
+    signature.bind(*args, **kwargs)
+    return args, kwargs
 """
 
 
@@ -843,10 +1082,42 @@ def _build_wrapper_script_content(cfg, model_file, cls_name, inputs_code):
         device_id=cfg.device_id,
         case_idx=cfg.case_idx,
         warmup=cfg.warmup,
+        seed=cfg.seed,
         model_file=model_file,
         cls_name=cls_name,
         inputs_code=inputs_code,
+        binding_code=_WRAPPER_BINDING_CODE,
     )
+
+
+def _provider_inputs_code(case_idx, has_fallback):
+    fallback = "input_case = fallback_case" if has_fallback else (
+        'raise AttributeError("model.py must provide get_inputs() or get_input_groups()")'
+    )
+    return f'''\
+_ref_mod = _load(out_dir / "model.py", "ref_for_inputs")
+_contract_cls = getattr(_ref_mod, "Model")
+if hasattr(_ref_mod, "get_input_groups"):
+    _input_groups = _ref_mod.get_input_groups()
+    if not isinstance(_input_groups, (list, tuple)) or not _input_groups:
+        raise ValueError("get_input_groups() must return a non-empty list or tuple")
+    input_case = _input_groups[{case_idx}]
+elif hasattr(_ref_mod, "get_inputs"):
+    if {case_idx} != 0:
+        raise IndexError("get_inputs() defines exactly one input case")
+    input_case = _ref_mod.get_inputs()
+else:
+    {fallback}
+'''
+
+
+def _cached_inputs_code(case_cache_path: Path):
+    """Load one pipeline-scoped case instead of re-running its provider."""
+    return f'''\
+_ref_mod = _load(out_dir / "model.py", "ref_for_inputs")
+_contract_cls = getattr(_ref_mod, "Model")
+input_case = torch.load({str(case_cache_path)!r}, map_location="cpu")
+'''
 
 
 def _generate_wrapper_script(cfg: _WrapperConfig):
@@ -857,24 +1128,14 @@ def _generate_wrapper_script(cfg: _WrapperConfig):
         model_file = "model_new_ascendc.py"
         cls_name = "ModelNew"
 
-    if cfg.jsonl_case is not None:
-        inputs_code = _serialize_jsonl_inputs(cfg.jsonl_case)
+    if cfg.case_cache_path is not None:
+        inputs_code = _cached_inputs_code(cfg.case_cache_path)
     else:
-        # 对齐 triton 的 resolve_inputs: get_input_groups 返回多组 case 直接用;
-        # 只有 get_inputs(单组输入)时包一层成 [inputs],否则 input_groups[case_idx]
-        # 会取到单个 tensor 而不是输入列表,model(*tensor) 直接 TypeError 崩掉。
-        # 注意: 这段代码会被嵌进 _WRAPPER_SCRIPT_TEMPLATE 的模块顶层,所以基础语句必须
-        # 0 缩进(if/elif/else 内部才用 4 空格相对缩进),否则生成脚本 IndentationError。
-        inputs_code = f"""
-ref_mod = _load(out_dir / "model.py", "ref_for_inputs")
-if hasattr(ref_mod, "get_input_groups"):
-    input_groups = ref_mod.get_input_groups()
-elif hasattr(ref_mod, "get_inputs"):
-    input_groups = [ref_mod.get_inputs()]
-else:
-    raise AttributeError("model.py must provide get_inputs() or get_input_groups()")
-inputs = input_groups[{cfg.case_idx}]
-"""
+        provider_code = _provider_inputs_code(cfg.case_idx, cfg.jsonl_case is not None)
+        if cfg.jsonl_case is not None:
+            inputs_code = _serialize_jsonl_inputs(cfg.jsonl_case) + "\n\n" + provider_code
+        else:
+            inputs_code = provider_code
     return _build_wrapper_script_content(cfg, model_file, cls_name, inputs_code)
 
 
@@ -884,6 +1145,33 @@ def _find_msprof_script():
     if candidate.exists():
         return str(candidate)
     return "msprof_profile_run.sh"
+
+
+def _save_app_output(output_dir: str, stdout: str, stderr: str) -> str:
+    """Persist profiler/app output so wrapper failures remain diagnosable."""
+    log_path = os.path.join(output_dir, "app_output.log")
+    try:
+        with open(log_path, "w", encoding="utf-8", errors="replace") as output:
+            output.write("=== stdout ===\n")
+            output.write(stdout or "")
+            output.write("\n=== stderr ===\n")
+            output.write(stderr or "")
+    except OSError:
+        pass
+    return log_path
+
+
+def _extract_app_crash(stdout: str, stderr: str):
+    """Detect Python app failures that some msprof versions report with rc=0."""
+    output = (stdout or "") + "\n" + (stderr or "")
+    if "Traceback" not in output and "An exception has occurred in process App" not in output:
+        return None
+    exception_lines = re.findall(
+        r"^(\w[\w.]*(?:Error|Exception|Interrupt)\b[^\n]*)", output, re.MULTILINE
+    )
+    if exception_lines:
+        return exception_lines[-1].strip()[:200]
+    return "app raised an exception during profiling"
 
 
 def _run_msprof_standard(wrapper_script: str, output_dir: str, device_id: int, warmup: int = 3):
@@ -912,12 +1200,17 @@ def _run_msprof_standard(wrapper_script: str, output_dir: str, device_id: int, w
     except OSError:
         pass
 
+    app_log = _save_app_output(output_dir, result.stdout, result.stderr)
     if result.returncode != 0:
-        return None, f"msprof failed: {result.stderr[-500:]}"
+        return None, f"msprof failed: {result.stderr[-500:]}\n(app log: {app_log})"
+
+    app_crash = _extract_app_crash(result.stdout, result.stderr)
+    if app_crash:
+        return None, f"profiled app crashed: {app_crash} (app log: {app_log})"
 
     prof_dirs = sorted(Path(output_dir).glob("PROF_GROUP_*"))
     if not prof_dirs:
-        return None, "no PROF_GROUP directory found"
+        return None, f"no PROF_GROUP directory found (app log: {app_log})"
     return str(prof_dirs[-1]), None
 
 
@@ -944,7 +1237,9 @@ def _run_msprof_quick(wrapper_script: str, output_dir: str, device_id: int, warm
         wr = subprocess.run([sys.executable, wrapper_path],
                             capture_output=True, text=True, env=env)
         if wr.returncode != 0:
-            return None, f"wrapper crashed: {(wr.stderr or wr.stdout or '')[-400:]}"
+            app_log = _save_app_output(output_dir, wr.stdout, wr.stderr)
+            crash = _extract_app_crash(wr.stdout, wr.stderr) or (wr.stderr or wr.stdout or "")[-400:]
+            return None, f"wrapper crashed: {crash} (app log: {app_log})"
 
     # Measurement: msprof 只采集正式 timed run
     cmd = [
@@ -961,12 +1256,17 @@ def _run_msprof_quick(wrapper_script: str, output_dir: str, device_id: int, warm
     except OSError:
         pass
 
+    app_log = _save_app_output(output_dir, result.stdout, result.stderr)
     if result.returncode != 0:
-        return None, f"msprof failed: {result.stderr[-500:]}"
+        return None, f"msprof failed: {result.stderr[-500:]}\n(app log: {app_log})"
+
+    app_crash = _extract_app_crash(result.stdout, result.stderr)
+    if app_crash:
+        return None, f"profiled app crashed: {app_crash} (app log: {app_log})"
 
     prof_dirs = sorted(Path(output_dir).glob("PROF_*"))
     if not prof_dirs:
-        return None, "no PROF directory found"
+        return None, f"no PROF directory found (app log: {app_log})"
     return str(prof_dirs[-1]), None
 
 
@@ -1316,6 +1616,7 @@ class _MeasureInput:
     args: argparse.Namespace
     device_id: int
     jsonl_case: Optional[Dict[str, Any]] = None
+    case_cache_path: Optional[Path] = None
 
 
 def _measure_one_impl(mi: _MeasureInput):
@@ -1328,7 +1629,7 @@ def _measure_one_impl(mi: _MeasureInput):
     for _ in range(1 + mi.args.retry):
         wrapper = _generate_wrapper_script(_WrapperConfig(
             mi.out_dir, mi.case_idx, mi.impl, mi.args.seed, mi.device_id,
-            mi.args.warmup, mi.jsonl_case))
+            mi.args.warmup, mi.jsonl_case, mi.case_cache_path))
         tmpdir = f"/tmp/msprof_{impl_abbr}_{mi.out_dir.name}_c{mi.case_idx}"
         prof_dir, err = _run_msprof_standard(wrapper, tmpdir, mi.device_id, mi.args.warmup)
         if prof_dir:
@@ -1357,7 +1658,7 @@ def _measure_one_impl_quick(mi: _MeasureInput):
         # 让 wrapper 内跑 repeats 次 timed run，msprof 一把采集后除以 repeats 得到单次
         wrapper = _generate_wrapper_script(_WrapperConfig(
             mi.out_dir, mi.case_idx, mi.impl, mi.args.seed, mi.device_id,
-            repeats - 1, mi.jsonl_case))
+            repeats - 1, mi.jsonl_case, mi.case_cache_path))
         tmpdir = f"/tmp/msprof_quick_{impl_abbr}_{mi.out_dir.name}_c{mi.case_idx}"
         _cleanup_prof_dirs(tmpdir)
         prof_dir, err = _run_msprof_quick(wrapper, tmpdir, mi.device_id, mi.args.warmup)
@@ -1406,12 +1707,18 @@ def _compute_compare_summary(csi: _CompareSummaryInput):
     """Compute the summary statistics dict for compare mode."""
     speedup_stats = _compute_speedup_stats(csi.speedups)
     timing_stats = _compute_timing_stats(csi.ref_times, csi.asc_times)
+    geomean_speedup = speedup_stats["geomean_speedup"]
     return {
         "task": csi.out_dir.name,
         "task_dir": str(csi.out_dir),
         "n_cases_total": csi.n_cases,
         **speedup_stats,
         **timing_stats,
+        "perf_target_speedup": PERF_TARGET_SPEEDUP,
+        "target_met": (
+            geomean_speedup is not None
+            and geomean_speedup >= PERF_TARGET_SPEEDUP
+        ),
         "warmup": csi.args.warmup,
         "repeats": csi.args.repeats,
         "seed": csi.args.seed,
@@ -1542,25 +1849,113 @@ def _load_cases_from_model(out_dir):
     except Exception:
         return [], None
     try:
-        if hasattr(ref_mod, "get_input_groups"):
-            n = len(ref_mod.get_input_groups())
-        elif hasattr(ref_mod, "get_inputs"):
-            n = 1
-        else:
-            return [], None
+        n = len(_resolve_input_groups(ref_mod))
     except Exception:
         return [], None
     return [None] * n, "model:get_inputs/get_input_groups"
 
 
+def _load_case_metadata(out_dir):
+    """Load optional JSON metadata without letting it define provider inputs."""
+    try:
+        metadata_cases, metadata_source = _load_cases_jsonl(out_dir)
+        if not metadata_cases:
+            metadata_cases, metadata_source = _load_cases_json(out_dir)
+        return metadata_cases, metadata_source
+    except (OSError, ValueError, TypeError, json.JSONDecodeError):
+        return [], None
+
+
 def _load_compare_cases(out_dir):
-    """Load test cases from jsonl or json files in the output directory."""
-    cases, case_source = _load_cases_jsonl(out_dir)
-    if not cases:
-        cases, case_source = _load_cases_json(out_dir)
-    if not cases:
-        cases, case_source = _load_cases_from_model(out_dir)
-    return cases, case_source
+    """Load case metadata while treating model.py's provider as authoritative.
+
+    The JSON files bundled with NPUKernelBench are useful metadata, but the
+    provider owns valid values and exact case count.  CUDA-LLM normally has no
+    JSON at all; an agent-created JSON must therefore not replace its single
+    ``get_inputs()`` case or alter the benchmark contract.
+    """
+    model_cases, model_source = _load_cases_from_model(out_dir)
+    metadata_cases, metadata_source = _load_case_metadata(out_dir)
+
+    if model_cases:
+        if metadata_cases and len(metadata_cases) == len(model_cases):
+            return metadata_cases, f"{model_source}+{metadata_source}:metadata"
+        return model_cases, model_source
+    return metadata_cases, metadata_source
+
+
+def _materialize_compare_cases(out_dir: Path, cache_dir: Path, seed: int):
+    """Materialize provider cases once for one compare/quick pipeline.
+
+    Reference and AscendC wrappers load separate tensor objects from the same
+    serialized case, so they see identical values without sharing mutations.
+    The caller owns ``cache_dir`` and removes it when the pipeline finishes;
+    inputs are never reused across separate evaluation attempts.
+
+    If a provider returns an object that ``torch.save`` cannot serialize, fall
+    back to the historical per-wrapper provider call rather than rejecting an
+    otherwise valid task.
+    """
+    import torch
+
+    model_path = out_dir / "model.py"
+    if not model_path.is_file():
+        cases, source = _load_compare_cases(out_dir)
+        return cases, [None] * len(cases), source
+
+    out_dir_str = str(out_dir)
+    added_to_path = out_dir_str not in sys.path
+    if added_to_path:
+        sys.path.insert(0, out_dir_str)
+    try:
+        ref_mod = _load_module(str(model_path), "ref_for_case_materialization")
+    finally:
+        if added_to_path:
+            sys.path.remove(out_dir_str)
+    if not hasattr(ref_mod, "get_input_groups") and not hasattr(ref_mod, "get_inputs"):
+        cases, source = _load_compare_cases(out_dir)
+        return cases, [None] * len(cases), source
+
+    torch.manual_seed(seed)
+    try:
+        torch.npu.manual_seed_all(seed)
+    except Exception:
+        pass
+    provider_cases = _resolve_input_groups(ref_mod)
+    contract_cls = getattr(ref_mod, "Model")
+    for case in provider_cases:
+        _bind_case(contract_cls, case)
+
+    metadata_cases, metadata_source = _load_case_metadata(out_dir)
+    if metadata_cases and len(metadata_cases) == len(provider_cases):
+        display_cases = [dict(case) if isinstance(case, Mapping) else {} for case in metadata_cases]
+        source = f"model:get_inputs/get_input_groups+{metadata_source}:metadata+pipeline-cache"
+    else:
+        display_cases = [{} for _ in provider_cases]
+        source = "model:get_inputs/get_input_groups+pipeline-cache"
+
+    for display_case, provider_case in zip(display_cases, provider_cases):
+        display_case["_provider_has_empty_tensor"] = _value_has_empty_tensor(provider_case)
+
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    cache_paths = []
+    try:
+        for idx, case in enumerate(provider_cases):
+            cache_path = cache_dir / f"case_{idx:03d}.pt"
+            torch.save(_move(case, torch.device("cpu")), cache_path)
+            cache_paths.append(cache_path)
+    except (OSError, TypeError, RuntimeError, ValueError) as exc:
+        LOGGER.warning(
+            "Provider case cache unavailable (%s); falling back to per-wrapper input generation",
+            exc,
+        )
+        for cache_path in cache_paths:
+            cache_path.unlink(missing_ok=True)
+        return display_cases, [None] * len(provider_cases), source.replace(
+            "+pipeline-cache", "+provider-fallback"
+        )
+
+    return display_cases, cache_paths, source
 
 
 def _log_compare_header(out_dir, args):
@@ -1580,13 +1975,14 @@ def _cleanup_prof_dirs(*dirs):
             shutil.rmtree(d, ignore_errors=True)
 
 
-def _run_compare_loop(out_dir, cases, n_cases, args, device_id):
+def _run_compare_loop(out_dir, cases, case_cache_paths, n_cases, args, device_id):
     """Run the measurement loop over all cases. Returns rows and stats."""
     rows, speedups, ref_times, asc_times = [], [], [], []
 
     for idx in range(n_cases):
         shape, dtype = _extract_shape_dtype_from_jsonl(cases[idx]) if cases else ("?", "?")
         jsonl_case = cases[idx] if cases else None
+        case_cache_path = case_cache_paths[idx] if case_cache_paths else None
 
         if _case_has_empty_tensor(jsonl_case):
             LOGGER.info(f"{idx:<5} {shape:<35} {dtype:<10} "
@@ -1600,8 +1996,12 @@ def _run_compare_loop(out_dir, cases, n_cases, args, device_id):
             })
             continue
 
-        ref_mi = _MeasureInput(out_dir, idx, "reference", args, device_id, jsonl_case)
-        asc_mi = _MeasureInput(out_dir, idx, "ascendc", args, device_id, jsonl_case)
+        ref_mi = _MeasureInput(
+            out_dir, idx, "reference", args, device_id, jsonl_case, case_cache_path
+        )
+        asc_mi = _MeasureInput(
+            out_dir, idx, "ascendc", args, device_id, jsonl_case, case_cache_path
+        )
         ref_us, ref_err, ref_prof_dir = _measure_one_impl(ref_mi)
         asc_us, asc_err, asc_prof_dir = _measure_one_impl(asc_mi)
 
@@ -1633,7 +2033,7 @@ def _run_compare_loop(out_dir, cases, n_cases, args, device_id):
     return rows, speedups, ref_times, asc_times
 
 
-def _run_quick_loop(out_dir, cases, n_cases, args, device_id):
+def _run_quick_loop(out_dir, cases, case_cache_paths, n_cases, args, device_id):
     """快速模式：Run the measurement loop over all cases (只跑 1 轮 msprof).
 
     Returns rows and stats.
@@ -1643,6 +2043,7 @@ def _run_quick_loop(out_dir, cases, n_cases, args, device_id):
     for idx in range(n_cases):
         shape, dtype = _extract_shape_dtype_from_jsonl(cases[idx]) if cases else ("?", "?")
         jsonl_case = cases[idx] if cases else None
+        case_cache_path = case_cache_paths[idx] if case_cache_paths else None
 
         if _case_has_empty_tensor(jsonl_case):
             LOGGER.info(f"{idx:<5} {shape:<35} {dtype:<10} "
@@ -1656,8 +2057,12 @@ def _run_quick_loop(out_dir, cases, n_cases, args, device_id):
             })
             continue
 
-        ref_mi = _MeasureInput(out_dir, idx, "reference", args, device_id, jsonl_case)
-        asc_mi = _MeasureInput(out_dir, idx, "ascendc", args, device_id, jsonl_case)
+        ref_mi = _MeasureInput(
+            out_dir, idx, "reference", args, device_id, jsonl_case, case_cache_path
+        )
+        asc_mi = _MeasureInput(
+            out_dir, idx, "ascendc", args, device_id, jsonl_case, case_cache_path
+        )
         ref_us, ref_err, ref_prof_dir = _measure_one_impl_quick(ref_mi)
         asc_us, asc_err, asc_prof_dir = _measure_one_impl_quick(asc_mi)
 
@@ -1696,14 +2101,18 @@ def run_compare_mode(args):
     device_id, device_src = _select_device_id(args)
     LOGGER.info(f"[INFO] Using NPU device {device_id} (source={device_src})")
 
-    cases, case_source = _load_compare_cases(out_dir)
-    n_cases = len(cases)
-    if case_source:
-        LOGGER.info(f"[INFO] Loaded {n_cases} cases from {case_source}")
+    with tempfile.TemporaryDirectory(prefix="polar_perf_cases_") as cache_root:
+        cases, case_cache_paths, case_source = _materialize_compare_cases(
+            out_dir, Path(cache_root), args.seed
+        )
+        n_cases = len(cases)
+        if case_source:
+            LOGGER.info(f"[INFO] Loaded {n_cases} cases from {case_source}")
 
-    _log_compare_header(out_dir, args)
-    rows, speedups, ref_times, asc_times = _run_compare_loop(
-        out_dir, cases, n_cases, args, device_id)
+        _log_compare_header(out_dir, args)
+        rows, speedups, ref_times, asc_times = _run_compare_loop(
+            out_dir, cases, case_cache_paths, n_cases, args, device_id
+        )
 
     csi = _CompareSummaryInput(
         out_dir, rows, speedups, ref_times, asc_times, n_cases, args, device_id, device_src)
@@ -1719,14 +2128,18 @@ def run_quick_mode(args):
     LOGGER.info(f"[INFO] Using NPU device {device_id} (source={device_src})")
     LOGGER.info("[INFO] Quick mode: 1-round profiling (no aic-metrics)")
 
-    cases, case_source = _load_compare_cases(out_dir)
-    n_cases = len(cases)
-    if case_source:
-        LOGGER.info(f"[INFO] Loaded {n_cases} cases from {case_source}")
+    with tempfile.TemporaryDirectory(prefix="polar_perf_cases_") as cache_root:
+        cases, case_cache_paths, case_source = _materialize_compare_cases(
+            out_dir, Path(cache_root), args.seed
+        )
+        n_cases = len(cases)
+        if case_source:
+            LOGGER.info(f"[INFO] Loaded {n_cases} cases from {case_source}")
 
-    _log_compare_header(out_dir, args)
-    rows, speedups, ref_times, asc_times = _run_quick_loop(
-        out_dir, cases, n_cases, args, device_id)
+        _log_compare_header(out_dir, args)
+        rows, speedups, ref_times, asc_times = _run_quick_loop(
+            out_dir, cases, case_cache_paths, n_cases, args, device_id
+        )
 
     csi = _CompareSummaryInput(
         out_dir, rows, speedups, ref_times, asc_times, n_cases, args, device_id, device_src)
@@ -1761,8 +2174,27 @@ def _extract_trace_table_rows(trace_file_path: str) -> List[str]:
     for line in lines:
         line = line.strip()
         if _is_valid_table_row(line):
-            valid_rows.append(line)
+            valid_rows.append(_normalize_trace_table_row(line))
     return valid_rows
+
+
+def _normalize_trace_table_row(line: str) -> str:
+    """Normalize current and historical trace rows to the single 1.1x target column.
+
+    Historical traces have two performance columns (0.6x and 0.8x).  Recompute the
+    new target result from the recorded speedup so batch reports remain aligned.
+    """
+    columns = [column.strip() for column in line.strip().strip("|").split("|")]
+    if len(columns) < 11:
+        return line
+    raw_speedup = columns[8].lower().removesuffix("x").strip()
+    try:
+        speedup = float(raw_speedup)
+    except ValueError:
+        speedup = None
+    target_met = "是" if speedup is not None and speedup >= PERF_TARGET_SPEEDUP else "否"
+    normalized = columns[:11] + [target_met]
+    return "| " + " | ".join(normalized) + " |"
 
 
 def _load_performance_json(op_dir: Path) -> Optional[Dict[str, Any]]:
@@ -1783,7 +2215,7 @@ def _build_batch_md_summary_table(op_results):
         md_lines.append("## 性能汇总")
         md_lines.append("")
         md_lines.append(
-            "| 算子名称 | 用例数 | 有效用例 | 几何平均加速比 | 平均加速比 | 状态 |"
+            "| 算子名称 | 用例数 | 有效用例 | 几何平均加速比 | 平均加速比 | 达标(≥1.1x) |"
         )
         md_lines.append("| -------- | ------ | -------- | -------------- | ---------- | ---- |")
         for op in op_results:
@@ -1795,7 +2227,10 @@ def _build_batch_md_summary_table(op_results):
             mean = data.get("mean_speedup")
             geo_str = f"{geo:.3f}" if geo is not None else "N/A"
             mean_str = f"{mean:.3f}" if mean is not None else "N/A"
-            status = "✅" if geo is not None and geo > 1 else "⚠️" if geo is not None else "❌"
+            status = (
+                "✅" if geo is not None and geo >= PERF_TARGET_SPEEDUP
+                else "⚠️" if geo is not None else "❌"
+            )
             md_lines.append(f"| {name} | {n_total} | {n_valid} | {geo_str} | {mean_str} | {status} |")
         md_lines.append("")
     return md_lines
@@ -1835,8 +2270,8 @@ def _build_batch_md_trace_section(trace_rows):
         "",
         ("| Level | Problem ID | 算子名称 | 算子类型 | 编译通过 | 精度正确 | "
          "PyTorch 参考延迟 | 生成AscendC代码延迟 | 加速比 | 最终状态 | "
-         "精度正确 | 性能0.6x pytorch | 性能0.8x pytorch |"),
-        "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |",
+         "精度正确 | 性能达标(≥1.1x) |"),
+        "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |",
     ]
     md_lines.extend(trace_rows)
     md_lines.append("")
@@ -1869,6 +2304,7 @@ def _generate_batch_json_report(args, op_results, base_dir):
     batch_summary = {
         "base_dir": str(base_dir),
         "n_operators": len(op_results),
+        "perf_target_speedup": PERF_TARGET_SPEEDUP,
         "operators": [
             {
                 "name": op["name"],
@@ -1878,6 +2314,10 @@ def _generate_batch_json_report(args, op_results, base_dir):
                 "mean_speedup": op["data"].get("mean_speedup"),
                 "mean_ref_us": op["data"].get("mean_ref_us"),
                 "mean_asc_us": op["data"].get("mean_asc_us"),
+                "target_met": (
+                    op["data"].get("geomean_speedup") is not None
+                    and op["data"].get("geomean_speedup") >= PERF_TARGET_SPEEDUP
+                ),
             }
             for op in op_results
         ],

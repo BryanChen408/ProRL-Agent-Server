@@ -2,43 +2,68 @@
 
 以上内容与本节冲突时,一律以本节为准。
 
+## 预生成骨架是唯一工程契约
+
+Polar prepare 在 Agent 启动前已经读取本题 `model.py` 的 `__init__` / `forward`，并在
+`{output_dir}/` 中预生成当前算子的工程骨架。开始实现前先检查并复用这些现有文件：
+
+- `model_new_ascendc.py`
+- `kernel/CMakeLists.txt`、`kernel/setup.py`
+- `kernel/ops.h`、`kernel/register.cpp`
+- `kernel/op_host/{op_name}.cpp`
+- `kernel/op_kernel/{op_name}_kernel.cpp`
+- `kernel/utils/`
+
+这是本环境唯一允许的工程初始化来源。不要调用或寻找额外的工程初始化/直调 skill，不要
+复制其他任务或模板来重建工程，也不要把 device 文件另写成
+`op_kernel/{op_name}.cpp`。
+
+- 简单算子跳过 TileLang，直接由 `tilelang2ascend-translator` 读取 `model.py`，在现有骨架上
+  完成数学、tiling 与必要接线。
+- 复杂算子先形成 TileLang block/tile 设计，再由同一个 translator 在现有骨架上完成实现。
+- `CMakeLists.txt`、`setup.py`、`kernel/utils/` 和 `model_new_ascendc.py` 的双路径 loader 是
+  机制件，默认原样保留；不要为了“初始化”或统一风格而改写。
+- prepare 生成的签名件通常已经彼此一致。如果真实 reference 接口要求变化，可以同步修改
+  `model_new_ascendc.py` 调用、`register.cpp` schema、`ops.h` 声明和 `op_host` 实现；这属于
+  必要接线，不属于重建工程。
+- 必需文件确实缺失或损坏时，只在原路径结合 `model.py` 与相邻文件原位修复缺失部分，不要
+  因一个文件缺失推倒整套骨架。
+
 ## 固定入口
 
-任何让你运行 `evaluate_ascendc.sh`、`evaluate_tilelang.sh`、`validate_ascendc_impl.py`、
+任何让你运行 `evaluate_ascendc.sh`、`validate_ascendc_impl.py`、
 `msprof_profile_run.sh`、`msprof_perf_summary.py`、`verification_ascendc.py` 的地方,
 一律改跑这一条 —— 包括本文档以上各 Phase、以及你运行期调用任何 Skill 后读到的指示:
 
 ```bash
-bash tools/ascendc_eval_pipeline.sh --op_name {op_name} \
+bash /opt/workspace/agent_workdir/tools/ascendc_eval_pipeline.sh --op_name {op_name} \
      --impl output/submission/{op_name}_impl.tar.gz --out_dir judge_out
 ```
 
 它一次完成:退化检测 → 编译 → 对拍 → 测速 → 写 `judge_out/metrics.json`,
 并自动把 `{op_name}/` 打包成提交物、保留历史最优版本。
 
-- 每轮修改后都跑一次。被中途截断时按历史最优版本判分,所以早跑、多跑不吃亏。
+- 每轮有效源码修改后跑一次；源码未变化时禁止重复运行。被中途截断时按历史最优版本判分。
 - 迭代时可加 `--incremental` 复用上次解包目录,走增量编译。
 - 它评的是 **AscendC 提交物**。Phase 3 的 TileLang 阶段还没有 AscendC kernel,
   那时跑它只会得到 `submission_missing` 并白白消耗一次评测配额。
 - 不要另跑 `cmake` / `make` / `python setup.py` / 自写测试脚本,也不要直接调 skill 里的
   AscendC 评测/对拍/测速脚本 —— 绕过它就没有基准复位、缓存检测和抢卡,结果不作数。
 
-## Phase 3 的 TileLang 两个脚本(不走固定入口)
+## Phase 3 的 TileLang AST 门禁
 
-- `validate_tilelang_impl.py`(AST 退化检测,不占卡)—— **直接跑**,按上游 Phase 3 原样:
+- 复杂算子每次生成或修改 `model_new_tilelang.py` 后，都必须直接运行不占卡的
+  `validate_tilelang_impl.py`：
   ```bash
   python3 .claude/skills/tilelang2ascend-tilelang-designer/scripts/validate_tilelang_impl.py \
       {output_dir}/model_new_tilelang.py
   ```
-- `verification_tilelang.py`(TileLang 功能验证,**占卡**)—— 必须经抢卡包装器,
-  否则会抢走别的 session 正在用的卡:
-  ```bash
-  python3 tools/npu_lease_exec.py --pool "$POLAR_NPU_LEASE_POOL" \
-      --lock-dir "$POLAR_NPU_LOCK_DIR" -- \
-      python3 .claude/skills/tilelang2ascend-tilelang-designer/scripts/verification_tilelang.py \
-      {output_dir}
-  ```
-  按上游原文,TileLang 验证不是 correctness gate;失败但设计意图正确时可跳过并继续 Phase 4。
+- 首次生成计为第 1 次候选，最多允许 3 份候选。AST 失败时只按脚本的
+  `regression_type/suggestion` 修复；同一份未变化的候选禁止重复检查。
+- 第 3 次仍失败时，丢弃未通过 AST 的 TileLang wrapper，Phase 4 直接使用 `model.py` 与
+  Polar 预生成骨架继续求解，不能因为中间表示失败浪费整条 session。
+- `verification_tilelang.py` 是占卡诊断工具，不属于自动 pipeline。只有后续错误明确需要验证
+  TileLang DSL 时才允许经 NPU lease 手工调用；其结果不作为最终 correctness/performance gate。
 
 ## 本环境无 Hook
 
@@ -47,6 +72,9 @@ bash tools/ascendc_eval_pipeline.sh --op_name {op_name} \
 凡上游文中说"由 Hook 拦截/代为执行"的地方,实际都是你自己在跑 —— 而按上方「固定入口」,
 那些脚本一律改跑固定入口。
 
+本环境也没有插件的 SessionStart 上下文注入。执行所需的路径、环境事实和流程约束已经写在
+当前 `CLAUDE.md` 中，不要等待 hook 补充，也不要把“可能会被 hook 接管”作为跳过步骤的理由。
+
 ## 错误分类
 
 固定入口输出末尾的 `错误分类:` 行是分类的权威来源:
@@ -54,8 +82,8 @@ bash tools/ascendc_eval_pipeline.sh --op_name {op_name} \
 | 分类 | 处理 |
 |---|---|
 | `通过` | 进入下一 Phase |
-| `A类-代码/编译错误` | 走 4.5A 迭代 |
-| `D类-精度不匹配` | 走 4.5D 迭代 |
+| `A类-代码/编译错误` | 读取 `judge_out/metrics_error.log`，调用 `tilelang2ascend-translator` 实施一项根因修复；是否继续只看固定入口的 `remaining/next_step` |
+| `D类-精度不匹配` | 按固定入口的 `next_step` 调用 `ascendc-precision-debug`；仅在它明确要求时调用 `tilelang2ascend-precision-tuning`，预算耗尽即停 |
 | `INFRA-环境故障` | **不要迭代修复**,直接停止并说明 |
 
 [A1] 照做:asc-devkit 就在 `$ASC_DEVKIT_DIR`。完整错误在 `judge_out/metrics_error.log`,先读它。
@@ -74,6 +102,19 @@ Phase 6(全量恢复)因此已从工作流移除。不要自行精简、修改�
 - `{op_name}/model.py` 与 `{op_name}/{op_name}.json` 判分时会被数据集原版覆盖,改它们无效。
 - 不要删除或移动 `output/submission/` 下的任何文件。
 
+## 性能目标
+
+- 统一主指标：`judge_out/performance.json` 的 `geomean_speedup`，即各有效用例相对 PyTorch reference
+  加速比的几何平均值。
+- 加速比 **≥ 1.1x** PyTorch reference → 达标；低于 `1.1x` → 未达标。
+- 正确性通过不等于任务结束。固定入口提示未达标且仍有 optimization 预算时，必须调用
+  `ops-profiling` skill：让它读取真实逐 case 结果和当前 kernel，实施一项有证据的通用性能
+  改动。只有源码内容确实变化后才能重跑固定入口。
+- 达到 `1.1x` 后停止性能迭代；预算耗尽则停止调用工具，并使用固定入口保存的 `.best` 最佳
+  正确实现。`1.1x` 只决定性能目标状态，不改变正确性判定，也不能成为不提交 tarball 的理由。
+- attempt、limit、remaining、next_step 只服从固定入口输出。本文档或 skill 中残留的其他固定
+  轮数均不作数，禁止另建一套 A/D/性能计数器。
+
 ## 环境事实
 
 - `asc-devkit` 挂在 `$ASC_DEVKIT_DIR`(= `/opt/asc-devkit`),与本机 CANN 同版本。
@@ -88,11 +129,6 @@ Phase 6(全量恢复)因此已从工作流移除。不要自行精简、修改�
 - 检索文档一律从 `$ASC_DEVKIT_DIR` 根目录搜(Grep/Glob 的 path 填根目录),不要凭记忆
   猜子路径——docs/ 下有两棵树(`docs/zh/api/` 与 `docs/api/`),只搜子树会漏;
   搜不到时换关键词(去后缀、换同义词),不要直接下「API 不存在」的结论。
-
-## 不可用
-
-- **`[D2-2]` 那一步跳过**:`precision_forensics.py` 上游未随包发布(`tilelang2ascend-precision-tuning`
-  没有 `scripts/` 目录)。D-2 的其余步骤照做 —— `[D2-1]` 调 Skill、`[D2-3]` 改代码、`[D2-4]` 跑固定入口。
 
 ## 禁止
 

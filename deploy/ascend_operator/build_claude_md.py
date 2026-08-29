@@ -64,13 +64,16 @@ def apply_deltas(text: str) -> str:
     text = text.replace("以 Hook 的分类为准", "以该行的分类为准")
     text = text.replace("如果 Hook 输出中未出现 `错误分类:` 行（例如 Hook 执行异常）", "如果输出中未出现 `错误分类:` 行")
     text = text.replace("Hook 输出 `错误分类: A类` 时", "输出 `错误分类: A类` 时")
+    text = text.replace("确认 Hook 输出 `错误分类: D类`", "确认固定入口输出 `错误分类: D类`")
     text = text.replace("在 Hook 说 A 类时", "在分类为 A 类时")
     text = text.replace("当 evaluate_ascendc.sh 的 Hook 输出包含", "当固定入口输出包含")
     text = text.replace("Hook 分类为 **D 类**", "分类为 **D 类**")
     text = text.replace("evaluate_ascendc.sh 的 Hook 输出明确标注", "固定入口输出明确标注")
     text = text.replace("（Hook 说 A 类）", "（分类为 A 类）")
+    text = text.replace("Hook 说 A 类就必须走 A 类流程", "分类为 A 类就必须走 A 类流程")
     text = text.replace("但 Hook 说 D 类 → Hook 分类为权威，以 Hook 为准", "但分类为 D 类 → 以固定入口的分类为权威")
     text = text.replace("仅在 Hook 分类为 D 类时才能 +1", "仅在分类为 D 类时才能 +1")
+    text = text.replace("错误分类以 固定入口输出", "错误分类以固定入口输出")
 
     # [D4] 非交互 rollout + 共享卡池:参数由 task 固定,不从自由文本解析;
     #      ASCEND_RT_VISIBLE_DEVICES 由抢卡机制注入,agent 自设会抢走别的 session 的卡。
@@ -140,18 +143,19 @@ def apply_deltas(text: str) -> str:
     #      Phase 6 还额外消耗一次固定入口评测预算。且用例精简已在线下数据集侧完成
     #      (src_simple/,每算子 10 case)。整节删除,编号不重排(交叉引用太多),
     #      覆盖区声明「已移除,不要自行精简」。
-    # a) frontmatter skills 列表
+    # a) frontmatter skills 列表。Trace 是离线复盘工具，不应占用 RL 求解轮次。
     text = _sub(text, "  - tilelang2ascend-case-simplifier\n", "")
-    # b) 工作流总览图:删两行 + 图后加注
+    text = _sub(text, "  - tilelang2ascend-trace-recorder\n", "")
+    # b) 工作流总览图:删三行 + 图后加注
     text = _sub(text, "Phase 2: 测试用例精简           (tilelang2ascend-case-simplifier)\n", "")
     text = _sub(text, "Phase 6: 全量用例验证\n", "")
     text = _sub(
         text,
         "Phase 7: Trace 记录            (tilelang2ascend-trace-recorder)\n```",
-        "Phase 7: Trace 记录            (tilelang2ascend-trace-recorder)\n```\n\n"
+        "```\n\n"
         "注：Phase 2（测试用例精简）与 Phase 6（全量用例验证）已从工作流移除 —— "
         "判分恒用数据集原版用例（每次评测自动覆盖工程目录副本），用例精简已在线下数据集侧完成；"
-        "阶段编号保持原样不重排。",
+        "Phase 7 Trace 只用于离线复盘，不进入 RL 求解主流程。阶段编号保持原样不重排。",
     )
     # c) 任务目录结构:json 注释改为「数据集原版」,删 .bak 行
     text = _sub(
@@ -162,32 +166,437 @@ def apply_deltas(text: str) -> str:
     text = _sub(text, "├── <op_name>.json.bak           # 原始用例备份\n", "")
     # d) Phase 2 整节(连同节前的 --- 分隔线一起去掉,避免残留双分隔线)
     text = _cut(text, "---\n\n## Phase 2: 测试用例精简", "## Phase 3: 设计表达", "Phase 2 判分链零作用")
-    # e) Phase 5 收尾:流转目标从 Phase 6 改为 Phase 7
-    text = _sub(
-        text,
-        """- 存在 → 继续 Phase 6
-- 不存在 → 视为 Phase 5 执行失败，重新调用 ops-profiling skill 一次
-- 若仍失败，记录失败原因到 trace.md，继续 Phase 6（不阻塞）
+    # e) Phase 4 的固定入口已经完成第一轮测速。Phase 5 只在低于目标时读取真实结果、
+    #    调用性能 skill 修改实现，再由同一固定入口复测；不允许对未变化源码重复测速。
+    i = text.index("---\n\n## Phase 5: 性能分析")
+    j = text.index("## 错误处理", i)
+    phase5 = """---
 
-**Phase 5 → Phase 6 → Phase 7 流转规则（不可跳过）**：
-无论 Phase 5 结果如何（加速比达标/未达标），都必须执行 Phase 6 和 Phase 7：
-- Phase 6 不是可选步骤：即使精简用例有 1 个失败，全量验证也可能发现更多问题，也可能发现精简用例的 failure 是 false positive
-- Phase 7 不是可选步骤：无论 Phase 6 通过与否，都必须生成 trace.md
-- 禁止以"性能已测试""任务已完成""进化优化已准备"等任何理由跳过 Phase 6 和 Phase 7""",
-        """- 存在 → 继续 Phase 7
-- 不存在 → 视为 Phase 5 执行失败，重新调用 ops-profiling skill 一次
-- 若仍失败，记录失败原因到 trace.md，继续 Phase 7（不阻塞）
+## Phase 5: 性能达标优化
 
-**Phase 5 → Phase 7 流转规则（不可跳过）**：
-无论 Phase 5 结果如何（加速比达标/未达标），都必须执行 Phase 7：
-- Phase 7 不是可选步骤：无论结果如何，都必须生成 trace.md
-- 禁止以"性能已测试""任务已完成""进化优化已准备"等任何理由跳过 Phase 7""",
-    )
-    # f) Phase 6 整节
-    text = _cut(text, "---\n\n## Phase 6: 全量用例验证", "## Phase 7: Trace 记录", "Phase 6 判分链零作用")
-    # g) 错误处理表两行
+Phase 4 的固定入口已经完成正确性验证和第一轮逐 case 测速，不要对同一份源码重复跑一次性能测试。
+
+当固定入口返回 `correctness_ok=true`、`perf_data.speedup_vs_torch < next_step.perf_target_speedup`，且
+`next_step.optimization_remaining > 0` 时，必须调用 `ops-profiling` skill：
+
+1. 读取 `judge_out/metrics.json`、`judge_out/performance.json`、`judge_out/perf.log` 和当前 AscendC 源码；
+2. 基于真实慢 case 与源码提出一项通用优化假设，并实际修改 kernel；
+3. 确认源码内容发生变化后，重新运行一次固定入口验证正确性和 speedup；
+4. 达到 `1.1x` 即停止；未达到且仍有预算时，使用新证据再次调用该 skill；
+5. 预算耗尽时停止调用工具，提交固定入口保存的 `.best` 最佳正确实现。
+
+禁止把重复执行固定入口本身当作“性能优化”。attempt、limit、remaining 与 next_step
+只服从固定入口输出，不在文档中另设一套轮数。
+
+---
+
+"""
+    text = text[:i] + phase5 + text[j:]
+    # f) 错误处理表移除已删除阶段
     text = _sub(text, "| Phase 2 | 无需精简 | 跳过，继续后续阶段 |\n", "")
     text = _sub(text, "| Phase 6 | 全量验证失败 | 记录结果，不修复，继续 Phase 7 |\n", "")
+    text = _sub(text, "| Phase 7 | Trace 记录失败 | 不影响主流程，仅记录失败状态 |\n", "")
+
+    # [D9] 与 RL 相斥:ops-direct-invoke 及其 Architect/Developer/Reviewer subagent
+    #      已在 77f3147a 删除,现役 skills/ 中也不存在该入口。375c9b0e 为恢复上游正文
+    #      引入生成机制时,只把双路径文字带了回来,形成不可执行分支。保留上游“仅复杂
+    #      算子做 TileLang 设计”的路由意图,但把简单算子的落地入口换成现役 translator:
+    #      简单算子直接在预生成骨架上实现,复杂算子先 TileLang 再在同一骨架上实现。
+    #      两条路共用评测/修复闭环,不恢复旧模板和不带本环境覆盖约束的 subagent。
+    text = _sub(
+        text,
+        "description: Ascend C Kernel 开发专家 Agent，双路径（ops-direct-invoke / TileLang）完成算子设计表达和 AscendC kernel 落地",
+        "description: Ascend C Kernel 开发专家 Agent，双路径（简单算子直达预生成骨架 / 复杂算子 TileLang 设计）完成 AscendC kernel 落地",
+    )
+    text = _sub(text, "  - tilelang2ascend-operator-project-init\n", "")
+    text = _sub(
+        text,
+        "你是 **tilelang2ascendc-kernel-generator**，负责从 PyTorch Model 出发，端到端地完成算子设计表达和 AscendC kernel 落地。支持双路径：简单算子走 ops-direct-invoke 工作流（Architect 设计 → Developer 实现 → Reviewer 审查），复杂算子走 TileLang 设计表达 → AscendC 转译。",
+        "你是 **tilelang2ascendc-kernel-generator**，负责从 PyTorch Model 出发完成 AscendC kernel 落地。简单算子直接在 Polar 预生成骨架上实现；复杂算子先做 TileLang 设计表达，再在同一骨架上实现。",
+    )
+    text = _sub(
+        text,
+        "Phase 0: 参数确认 + 算子分类    (解析输入，判定简单/复杂路径)",
+        "Phase 0: 参数确认 + 结构分类    (解析输入，判定是否需要 TileLang 设计)",
+    )
+    text = _sub(
+        text,
+        "Phase 3: 设计表达              (分支)\n"
+        "  ├─ 简单算子: 架构设计 + 设计串讲 (ops-direct-invoke: DESIGN.md + PLAN.md + WALKTHROUGH.md)\n"
+        "  └─ 复杂算子: TileLang 设计  (tilelang2ascend-tilelang-designer + 退化检测 + 迭代)",
+        "Phase 3: 设计表达              (简单算子跳过；复杂算子执行 TileLang 设计与 AST 门禁)",
+    )
+    text = _sub(
+        text,
+        "Phase 4: AscendC 生成与验证    (分支)\n"
+        "  ├─ 简单算子: 开发实现 + 代码审查 + 修复循环 (ops-direct-invoke: 渐进式开发 + REVIEW.md + 最多3轮修复)\n"
+        "  └─ 复杂算子: TileLang→AscendC 转译 (tilelang2ascend-translator + 退化检测 + 迭代)",
+        "Phase 4: AscendC 骨架补全      (两条路径统一调用 tilelang2ascend-translator + 退化检测 + 迭代)",
+    )
+    # CannBot 的现役分类器已经废弃按算子名维护 OP_TAGS/白名单的方式。这里同样按
+    # 章节整体覆盖上游旧路由，避免生成逻辑本身继续携带任何“已知算子名单”。
+    route_start = text.index("## 算子分类路由规则")
+    route_end = text.index("---\n\n## 仲裁参考资源", route_start)
+    structural_route = """## 算子分类路由规则
+
+Phase 0 必须读取 `model.py` 的 `Model.__init__()`、`forward()`、`get_input_groups()` 和关联用例，按实际计算图、输入输出契约与 shape/dtype 变化判定路径。
+
+禁止使用算子名白名单、文件名、编号或“是否见过这个算子”作为路由依据。算子名只能用于展示；即使名称陌生，只要源码表达清楚，也必须按源码结构分类。
+
+分类结果：
+
+- `single_op`：只有一个主导计算原语，或至多两个无需分层定位问题的简单子步骤；Scatter、Gather、归约、逐元素等都可能属于此类，但类别名称本身不能决定结果。
+- `fused`：包含三个及以上相互依赖的计算阶段，或存在需要显式表达中间张量与阶段边界的多阶段数据流。
+- `other`：源码缺失、随机/不可分解，或从现有输入无法可靠建立计算结构。
+
+路由规则：
+
+```
+读取源码与用例
+├─ single_op → 跳过 TileLang，直接调用 translator 在 Polar 预生成骨架上实现
+├─ fused     → 先做 TileLang 设计，再调用 translator 在同一预生成骨架上实现
+└─ other     → 记录无法分类的具体证据，保守走 TileLang 路径
+```
+
+广播、动态 shape、索引、归约或某个 API 的出现都不能单独决定路径；必须结合完整数据流判断。分类只决定是否需要 TileLang 中间设计，不得预先写死 kernel 的数学实现。路由判定在 Phase 0 完成后记录，后续各 Phase 根据路径选择分支。"""
+    text = text[:route_start] + structural_route + "\n\n" + text[route_end:]
+    text = _sub(text, "## Phase 0: 参数确认 + 算子分类", "## Phase 0: 参数确认 + 结构分类")
+    text = _sub(
+        text,
+        "### 算子分类\n\n"
+        "读取 `op_file` (model.py)，分析 forward() 中的计算逻辑，根据「算子分类路由规则」判定算子类型：\n\n"
+        "- 记录 `op_type = \"simple\"` 或 `op_type = \"complex\"`\n"
+        "- 简单算子后续走 ops-direct-invoke 工作流（Architect 设计 → Developer 实现 → Reviewer 审查）\n"
+        "- 复杂算子后续走 TileLang → tilelang2ascend-translator 路径",
+        "### 结构分类\n\n"
+        "读取 `op_file` (model.py) 的 `Model.__init__()`、`forward()`、`get_input_groups()` 与关联用例，应用上方结构路由规则：\n\n"
+        "- 记录 `algorithm_classification = \"single_op\" | \"fused\" | \"other\"`\n"
+        "- 记录观察到的计算阶段、输入输出契约、shape/dtype 行为和分类理由\n"
+        "- 根据分类派生 `op_type = \"simple\"` 或 `op_type = \"complex\"`：`single_op` 为 simple，`fused`/`other` 为 complex\n"
+        "- 简单算子跳过 Phase 3，Phase 4 直接把 `model.py` 与预生成骨架交给 translator\n"
+        "- 复杂算子执行 Phase 3，再把 TileLang 设计与预生成骨架交给 translator\n"
+        "- 禁止仅凭算子名或历史白名单推断分类；陌生名称不等于复杂算子",
+    )
+    text = _sub(
+        text,
+        "if op_type == \"simple\":\n"
+        "    ── 简单算子: 架构设计 + 设计串讲 (ops-direct-invoke) ──\n"
+        "    产出 → {output_dir}/docs/DESIGN.md + PLAN.md + WALKTHROUGH.md\n"
+        "    继续 Phase 4",
+        "if op_type == \"simple\":\n"
+        "    ── 简单算子: 不需要 TileLang 中间表示 ──────────────\n"
+        "    直接进入 Phase 4,由 translator 读取 model.py 并原位补全预生成骨架",
+    )
+    text = _cut(
+        text,
+        "### Phase 3-S: 简单算子 — 架构设计 (ops-direct-invoke 模式)",
+        "### Phase 3-C: 复杂算子 — TileLang 设计表达（迭代循环）",
+        "简单算子不再依赖已删除的 ops-direct-invoke",
+    )
+    text = _sub(
+        text,
+        "if op_type == \"simple\":\n"
+        "    ── 简单算子: 开发实现 + 代码审查 + 修复循环 (ops-direct-invoke) ──\n"
+        "    参考 ops-direct-invoke Step 3-5：渐进式开发 → REVIEW.md → 修复循环\n"
+        "    产出 → {output_dir}/kernel/* + {output_dir}/model_new_ascendc.py + {output_dir}/docs/REVIEW.md",
+        "if op_type == \"simple\":\n"
+        "    调用 tilelang2ascend-translator,输入 model.py + 预生成骨架\n"
+        "    不要求 design/tile_level/ 或 model_new_tilelang.py",
+    )
+    text = _sub(
+        text,
+        "elif op_type == \"complex\":\n"
+        "    ── 复杂算子: TileLang → AscendC 转译 ──────────\n"
+        "    调用 tilelang2ascend-translator skill\n"
+        "    从 design/tile_level/ 转译为 AscendC\n"
+        "    产出 → {output_dir}/kernel/* + {output_dir}/model_new_ascendc.py\n"
+        "    ── 退化检测 → 功能验证 ──────────────────────\n"
+        "    A 类最大 5 次，D 类最大 12 次（D1:7 + D2:5），A/D 计数器独立",
+        "elif op_type == \"complex\" and tilelang_ast_passed:\n"
+        "    调用 tilelang2ascend-translator,输入 model.py + design/tile_level/ + 预生成骨架\n"
+        "elif op_type == \"complex\":\n"
+        "    TileLang 三份候选均未通过 AST；忽略退化 wrapper,输入 model.py + 预生成骨架\n\n"
+        "两条路径都只在现有骨架上补全实现,随后执行相同的退化检测与功能验证。\n"
+        "修复轮数只服从固定入口输出的 attempt/limit/remaining/next_step,不要另建 A/D 计数器",
+    )
+    text = _cut(
+        text,
+        "### Phase 4-S: 简单算子 — 开发实现 (ops-direct-invoke 模式)",
+        "### 迭代执行",
+        "两条路径统一使用 translator 的迭代闭环",
+    )
+    text = _sub(text, "#### 4-C.1 代码生成", "#### 4.1 代码生成")
+    text = _sub(
+        text,
+        "调用 tilelang2ascend-translator skill 生成 kernel/ 文件和 model_new_ascendc.py\n"
+        "  首次: 传入 output_dir，基于 design/tile_level/ 转译\n"
+        "  重试: 传入 output_dir + 本轮修复建议",
+        "调用 tilelang2ascend-translator skill，在预生成骨架中完成 kernel 数学、tiling 和必要接口接线：\n"
+        "  简单算子首次: 传入 output_dir，以 model.py 为语义输入，不要求 TileLang 产物\n"
+        "  复杂算子 AST 通过: 传入 output_dir，以 model.py + design/tile_level/ 为设计输入\n"
+        "  复杂算子 AST 回退: 传入 output_dir，只以 model.py 为语义输入并忽略退化 TileLang wrapper\n"
+        "  重试: 传入 output_dir + 本轮修复建议",
+    )
+    text = _sub(
+        text,
+        "[A2] 🛑 调用对应的 Skill 获取修复方案（复杂算子路径调用 tilelang2ascend-translator，简单算子路径调用 ops-direct-invoke），",
+        "[A2] 🛑 调用 tilelang2ascend-translator Skill 获取修复方案，",
+    )
+    text = text.replace("- 设计路径（ops-direct-invoke / TileLang）", "- 设计路径（简单算子直达骨架 / 复杂算子 TileLang）")
+    text = _sub(text, "| Phase 3-S | DESIGN.md / PLAN.md 生成失败 | 重试 1 次，失败则终止 |\n", "")
+    text = _sub(text, "| Phase 3-S | 设计串讲发现阻塞级问题 | 以 Architect 视角回应并更新设计，直到所有阻塞级问题解决 |\n", "")
+    text = _sub(text, "| Phase 4-S | 开发实现失败 | 最多 3 轮修复循环，超限暂停上报用户 |\n", "")
+    text = _sub(text, "| Phase 4-S | REVIEW.md 判定 FAIL | 进入修复循环，最多 3 轮 |\n", "")
+    text = _sub(text, "| Phase 4-S 修复循环上限 | 最多 3 轮，超限暂停上报用户 |\n", "")
+    text = _sub(text, "| Phase 4-S 审查评分 | 100 分制，PASS ≥ 80 / PASS WITH NOTES 70-79 / FAIL < 70 |\n", "")
+    text = _sub(
+        text,
+        "| Phase 4-C A 类最大迭代 | 5 次，禁止超出 |",
+        "| Phase 4 修复预算 | 只服从固定入口的 attempt / limit / remaining / next_step |",
+    )
+
+    # [D10] 装完后的路径:Polar prepare 在 agent 启动前已经按本题 model.py 的真实
+    #       __init__/forward 签名生成工程骨架。上游仍让 agent 调 project-init/复制模板并
+    #       从零生成机制件,会覆盖正确签名、写错 device 文件名,也会把可工作的双路径
+    #       loader 改成无法 import 的 TORCH_LIBRARY 裸 .so。预生成骨架因此是唯一工程契约;
+    #       agent 只在原位补数学/tiling,真实接口变化时同步修改签名件。
+    text = _sub(
+        text,
+        "Phase 1: 环境准备 + 工程初始化  (复制算子文件 + 初始化 kernel 工程 + 算子注册)",
+        "Phase 1: 环境准备 + 骨架确认    (复制算子文件 + 确认 Polar 预生成工程)",
+    )
+    text = _sub(text, "## Phase 1: 环境准备 + 工程初始化", "## Phase 1: 环境准备 + 骨架确认")
+    text = _sub(
+        text,
+        "### 1.2 初始化 kernel 工程\n\n"
+        "创建 `{output_dir}/kernel/` 目录骨架并复制固定工具文件：\n\n"
+        "```bash\n"
+        "mkdir -p {output_dir}/kernel/op_host\n"
+        "mkdir -p {output_dir}/kernel/op_kernel\n"
+        "mkdir -p {output_dir}/kernel/utils\n"
+        "# 从模板复制固定工具文件（不生成，内容固定）\n"
+        "cp .claude/skills/tilelang2ascend-operator-project-init/templates/ascend-kernel/csrc/utils/torch_kernel_helper.h {output_dir}/kernel/utils/\n"
+        "```\n\n"
+        "kernel 目录结构（后续 Phase 4 由 Developer / translator skill 填充）：",
+        "### 1.2 确认 Polar 预生成的 kernel 工程\n\n"
+        "Agent 启动前，Polar prepare 已按本题 `model.py` 的 `__init__` / `forward` 签名，"
+        "在 `{output_dir}/` 中生成可继续开发的 kernel 工程骨架。不要重新初始化工程、从其他"
+        "模板复制文件或整体重建。先检查并复用已有文件；若必需件确实缺失或损坏，只结合本题"
+        "真实接口和相邻文件原位补齐。\n\n"
+        "kernel 目录结构（后续 Phase 4 在现有文件上补全实现）：",
+    )
+    text = text.replace("│   │   └── <op_name>.cpp        # Device 端: CopyIn→Compute→CopyOut", "│   │   └── <op_name>_kernel.cpp # Device 端: CopyIn→Compute→CopyOut")
+    text = text.replace("│   └── utils/                   # 固定工具文件（从 tilelang2ascend-operator-project-init 模板复制）", "│   └── utils/                   # Polar prepare 预生成的固定工具文件")
+    text = text.replace("│   └── <op_name>.cpp        # Device 端: CopyIn → Compute → CopyOut", "│   └── <op_name>_kernel.cpp # Device 端: CopyIn → Compute → CopyOut")
+    text = text.replace("op_kernel/<op_name>.cpp: AscendC kernel (AICore 上执行)", "op_kernel/<op_name>_kernel.cpp: AscendC kernel (AICore 上执行)")
+    text = _sub(
+        text,
+        "| Type1 | 无 AscendC 扩展导入（纯 PyTorch / 未注册 torch.ops.npu.*） | 添加 `import <op_name>`（whl 包的 __init__.py 内部调用 torch.ops.load_library()，import 即完成注册）|",
+        "| Type1 | 无 AscendC 扩展加载（纯 PyTorch / 未注册 torch.ops.npu.*） | 保留预生成双路径 loader：先尝试 `import <op_name>_ext`，失败后从 `kernel/build/` 用 `torch.ops.load_library()` 加载 |",
+    )
+    text = _sub(
+        text,
+        "**setup.py 规范**：编译后的 `.so` 使用 `TORCH_LIBRARY` 宏（无 `PyInit_`），无法被 Python `import` 直接加载。因此需要将 `.so` 包装为 Python package：`setup.py` 创建 `<op_name>/` 目录，包含 `__init__.py`（内部调用 `torch.ops.load_library()` 加载 `_kernel.<plat>.so`）和重命名后的 `_kernel.<plat>.so`。`NpuExtension` 仅用于保留 ext_modules → wheel 获得平台特定 tag。`.so` 不存在时自动触发 cmake + make。\n\n"
+        "**model_new_ascendc.py 加载规范**：直接 `import <op_name>` 即可（whl 包的 `__init__.py` 内部调用 `torch.ops.load_library()`，import 即完成算子注册）。不需要 `try/except` 双路径回退。\n"
+        "```python\n"
+        "import torch\n"
+        "import torch.nn as nn\n\n"
+        "import <op_name>  # registers torch.ops.npu.<op_name>\n\n"
+        "class ModelNew(nn.Module):\n"
+        "    def forward(self, x, ...):\n"
+        "        return torch.ops.npu.<op_name>(x, ...)\n"
+        "```",
+        "**setup.py / model_new_ascendc.py 加载规范**：两者均由 Polar prepare 预生成。"
+        "`register.cpp` 使用 `TORCH_LIBRARY` 且没有 `PYBIND11_MODULE`，因此裸 `.so` 不保证可被 Python import。"
+        "必须保留现有双路径 loader：先尝试 `import <op_name>_ext`，失败后从 "
+        "`kernel/build/<op_name>_ext*.so` 选择实际文件并调用 `torch.ops.load_library()`。"
+        "不要改成直接 `import <op_name>`，也不要删除 fallback。",
+    )
+    text = _sub(
+        text,
+        "每次修改 kernel 代码后，通过 `evaluate_ascendc.sh` 完成编译与验证（内部执行 source CANN → cmake → make → setup.py bdist_wheel → pip install）。",
+        "每次修改 kernel 代码后，运行覆盖区规定的固定入口完成编译与验证；不要直接调用 skill 内评测脚本。",
+    )
+
+    # [D11] 装完后的路径:当前运行时没有命令拦截 hook。上游 Phase 3/4 的裸脚本调用
+    #       不会被自动改写;Phase 3 占卡验证必须显式走 lease wrapper,Phase 4 则必须显式走
+    #       固定入口(它内含退化检测/编译/对拍/测速)。把执行点写成真实调用,不能依赖覆盖区
+    #       在模型运行时“纠正”一条已经执行的命令。
+    text = _sub(
+        text,
+        "调用 tilelang2ascend-tilelang-designer skill 自带的 evaluate_tilelang.sh\n\n"
+        "    bash .claude/skills/tilelang2ascend-tilelang-designer/scripts/evaluate_tilelang.sh \\\n"
+        "        {output_dir}",
+        "按覆盖区「Phase 3 的 TileLang 两个脚本」运行 `verification_tilelang.py`；"
+        "该脚本占卡，必须通过 `tools/npu_lease_exec.py` 包装执行，禁止直接运行上游 "
+        "`evaluate_tilelang.sh`",
+    )
+    text = _sub(
+        text,
+        "#### 4.2 AST 退化预检查\n\n"
+        "```\n"
+        "python .claude/skills/tilelang2ascend-translator/scripts/validate_ascendc_impl.py \\\n"
+        "    {output_dir}/model_new_ascendc.py\n"
+        "```\n\n"
+        "- 退化 (exit code != 0) → 标记为 A 类错误，跳到 4.5Conductor\n"
+        "- 通过 (exit code == 0) → 继续 4.3\n\n"
+        "---\n\n"
+        "#### 4.3 功能验证\n\n"
+        "```\n"
+        "bash .claude/skills/tilelang2ascend-translator/scripts/evaluate_ascendc.sh {output_dir}\n"
+        "```",
+        "#### 4.2 固定入口评测\n\n"
+        "固定入口一次完成 AscendC 退化检测、编译、对拍、测速与提交物保留：\n\n"
+        "```bash\n"
+        "bash /opt/workspace/agent_workdir/tools/ascendc_eval_pipeline.sh --op_name {op_name} \\\n"
+        "     --impl output/submission/{op_name}_impl.tar.gz --out_dir judge_out\n"
+        "```",
+    )
+    text = text.replace("evaluate_ascendc.sh 错误输出", "`judge_out/metrics_error.log`")
+    text = text.replace("运行 evaluate_ascendc.sh", "运行固定入口")
+    text = text.replace("evaluate_ascendc.sh 输出", "固定入口输出")
+    text = text.replace("`evaluate_ascendc.sh` 返回 PASS", "固定入口返回 PASS")
+    text = text.replace("`evaluate_ascendc.sh` 从未返回过 PASS", "固定入口从未返回过 PASS")
+
+    # [D12] 与 RL 相斥:上游为独立开发 Agent 维护 5 次 A + 7/5 次 D 的第二套
+    #       计数器,而 Polar 固定入口实际按总候选上限计数，
+    #       generation/optimization 只是其中的阶段子上限。两套计数
+    #       会让超限 session 继续编译和上板。分类纪律保留,路由和停止条件统一服从
+    #       metrics.json/固定入口输出；每轮仍必须调用对应 skill 后才能修改。
+    text = _sub(
+        text,
+        "Phase 5: 性能分析              (ops-profiling --quick 模式)",
+        "Phase 5: 性能达标优化          (ops-profiling,低于目标时强制)",
+    )
+    text = text.replace(
+        "达到 max_tl_iterations → Phase 3 失败，跳到 Phase 7 记录 trace",
+        "达到 max_tl_iterations → 停止 TileLang 迭代，保留设计意图并进入 Phase 4",
+    )
+
+    # [D13] 与 RL 相斥:CannBot 的 Phase 3 把 TileLang AST、占卡功能验证、Conductor
+    #       和独立性能循环绑成第二套最多 5 轮的流水线。落盘轨迹中占卡验证没有确认
+    #       PASS,却会推迟真正的 AscendC judge。Polar 只保留确定、廉价的 AST 结构门禁:
+    #       复杂算子最多生成/修复 3 份候选；失败后丢弃退化中间产物并回退预生成骨架。
+    #       TileLang 上板脚本仍可用于显式诊断,但不再自动进入 RL 主流程。
+    i = text.index("### Phase 3-C: 复杂算子 — TileLang 设计表达（迭代循环）")
+    j = text.index("---\n\n## Phase 4: AscendC 生成与验证", i)
+    phase3_complex = """### Phase 3-C: 复杂算子 — TileLang 设计表达与 AST 门禁（最多 3 次）
+
+TileLang 在本阶段只用于表达 block/tile 设计。不要自动运行 TileLang 上板功能验证，也不要在
+这里建立 Conductor、运行时正确性或性能优化循环；最终正确性和性能统一由 Phase 4/5 的
+AscendC 固定入口判断。
+
+#### 候选预算
+
+```
+tl_ast_attempt = 1
+max_tl_ast_attempts = 3
+```
+
+首次候选调用 `tilelang2ascend-tilelang-designer`，生成：
+
+- `{output_dir}/design/block_level/`
+- `{output_dir}/design/tile_level/`
+- `{output_dir}/model_new_tilelang.py`
+
+每次生成或修改 `design/tile_level/`、`model_new_tilelang.py` 后，都必须立即执行不占卡的 AST
+退化检查：
+
+```bash
+python3 .claude/skills/tilelang2ascend-tilelang-designer/scripts/validate_tilelang_impl.py {output_dir}/model_new_tilelang.py
+```
+
+- AST 通过：接受本候选，进入 Phase 4；translator 读取 `model.py + design/tile_level/ + 预生成骨架`。
+- AST 失败且 `tl_ast_attempt < 3`：读取脚本给出的 `regression_type` 与 `suggestion`，只修复该结构性退化，`tl_ast_attempt += 1` 后重新检查。
+- 第 3 次仍失败：本轮 TileLang 中间产物标记为不可用，不得把退化的 `model_new_tilelang.py` 交给 translator；Phase 4 回退为读取 `model.py + 预生成骨架`，继续求解而不是终止 session。
+
+同一份未修改候选禁止重复检查。`verification_tilelang.py` 仅在后续出现明确的 TileLang DSL
+诊断需求时手工调用，不属于 Phase 3 自动流程，也不改变这 3 次 AST 候选预算。
+
+#### TileLang 退化子类型
+
+| 子类型 | 含义 | 修复建议 |
+|--------|------|---------|
+| Type1 | 无 TileLang kernel 导入（纯 PyTorch） | 从 design.tile_level.* 导入 kernel builder |
+| Type2 | 有 kernel builder 导入但 forward() 未调用 | 在 forward() 中通过 builder(M,N,...); kernel(x,y) 模式调用 |
+| Type3 | forward() 调用了 kernel 但部分计算仍用 PyTorch | 将 torch.*/F.* 计算移入 TileLang kernel |
+| Type4 | forward() 中存在逐元素 Python for 循环 | 使用 TileLang kernel 的向量化/块级操作 |
+
+AST 通过时的有效产物是 block-level、tile-level 与 `model_new_tilelang.py`；回退时只保留失败
+记录，Phase 4 不得把未通过 AST 的 wrapper 当作设计依据。
+
+"""
+    text = text[:i] + phase3_complex + text[j:]
+
+    i = text.index("#### 4.4 错误分类（必须执行）")
+    j = text.index("### AscendC 退化子类型", i)
+    repair_flow = """#### 4.4 错误分类与修复（必须执行）
+
+读取固定入口末尾的 `错误分类:`、`attempt/limit/remaining/next_step` 和
+`judge_out/metrics_error.log`。这些字段是分类、预算和下一动作的唯一权威，不自行维护 A/D
+计数器：
+
+| 分类 | 本轮动作 |
+|---|---|
+| `A类-代码/编译错误` | 调用 `tilelang2ascend-translator`，只查错误涉及的 API/示例，实施一项根因修复 |
+| `D类-精度不匹配` | 按 `next_step` 调用 `ascendc-precision-debug`；仅当它明确要求时再调用 `tilelang2ascend-precision-tuning` |
+| `INFRA-环境故障` | 不改 kernel，立即停止并保留现有提交物 |
+| `通过` | 进入 Phase 5 |
+
+每次 skill 返回后必须实际修改实现，才允许重新运行固定入口。新结果改变分类时立即改走新分类；
+`remaining` 耗尽时停止调用工具，提交固定入口保存的 `.best`。禁止为凑轮次重复读无关文档、
+重复运行未变化源码，或在 D 类问题未解决时进入性能优化。
+
+---
+
+"""
+    text = text[:i] + repair_flow + text[j:]
+    text = text.replace(
+        "| Phase 4 | AscendC 编译/验证失败 (A类) | 最多 5 次迭代（a_retry: 0→4），A/D 计数器独立，A 类用完后若转入 D 类则 D 类仍有完整 12 次机会 |",
+        "| Phase 4 | AscendC 编译/验证失败 (A类) | 调 translator 做一项根因修复；是否继续只看固定入口 remaining/next_step |",
+    )
+    text = text.replace(
+        "| Phase 4 | D 类精度不匹配 | D-1 (ascendc-precision-debug) 最多 7 次 → D-2 (ascendc-precision-tuning) 最多 5 次，合计 12 次（d_retry: 0→11），与 A 类计数器独立 |",
+        "| Phase 4 | D 类精度不匹配 | 按固定入口 next_step 调 precision-debug/precision-tuning；预算耗尽即停 |",
+    )
+    text = text.replace(
+        "| Phase 3-C | TileLang 退化检测失败 | 标记 A-TileLangFallback-Type{N}，不执行功能验证，直接修复迭代 |",
+        "| Phase 3-C | TileLang AST 退化检测失败 | 按 suggestion 修复，最多 3 份候选；第 3 次失败后丢弃退化 wrapper 并回退预生成骨架 |",
+    )
+    text = text.replace(
+        "| Phase 3-C | TileLang 验证失败 | 记录；若属 TileLang 自身问题，可跳过并继续 Phase 4 |\n",
+        "",
+    )
+    text = _cut(
+        text,
+        "### Conductor 错误分类",
+        "---\n\n## 约束",
+        "Phase 3 不再维护 Conductor 状态机；Phase 4 分类只服从固定入口",
+    )
+    text = text.replace("| Phase 4 D 类最大迭代 | D-1 (precision-debug) 7 次 → D-2 (precision-tuning) 5 次，合计 12 次 |\n", "")
+    text = text.replace("| A 类连续上限 | 同一退化子类型连续 ≥ 5 次 → 自动终止 |\n", "")
+    text = text.replace("├── trace.md                     # 执行 trace 记录\n", "")
+    text = text.replace("├── performance.log              # 性能日志\n", "")
+    text = text.replace("└── performance.json             # 性能汇总\n", "")
+    text = text.replace(
+        "├── model_new_ascendc.py         # AscendC wrapper → 内部调用 torch.ops.npu.<op>()",
+        "└── model_new_ascendc.py         # AscendC wrapper → 内部调用 torch.ops.npu.<op>()",
+    )
+    text = text.replace("| C 类 — 重复失败 | 同一 A 类子类型连续 ≥ 3 次 | 立即终止 |\n", "")
+    text = text.replace(
+        "| 🛑 A 类修复硬约束 | 每次 A 类修复必须先查阅 asc-devkit 文档（[A1]），再调用 Skill 获取修复方案（[A2]），禁止跳过这两步直接改代码 |",
+        "| 🛑 A 类修复硬约束 | 调用 translator，并只查本轮错误或拟修改 API 的文档后实施一项根因修复 |",
+    )
+    text = text.replace(
+        "| 🛑 D 类入口前置校验 | 进入 D 类流程前必须确认固定入口输出 `错误分类: D类`，且 kernel 无 crash/编译错误/shape 错误。segfault/crash/编译错误都是 A 类，禁止用 D 类计数器 |",
+        "| 🛑 D 类入口前置校验 | 只在固定入口输出 `错误分类: D类` 时进入；segfault/crash/编译错误仍是 A 类 |",
+    )
+    text = text.replace("| A/D 计数器独立 | A 类计数器 a_retry 与 D 类计数器 d_retry 互不干扰 |\n", "")
+    text = text.replace(
+        "| 退化检测前置 | 每次生成/修改 model_new_*.py 后，先通过退化检测，再执行功能验证 |",
+        "| 退化检测前置 | 复杂路径每次生成/修改 model_new_tilelang.py 后强制做 AST；AscendC 产物由固定入口强制做 AST |",
+    )
+    text = text.replace("| NPU 设备 | 通过 `ASCEND_RT_VISIBLE_DEVICES` 环境变量设置 |\n", "")
     return text
 
 

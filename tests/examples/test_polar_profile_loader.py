@@ -67,7 +67,11 @@ def test_profile_loader_derives_topology_and_sidecar_env(tmp_path: Path) -> None
                 "operator": {
                     "profile": "operator_npu",
                     "runtime": {},
-                    "agent": {"model_name": "claude-test"},
+                    "agent": {
+                        "model_name": "claude-test",
+                        "allowed_tools": "Bash Read Edit Write Skill Grep Glob",
+                        "disallowed_tools": "Agent Workflow WebSearch",
+                    },
                     "evaluator": {
                         "judge_command": "bash tools/triton_eval_pipeline.sh --op_name {op_name}",
                         "submission_path": "output/submission/{op_name}_impl.py",
@@ -115,6 +119,10 @@ def test_profile_loader_derives_topology_and_sidecar_env(tmp_path: Path) -> None
     assert "POLAR_OPT_PIPELINE_MAX" not in op_profile["evaluator"]["runtime"]["env"]
     assert op_profile["runtime"]["kwargs"]["ascend"]["pool"] == "4,5"
     assert op_profile["runtime"]["kwargs"]["volumes"][0] == f"{runtime.resolve()}:/opt/canonical:ro"
+    assert op_profile["agent"]["settings"]["allowed_tools"] == (
+        "Bash Read Edit Write Skill Grep Glob"
+    )
+    assert op_profile["agent"]["settings"]["disallowed_tools"] == "Agent Workflow WebSearch"
 
 
 def test_profile_loader_derives_cannbot_runtime_from_workflow(tmp_path: Path) -> None:
@@ -183,6 +191,7 @@ def test_profile_loader_derives_cannbot_runtime_from_workflow(tmp_path: Path) ->
     assert op_profile["runtime"]["env"]["POLAR_OPT_PIPELINE_MAX"] == "1"
     assert op_profile["runtime"]["env"]["POLAR_NPU_LEASE_POOL"] == "8-9"
     assert "POLAR_GEN_PIPELINE_MAX" not in op_profile["evaluator"]["runtime"]["env"]
+    assert "allowed_tools" not in op_profile["agent"]["settings"]
     assert op_profile["evaluator"]["config"] == {
         "lazy_refresh_runtime": True,
         "op_name": "{op_name}",

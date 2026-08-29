@@ -1,30 +1,41 @@
 ---
 name: tilelang2ascend-translator
 description: >
-  AscendC kernel 转译与实现专家 Skill。将 TileLang 设计转译为 AscendC kernel，
-  并生成 model_new_ascendc.py 调用 AscendC kernel。
-  当 TileLang 设计完成需要转译为 AscendC kernel 时，使用此 skill。
+  AscendC kernel 转译与实现专家 Skill。在 Polar 预生成工程骨架上完成 AscendC
+  kernel；简单算子直接读取 model.py，复杂算子同时参考 TileLang 设计。
+  当需要实现、修复或接线 AscendC kernel 时，使用此 skill。
 argument-hint: >
-  输入：output_dir 目录路径（包含 tile_level/ 和 model_new_tilelang.py）。
-  输出：kernel/ 下的 AscendC 实现、model_new_ascendc.py。
+  输入：output_dir 目录路径（必含 model.py 与预生成骨架；复杂算子另含 TileLang 产物）。
+  输出：原位补全后的 AscendC 实现与必要接口接线。
 ---
 
 # AscendC Kernel 转译 Skill
 
-你是一名 AscendC kernel 转译与实现专家。你的目标是将 TileLang 设计转译为 AscendC kernel，并生成 `{output_dir}/model_new_ascendc.py` 调用 AscendC kernel，最终通过 AscendC 验证。TileLang 在这里是设计输入，不是 correctness gate。
+你是一名 AscendC kernel 转译与实现专家。你的目标是在 Polar 已经为本题生成的工程骨架上完成 AscendC kernel，并通过 AscendC 验证。简单算子以 `model.py` 为语义输入；复杂算子还要参考 TileLang 设计。TileLang 是可选设计输入，不是 correctness gate，也不是工程初始化来源。
 
 ## 前置条件
 本阶段开始前，以下产物必须已经存在：
+- `{output_dir}/model.py` — 唯一语义参考
+- `{output_dir}/kernel/` 与 `{output_dir}/model_new_ascendc.py` — Polar prepare 预生成骨架
+
+若 `op_type == "complex"`，还必须存在：
 - `{output_dir}/design/tile_level/` — TileLang tile-level 设计，作为转译输入
 - `{output_dir}/model_new_tilelang.py` — TileLang 绑定层/设计表达，可参考但不作为正确性依据
+
+若 `op_type == "simple"`，不要求也不要为了满足本 skill 而新建 TileLang 产物。
 
 ## 关键限制
 - 必须将核心计算融合成单个算子实现，不要拆分成多个独立算子。
 - `model_new_ascendc.py` 中禁止使用 torch 算子；只允许进行张量创建，张量变换以及调用你实现的自定义算子。
 - 在 AscendC 实现中应尽可能避免标量逐元素写法，优先使用块级或向量化操作；只有在确实无法避免时才使用标量逻辑。
 - 只允许修改或新增 `{output_dir}/` 目录中的文件，不要改动其他目录中的文件。
-- 只允许读取当前工作区目录结构内的文件与子目录；禁止读取当前工作区之外的任何路径，包括父目录、兄弟目录、用户目录、绝对路径以及系统其他目录。
+- 只允许读取当前工作区目录结构内的文件与子目录。唯一例外是可以只读访问
+  `$ASC_DEVKIT_DIR`，用于查阅当前 CANN 环境配套的官方文档、示例和实现参考。
+  禁止读取其他工作区外路径。
 - 禁止读取 `.claude/skills/tilelang2ascend-translator/references/TileLangAscendProgrammingGuide.md`；该文档是 TileLang 编程指南，仅供 TileLang 阶段使用，与本阶段无关。
+- 预生成骨架是唯一工程契约。禁止调用项目初始化 skill、复制其他任务或模板、重建整个工程。
+- `kernel/CMakeLists.txt`、`kernel/setup.py`、`kernel/utils/` 和 `model_new_ascendc.py` 的双路径 loader 属于机制件，默认原样保留。
+- 如果 reference 的真实接口要求变化，允许同步修改 `model_new_ascendc.py` 调用、`register.cpp` schema、`ops.h` 声明和 `op_host` 实现；禁止只改其中一处造成签名断链。
 - 严格按照算子描述生成kernel，ascend c kernel的功能应该和标杆完全一致，不能出现部分功能使用ascend c，部分使用torch算子的情况
 - 即使测试用例中不包含某个功能或者分支对应的case，也要生成对应的ascend c kernel代码
 - **🛑 同步机制强制门禁**: 涉及 MIX_AIC / CrossCore / WorkspaceQueue / 死锁 / 全零输出 时，必须先完成 **步骤 0-C** 的同步 checklist。详见下方步骤 0-C 章节。
@@ -34,12 +45,11 @@ argument-hint: >
 .
 ├── {output_dir}/         # 当前活跃任务目录
 │   ├── model.py          # 参考 PyTorch 模型，禁止修改
-│   ├── <op_name>.json    # 原始测试用例文件（备份保留）
-│   ├── <op_name>.json.bak# 原始 .json 备份
-│   ├── design/           # TileLang DSL 用于表达 kernel 设计
-│   │   ├── design.md     # 设计文档（简单算子路径）或 不存在（复杂算子路径）
+│   ├── <op_name>.json    # 数据集原版测试用例，禁止修改、精简或备份
+│   ├── design/           # 仅复杂算子路径需要
+│   │   ├── design.md     # 可选设计记录
 │   │   ├── block_level/  # TileLang block-level 设计（已由上一阶段完成）
-│   │   └── tile_level/   # TileLang tile-level 设计（已由上一阶段完成，作为转译输入）
+│   │   └── tile_level/   # 仅复杂算子存在，作为转译输入
 │   ├── kernel/           # AscendC kernel（op_host/ + op_kernel/ 分层）
 │   │   ├── CMakeLists.txt
 │   │   ├── setup.py      # whl 打包配置
@@ -48,13 +58,10 @@ argument-hint: >
 │   │   ├── op_host/
 │   │   │   └── <op_name>.cpp  # Host 端: tiling + EXEC_KERNEL_CMD
 │   │   ├── op_kernel/
-│   │   │   └── <op_name>.cpp
-│   │   └── utils/        # 固定工具（从模板复制，不生成）
+│   │   │   └── <op_name>_kernel.cpp
+│   │   └── utils/        # Polar prepare 预生成的固定工具
 │   │       └── torch_kernel_helper.h
-│   ├── test/             # 测试目录
-│   │   ├── <op_name>-test-cases.md
-│   │   └── test_<op_name>.py
-│   ├── model_new_tilelang.py # 上一阶段产物，可参考但不要修改
+│   ├── model_new_tilelang.py # 仅复杂算子存在，可参考但不要修改
 │   └── model_new_ascendc.py  # AscendC wrapper → 内部调用 torch.ops.npu.<op>()
 └── <other_tasks>/        # 其他历史任务，可作为参考实现
 ```
@@ -65,24 +72,28 @@ argument-hint: >
 - `.claude/skills/tilelang2ascend-translator/references/TileLang-AscendC-API-Mapping.md` — TileLang 与 AscendC API 映射表
 - `.claude/skills/tilelang2ascend-translator/references/AscendCVerification.md` — AscendC 验证指南
 - `.claude/skills/tilelang2ascend-translator/references/attention-patterns/AttentionPatternIndex.md` — Attention / FlashAttention 类算子的模式路由索引（TND、paged KV cache、mask/causal、GQA/MQA、MLA、topk sparse KV、sink attention）
-- `.claude/skills/tilelang2ascend-translator/scripts/evaluate_ascendc.sh` — AscendC 评测脚本
-- `workflows/templates/archive_tasks/` — 历史成功任务，host/kernel 完整参考实现（**编译/运行时错误时优先查阅**）
+- `tools/ascendc_eval_pipeline.sh` — Polar RL 唯一允许执行的 AscendC 验证入口；禁止直接运行本 skill 的上游评测脚本
+- `.claude/workflows/templates/archive_tasks/` — 历史成功任务，host/kernel 完整参考实现（**编译/运行时错误时优先查阅**）
 
-### 🛑 官方文档目录（asc-devkit，强制查阅）
+### 🛑 官方文档目录（`$ASC_DEVKIT_DIR`，按需查阅）
 
-以下所有路径相对于 `asc-devkit/` 根目录。**编写/修改任何 kernel 代码前，必须先查阅对应的官方文档。禁止凭记忆或猜测 API 签名、参数、dtype 支持矩阵。**
+`$ASC_DEVKIT_DIR` 是运行时只读挂载的 asc-devkit 根目录。开始前必须先确认
+`test -d "$ASC_DEVKIT_DIR"`；不得假定文档仍保留旧版多层目录。当前 API 文档主要是
+`$ASC_DEVKIT_DIR/docs/zh/api/` 下的扁平布局，必须按 API 名查找实际文件，并检查同名数字后缀变体：
+
+```bash
+find "$ASC_DEVKIT_DIR/docs/zh/api" -type f -name "${APIName}*.md"
+```
+
+首次实现时查阅实际使用 API 的文档；后续修复只查本轮错误、拟修改 API
+或新引入 API 对应的条目。禁止凭记忆或猜测 API 签名、参数、dtype 支持矩阵。
 
 | 查阅入口 | 内容 | 何时查阅 |
 |----------|------|---------|
-| `asc-devkit/docs/api/Ascend-C-API列表.md` | API 分类总览与快速索引 | 每次代码生成前 |
-| `asc-devkit/docs/api/SIMD-API/基础API/Memory矢量计算/类型转换/Cast.md` | Cast API 签名与 dtype 支持 | 使用 Cast 时 |
-| `asc-devkit/docs/api/SIMD-API/基础数据结构/GlobalTensor/GlobalTensor简介.md` | GlobalTensor 完整 API | 使用 GlobalTensor 时 |
-| `asc-devkit/docs/api/SIMD-API/基础数据结构/LocalTensor/LocalTensor简介.md` | LocalTensor 完整 API | 使用 LocalTensor 时 |
-| `asc-devkit/docs/guide/算子实践参考/SIMD算子实现/矢量编程/基础矢量算子.md` | CopyIn→Compute→CopyOut 标准范式 | 每次代码生成前 |
-| `asc-devkit/docs/guide/算子实践参考/SIMD算子实现/矢量编程/TBuf的使用.md` | UB 临时缓冲区管理 | 分配 TBuf 时 |
-| `asc-devkit/docs/guide/算子实践参考/SIMD算子实现/融合算子编程/` | 多步计算融合模式 | 融合算子时 |
-| `asc-devkit/examples/01_simd_cpp_api/` | 官方 SIMD C++ 示例 | API 用法不确定时 |
-| `workflows/templates/archive_tasks/rms_norm/` | EXEC_KERNEL_CMD 正确传参模式 | 编写 op_host 时 |
+| `$ASC_DEVKIT_DIR/docs/zh/api/` | 用 `find` 按 API 名查找所有文档变体 | 首次实现或 API 不确定时 |
+| `$ASC_DEVKIT_DIR/examples/01_simd_cpp_api/` | 官方 SIMD C++ 示例 | 标准范式或 API 用法不确定时 |
+| `$ASC_DEVKIT_DIR/impl/` | API 实现与 tiling 参考 | 文档不足时 |
+| `.claude/workflows/templates/archive_tasks/rms_norm/` | EXEC_KERNEL_CMD 正确传参模式 | 编写 op_host 时 |
 
 除非用户明确指定其他目录，否则默认使用传入的 `output_dir` 作为当前任务目录。
 其他任务目录可以作为参考实现。
@@ -136,59 +147,57 @@ argument-hint: >
 
 ---
 
-## 🛑 步骤 0-B: 查阅官方文档（每次代码生成/修改前强制执行）
+## 🛑 步骤 0-B: 错误驱动的官方文档查阅
 
-**在 Edit/Write 任何 `kernel/` 下的代码文件之前，必须完成以下查阅步骤。此步骤不可跳过。**
+**首次实现先确认标准范式和本实现实际使用的 API；修复迭代只确认本轮错误涉及、准备修改或新引入的 API。未变化的文档不重复读取。**
 
 ```
 0.1 阅读标准范式:
-    asc-devkit/docs/guide/算子实践参考/SIMD算子实现/矢量编程/基础矢量算子.md
+    在 `$ASC_DEVKIT_DIR/examples/01_simd_cpp_api/` 中用 `find`/`rg` 定位与本题数据搬运、
+    计算 API 和缓冲模式相符的官方示例
     → 确认 CopyIn→Compute→CopyOut 的完整流水线模式
 
 0.2 阅读 EXEC_KERNEL_CMD 正确模式:
-    workflows/templates/archive_tasks/rms_norm/kernel/op_host/rms_norm.cpp
+    .claude/workflows/templates/archive_tasks/rms_norm/kernel/op_host/rms_norm.cpp
     → 确认: 所有 tiling 参数必须是独立标量左值，禁止传 struct 指针
     → 确认: blockDim = usedCoreNum（多核统一分发），禁止 host 侧逐核循环
     → 确认: 核数来源于平台 API 动态获取（GetCoreNumAic/Aiv），非硬编码常量
 
 0.3 逐个查阅要使用的 API 文档:
-    根据算子计算逻辑，列出所有将使用的 AscendC API，然后**逐个**查阅以下精确路径的文档。
+    根据算子计算逻辑，列出所有将使用的 AscendC API，然后**逐个**在
+    `$ASC_DEVKIT_DIR/docs/zh/api/` 查找实际文档。对每个 API 都要执行：
+
+        find "$ASC_DEVKIT_DIR/docs/zh/api" -type f -name "${APIName}*.md"
+
+    如果返回多个同名变体，必须按实际调用形式逐个核对，不得凭数字后缀猜测版本。
     ⚠️ 每个 API 必须确认: ① 模板参数（类型/非类型）② 函数参数（个数/类型）③ dtype 支持矩阵 ④ work buffer 需求。
     **禁止凭记忆或猜测 API 签名**。
 
     ── 数据搬运 ──
-    - DataCopyPad → asc-devkit/docs/api/SIMD-API/基础API/Memory数据搬运/DataCopyPad(ISASI).md
+    - DataCopyPad → 查找 `DataCopyPad*.md`
       ⚠️ 签名两态: GM→UB 4参(dst,src,cp,pp), UB→GM 3参(dst,src,cp)
-    - DataCopy → asc-devkit/docs/api/SIMD-API/基础API/Memory数据搬运/DataCopy/DataCopy.md
+    - DataCopy → 查找 `DataCopy*.md`
 
     ── 类型转换 ──
-    - Cast → asc-devkit/docs/api/SIMD-API/基础API/Memory矢量计算/类型转换/Cast.md
+    - Cast → 查找 `Cast*.md`
       ⚠️ 确认 bfloat16→float32 和 float32→bfloat16 的 RoundMode 参数
 
     ── 矢量计算 (Memory) ──
-    - Mul → asc-devkit/docs/api/SIMD-API/基础API/Memory矢量计算/基础算术/Mul.md
-    - Add → asc-devkit/docs/api/SIMD-API/基础API/Memory矢量计算/基础算术/Add.md
-    - Sub → asc-devkit/docs/api/SIMD-API/基础API/Memory矢量计算/基础算术/Sub.md
-    - Rsqrt → asc-devkit/docs/api/SIMD-API/基础API/Memory矢量计算/基础算术/Rsqrt.md
+    - Mul / Add / Sub / Rsqrt → 分别查找 `<APIName>*.md`
 
     ── 标量计算 (Reg) ──
-    - Muls → asc-devkit/docs/api/SIMD-API/基础API/Reg矢量计算/基础算术/Muls-27.md
-    - Adds → asc-devkit/docs/api/SIMD-API/基础API/Reg矢量计算/基础算术/Adds-28.md
-    - Rsqrt (scalar) → 与矢量 Rsqrt 同族，查阅基础算术目录
+    - Muls / Adds / Rsqrt (scalar) → 查找所有同名变体，以当前平台文档的真实签名为准
 
     ── 高阶 API ──
-    - ReduceSum → asc-devkit/docs/api/SIMD-API/高阶API/归约操作/ReduceSum接口/ReduceSum-90.md
+    - ReduceSum → 查找 `ReduceSum*.md`
       ⚠️ 模板: <T, pattern, isReuseSource>, 参数: (dst,src,workBuf,srcShape[],srcInnerPad)
-      ⚠️ GetReduceSumMaxMinTmpSize → 同目录 GetReduceSumMaxMinTmpSize.md
-    - Broadcast → asc-devkit/docs/api/SIMD-API/高阶API/张量变换/Broadcast.md
+      ⚠️ GetReduceSumMaxMinTmpSize 也要单独查找文档
+    - Broadcast → 查找 `Broadcast*.md`
       ⚠️ 模板: <T, dim, axis, isReuseSource>, dim∈{1,2}, axis∈{0,1}
-    - Cos → asc-devkit/docs/api/SIMD-API/高阶API/数学计算/Cos接口/Cos.md
-      ⚠️ GetCosMaxMinTmpSize → 同目录 GetCosMaxMinTmpSize.md
-    - Sin → asc-devkit/docs/api/SIMD-API/高阶API/数学计算/Sin接口/Sin.md
-      ⚠️ GetSinMaxMinTmpSize → 同目录 GetSinMaxMinTmpSize.md
+    - Cos / Sin → 查找同名文档，并分别查找对应的 `Get*MaxMinTmpSize*.md`
 
     ── 同步控制 ──
-    - PipeBarrier → asc-devkit/docs/api/SIMD-API/基础API/同步控制/核内同步/PipeBarrier(ISASI).md
+    - PipeBarrier → 查找 `PipeBarrier*.md`
       ⚠️ 确认 PIPE_MTE2/PIPE_MTE3/PIPE_V/PIPE_ALL 各 barrier 的放置位置规则
     - CrossCoreSetFlag/WaitFlag → .claude/skills/tilelang2ascend-translator/references/ascendc-sync-guide.md
       ⚠️ 确认 mode2 下 Set/Wait 两侧 PIPE 参数完整且配对
@@ -204,7 +213,7 @@ argument-hint: >
     - dtype 约束
 
 0.4 查阅 TBuf 用法:
-    asc-devkit/docs/guide/算子实践参考/SIMD算子实现/矢量编程/TBuf的使用.md
+    查找并阅读 `$ASC_DEVKIT_DIR/docs/zh/api/TBuf*.md`
     → 确认 UB 临时缓冲区的正确分配模式
 
 0.5 🛑 验证所有 work buffer 尺寸（运行时正确性铁律）:
@@ -213,13 +222,13 @@ argument-hint: >
 
     │ Work Buffer 使用者 │ 尺寸获取 API (host 端调用) │ API 文档 │
     │-------------------│---------------------------│---------│
-    │ ReduceSum         │ GetReduceSumMaxMinTmpSize │ asc-devkit/docs/api/SIMD-API/高阶API/归约操作/ReduceSum接口/GetReduceSumMaxMinTmpSize.md │
-    │ ReduceMax         │ GetReduceMaxMaxMinTmpSize │ asc-devkit/docs/api/SIMD-API/高阶API/归约操作/ReduceMax接口/GetReduceMaxMaxMinTmpSize.md │
-    │ ReduceMin         │ GetReduceMinMaxMinTmpSize │ asc-devkit/docs/api/SIMD-API/高阶API/归约操作/ReduceMin接口/GetReduceMinMaxMinTmpSize.md │
-    │ Cos               │ GetCosMaxMinTmpSize       │ asc-devkit/docs/api/SIMD-API/高阶API/数学计算/Cos接口/GetCosMaxMinTmpSize.md │
-    │ Sin               │ GetSinMaxMinTmpSize       │ asc-devkit/docs/api/SIMD-API/高阶API/数学计算/Sin接口/GetSinMaxMinTmpSize.md │
-    │ SinCos            │ GetSinCosMaxMinTmpSize    │ asc-devkit/docs/api/SIMD-API/高阶API/数学计算/SinCos接口/GetSinCosMaxMinTmpSize.md │
-    │ Broadcast         │ GetBroadCastMaxMinTmpSize │ asc-devkit/docs/api/SIMD-API/高阶API/张量变换/GetBroadCastMaxMinTmpSize.md │
+    │ ReduceSum         │ GetReduceSumMaxMinTmpSize │ 在 `$ASC_DEVKIT_DIR/docs/zh/api/` 按 API 名查找 │
+    │ ReduceMax         │ GetReduceMaxMaxMinTmpSize │ 在 `$ASC_DEVKIT_DIR/docs/zh/api/` 按 API 名查找 │
+    │ ReduceMin         │ GetReduceMinMaxMinTmpSize │ 在 `$ASC_DEVKIT_DIR/docs/zh/api/` 按 API 名查找 │
+    │ Cos               │ GetCosMaxMinTmpSize       │ 在 `$ASC_DEVKIT_DIR/docs/zh/api/` 按 API 名查找 │
+    │ Sin               │ GetSinMaxMinTmpSize       │ 在 `$ASC_DEVKIT_DIR/docs/zh/api/` 按 API 名查找 │
+    │ SinCos            │ GetSinCosMaxMinTmpSize    │ 在 `$ASC_DEVKIT_DIR/docs/zh/api/` 按 API 名查找 │
+    │ Broadcast         │ GetBroadCastMaxMinTmpSize │ 在 `$ASC_DEVKIT_DIR/docs/zh/api/` 按 API 名查找 │
 
     **验证步骤 (每次编写 kernel 前强制执行)**:
     a. 列出本算子所有使用 work buffer 的 API
@@ -233,7 +242,7 @@ argument-hint: >
        会导致 vector core timeout (507034) / UB 内存违例等运行时错误。
 
 ⚠️ 未完成以上 0.1-0.5 全部步骤前，禁止进入步骤 1 编写代码。Attention 类算子还必须完成步骤 0-A。
-   查阅完成后，在思考中明确列出已查阅的文档路径及其关键约束。
+   查阅完成后，记录与本轮改动直接相关的 API 约束；不要抄录无关文档或完整文档清单。
 ```
 
 ---
@@ -277,25 +286,50 @@ argument-hint: >
 **门禁规则**：
 - 触发条件满足但 0-C.1-0-C.3 未完成 → **禁止** Edit/Write 任何涉及同步的代码
 - 禁止凭经验修改 CrossCore 参数而不查阅 sync-guide
-- 此门禁在**每次修复迭代**中都需重新检查（不仅限于首次）
+- 仅当本轮涉及 MIX_AIC / CrossCore / WorkspaceQueue / 死锁 / 全零输出时重新检查
 
 ---
 
 ## 流程
-执行以下各步骤前，必须先完成 **步骤 0-A（如触发）、步骤 0-B 和步骤 0-C（如触发）的全部查阅**，再开始实现、验证与迭代。
+首次实现前完成 **步骤 0-A（如触发）、步骤 0-B 和步骤 0-C（如触发）**；后续迭代按错误与改动范围只重读相关部分。
 
-### 步骤 1: TileLang 转译成 AscendC
+### 简单路径的内嵌设计与审查
 
-将 `{output_dir}/design/tile_level/` 下的 TileLang 设计转译为对应的 AscendC 实现。生成以下文件：
+当 `op_type == "simple"` 时，不调用额外 Agent，也不生成只为流程服务的 DESIGN / PLAN /
+WALKTHROUGH / REVIEW 文档；在当前上下文中完成下面两次结构检查：
+
+**实现前**：
+- 从 `model.py` 确认完整接口、输入输出布局、dtype、shape、广播/索引维度和边界行为。
+- 明确 Host 只负责校验、输出分配、tiling 和启动，所有 tensor 计算都在 kernel 内完成。
+- 明确多核切分、UB 分配、32B 对齐和尾块处理；核数与 UB 容量必须动态获取。
+- 对计划使用的 AscendC API 逐个查官方文档，不能凭记忆写签名。
+
+**实现后、首次评测前**：
+- 核对 `model_new_ascendc.py → register.cpp → ops.h → op_host → op_kernel` 的参数顺序、类型、返回值完全一致。
+- 核对 loader、CMake、setup.py 和 utils 仍是预生成机制件，没有被重建或替换。
+- 核对所有 GM/UB 偏移、Alloc/Free、EnQue/DeQue、对齐区和尾块均不越界。
+- 核对没有 Host 侧 tensor 计算、plain-torch fallback、硬编码核数或硬编码 UB 容量。
+
+这些检查只约束工程骨架与安全边界，不规定算子公式、API 组合或优化策略；具体数学实现由模型根据本题自行完成。
+
+### 步骤 1: 在预生成骨架上完成 AscendC
+
+先逐个读取现有骨架文件和 `model.py`。简单算子直接按 `model.py` 实现；复杂算子将
+`{output_dir}/design/tile_level/` 的设计转译为 AscendC。以下文件已经存在，应在原路径补全，
+不要删除后重建：
 - `{output_dir}/kernel/op_host/<op_name>.cpp` — Host 端 (tiling 计算 + kernel launch)
-- `{output_dir}/kernel/op_kernel/<op_name>.cpp` — Device 端 (CopyIn → Compute → CopyOut)
-- `{output_dir}/kernel/ops.h` — 算子函数声明
-- `{output_dir}/kernel/register.cpp` — torch.ops.npu.* 注册
-- `{output_dir}/kernel/setup.py` — whl 打包配置
-- `{output_dir}/kernel/CMakeLists.txt` — CMake 编译配置
-- `{output_dir}/kernel/utils/kernel_common.h` — CopyTiling 等公共工具
+- `{output_dir}/kernel/op_kernel/<op_name>_kernel.cpp` — Device 端 (CopyIn → Compute → CopyOut)
+- `{output_dir}/kernel/ops.h` — 预生成算子声明，接口变化时才同步修改
+- `{output_dir}/kernel/register.cpp` — 预生成注册，接口变化时才同步修改
+- `{output_dir}/model_new_ascendc.py` — 预生成 wrapper，接口变化时才同步修改调用
+
+下列机制件默认不得改写：
+- `{output_dir}/kernel/setup.py`
+- `{output_dir}/kernel/CMakeLists.txt`
+- `{output_dir}/kernel/utils/`
+
 参考文档：`.claude/skills/tilelang2ascend-translator/references/dsl2Ascendc.md`
-**🛑 实施转译前必须先完成步骤 0-A（如触发）、步骤 0-B 和步骤 0-C（如触发）的全部查阅，然后阅读 `.claude/skills/tilelang2ascend-translator/references/TileLang-AscendC-API-Mapping.md` 逐一确认 API 映射。禁止跳过 Mapping 直接编写 AscendC 代码。**
+**🛑 首次实施前完成步骤 0-A（如触发）、步骤 0-B 和步骤 0-C（如触发）。复杂算子按实际用到的 TileLang 原语读取 `.claude/skills/tilelang2ascend-translator/references/TileLang-AscendC-API-Mapping.md` 对应映射；简单算子没有 TileLang 输入，不套用该映射。**
 
 **op_host/<op_name>.cpp** 模式：
 - include `torch_kernel_helper.h` + `tiling/platform/platform_ascendc.h`
@@ -316,11 +350,11 @@ argument-hint: >
 - 使用平台 API 获取 `GetCoreMemSize(UB)`
 - Block 级 tiling: Cache Line 512B 对齐，formerNum/formerLength/tailNum/tailLength
 - UB 级 tiling: bufferCoefficient 推导，32B 对齐 tileLength
-- **🛑 EXEC_KERNEL_CMD 传参铁律**: 所有 tiling 参数必须是**独立标量左值**，**禁止传 struct 指针**。参照 `workflows/templates/archive_tasks/rms_norm/kernel/op_host/rms_norm.cpp` 的正确模式
+- **🛑 EXEC_KERNEL_CMD 传参铁律**: 所有 tiling 参数必须是**独立标量左值**，**禁止传 struct 指针**。参照 `.claude/workflows/templates/archive_tasks/rms_norm/kernel/op_host/rms_norm.cpp` 的正确模式
 - blockDim = usedCoreNum（多核统一分发），kernel 内部通过 `GetBlockIdx()` 计算工作范围
 - `EXEC_KERNEL_CMD` 所有参数必须为**左值**（具名变量），禁止传入临时变量/右值/字面量。`double` 先转 `float` 局部变量，`bool` 用 `int64_t` 替代，表达式先赋给局部变量再传入
 
-**op_kernel/<op_name>.cpp** 模式：
+**op_kernel/<op_name>_kernel.cpp** 模式：
 - template class `Kernel<OpName>` 含 Init/Process/CopyIn/Compute/CopyOut
 - BUFFER_NUM = 2 (double buffer)；如算子需要在循环中同时持有多个 queue tensor，需相应增大 BUFFER_NUM
 - DataCopyPad 用于 GM↔UB 搬运
@@ -347,9 +381,9 @@ argument-hint: >
    }
    ```
 
-### 步骤 2: 编写 model_new_ascendc.py + 编译验证
+### 步骤 2: 核对接口接线 + 编译验证
 
-编写 `{output_dir}/model_new_ascendc.py`，采用**双路径加载**模式：
+检查预生成的 `{output_dir}/model_new_ascendc.py`，并保留其**双路径加载**模式：
 - 优先 `import <op_name>_ext`（whl 安装后自动触发 TORCH_LIBRARY 注册）
 - 失败回退 `torch.ops.load_library()` 直加载 `kernel/build/<op_name>_ext*.so`
 - forward() 中调用 `torch.ops.npu.<op_name>(...)`
@@ -381,16 +415,17 @@ class ModelNew(nn.Module):
         return torch.ops.npu.<op_name>(x, ...)
 ```
 
-**禁止**在 model_new_ascendc.py 中使用 `torch.*` / `F.*` 计算算子。
-然后调用 `.claude/skills/tilelang2ascend-translator/scripts/evaluate_ascendc.sh {output_dir}` 编译并验证（内部 cmake + make + whl 安装）。
+**禁止**在 model_new_ascendc.py 中使用 `torch.*` / `F.*` 计算算子。只有真实接口发生变化时才同步修改 wrapper 的签名和 `torch.ops.npu.<op_name>(...)` 调用；不要重写 loader。
+
+然后按工作目录 `CLAUDE.md` 的「固定入口」编译并验证，不要直接运行本 skill 自带的评测脚本。
 
 ---
 
 ### 步骤 3: 错误修复迭代
 
-迭代上限为 **5 次**（与 ascend-kernel-developer Phase 4.5A 对齐）。每次修复前必须执行以下步骤：
+迭代上限只服从固定入口输出的 `attempt`、`limit`、`remaining` 和 `next_step`；不得在本 skill 内另建计数器。每次修复前执行以下步骤：
 
-#### 🛑 3.0 修复前查阅（每次修复强制执行，不可跳过）
+#### 🛑 3.0 修复前查阅（只读本轮错误相关资料）
 
 **根据错误类型，查阅对应的 asc-devkit 文档或历史案例：**
 
@@ -400,46 +435,46 @@ class ModelNew(nn.Module):
 
 | 错误类型 | 必须查阅 |
 |---------|---------|
-| **编译错误: API 签名不匹配** | `asc-devkit/docs/api/Ascend-C-API列表.md` → 定位 API → 查阅该 API 的独立 .md 文档确认正确签名 |
-| **编译错误: 类型不匹配** | `asc-devkit/docs/api/SIMD-API/基础API/Memory矢量计算/类型转换/Cast.md` 确认 dtype 支持矩阵 |
-| **编译错误: GlobalTensor/LocalTensor** | `asc-devkit/docs/api/SIMD-API/基础数据结构/` 下对应简介.md |
-| **运行时 vector core exception / UB 违例 / all-zero output** | ① 🛑 **优先执行步骤 0-C** 完成 sync checklist<br>② `asc-devkit/docs/guide/算子实践参考/.../TBuf的使用.md` 检查 buffer 大小<br>③ `workflows/templates/archive_tasks/rms_norm/` 对比 EXEC_KERNEL_CMD 传参模式<br>④ 检查是否有 struct 指针被传给 `EXEC_KERNEL_CMD`（常见根因） |
+| **编译错误: API 签名不匹配** | 在 `$ASC_DEVKIT_DIR/docs/zh/api/` 查找该 API 的所有 `.md` 变体，确认当前平台签名 |
+| **编译错误: 类型不匹配** | 查找 `$ASC_DEVKIT_DIR/docs/zh/api/Cast*.md` 及实际出错 API 的文档，确认 dtype 支持矩阵 |
+| **编译错误: GlobalTensor/LocalTensor** | 查找 `$ASC_DEVKIT_DIR/docs/zh/api/{GlobalTensor,LocalTensor}*.md` |
+| **运行时 vector core exception / UB 违例 / all-zero output** | ① 🛑 **优先执行步骤 0-C** 完成 sync checklist<br>② 查找 `$ASC_DEVKIT_DIR/docs/zh/api/TBuf*.md` 检查 buffer 大小<br>③ `.claude/workflows/templates/archive_tasks/rms_norm/` 对比 EXEC_KERNEL_CMD 传参模式<br>④ 检查是否有 struct 指针被传给 `EXEC_KERNEL_CMD`（常见根因） |
 | **运行时 hang/死锁 / 跨核数据不流通** | 🛑 **必须先执行步骤 0-C**（含读取 ascendc-sync-guide.md 全文 + 6 项 checkpoint），再逐项排查 |
-| **运行时 vector core timeout (507034)** | 🛑 这是硬件级别的 core 挂起错误。按顺序排查:<br>① **work buffer 尺寸**: 检查所有 API 的 work buffer (ReduceSum/Cos/Sin/Broadcast) 是否通过 GetXxxMaxMinTmpSize 正确计算 — 硬编码不足是最常见根因<br>② **Buffer 总溢出**: 计算所有 InitBuffer 分配的总 UB 字节数，确认不超过 GetCoreMemSize(UB)<br>③ **PipeBarrier 配对**: 每个 GM→UB (MTE2) 后必须有 PIPE_MTE2 barrier; 每个 V 计算块结束后必须有 PIPE_V barrier; 每个 UB→GM (MTE3) 前必须有 PIPE_V barrier<br>④ **循环边界**: 检查所有循环的边界类型一致性 (int32_t vs int64_t)，确认不会因类型不匹配导致死循环<br>⑤ **隔离法**: 将 kernel 逐步简化为 identity copy，每次恢复一个操作，定位触发 timeout 的具体 API<br>⑥ **参考历史**: 查阅 workflows/templates/archive_tasks/ 中相似规模的融合算子，对比 work buffer 计算方式 |
+| **运行时 vector core timeout (507034)** | 🛑 这是硬件级别的 core 挂起错误。按顺序排查:<br>① **work buffer 尺寸**: 检查所有 API 的 work buffer (ReduceSum/Cos/Sin/Broadcast) 是否通过 GetXxxMaxMinTmpSize 正确计算 — 硬编码不足是最常见根因<br>② **Buffer 总溢出**: 计算所有 InitBuffer 分配的总 UB 字节数，确认不超过 GetCoreMemSize(UB)<br>③ **PipeBarrier 配对**: 每个 GM→UB (MTE2) 后必须有 PIPE_MTE2 barrier; 每个 V 计算块结束后必须有 PIPE_V barrier; 每个 UB→GM (MTE3) 前必须有 PIPE_V barrier<br>④ **循环边界**: 检查所有循环的边界类型一致性 (int32_t vs int64_t)，确认不会因类型不匹配导致死循环<br>⑤ **隔离法**: 将 kernel 逐步简化为 identity copy，每次恢复一个操作，定位触发 timeout 的具体 API<br>⑥ **参考历史**: 查阅 `.claude/workflows/templates/archive_tasks/` 中相似规模的融合算子，对比 work buffer 计算方式 |
 | **精度不匹配 (MERE/MARE 超标)** | 调用 `ascendc-precision-debug` skill（见步骤 4） |
 
 **⚠️ 在查阅完成并在思考中列出根因分析之前，禁止 Edit/Write 任何 kernel 代码。**
 
 #### 3.1 分析错误输出，结合查阅结论确定根因
 #### 3.2 修改 kernel/ 下的代码
-#### 3.3 运行 evaluate_ascendc.sh
+#### 3.3 运行 CLAUDE.md 规定的固定入口
 #### 3.4 如果 PASS → 完成，退出
-#### 3.5 如果 FAIL 且迭代次数 < 5 → 回到 3.0
-#### 3.6 如果 FAIL 且达到 5 次 → 进入步骤 4 (精度 skill 深度诊断)
+#### 3.5 如果 FAIL 且固定入口仍给出修复预算 → 按 `next_step` 回到 3.0
+#### 3.6 如果预算耗尽 → 停止调用工具，使用固定入口保存的 `.best`
 
 ---
 
-### 步骤 4: 精度 Skill 深度诊断（步骤 3 耗尽后）
+### 步骤 4: 精度 Skill 深度诊断（固定入口分类为 D 类时）
 
-当步骤 3 的 5 次迭代无法解决时，按以下顺序调用精度 skill：
+只按固定入口的 D 类 `next_step` 调用精度 skill：
 
 ```
 4.1 🛑 调用 Skill "ascendc-precision-debug"，传入 output_dir + 错误输出
     等待返回诊断结论和修复建议。此步骤不可跳过。
 
-4.2 根据建议修改 kernel/ 代码，运行 evaluate_ascendc.sh
+4.2 根据建议修改 kernel/ 代码，运行 CLAUDE.md 规定的固定入口
 
-4.3 如果仍 FAIL 且连续失败 < 7 次 → 回到 4.1
+4.3 如果仍 FAIL 且 `next_step` 仍要求 precision-debug、预算尚有剩余 → 回到 4.1
 
-4.4 如果 7 次后仍 FAIL → 
-    🛑 调用 Skill "ascendc-precision-tuning"，传入 output_dir + 错误输出
+4.4 如果 `next_step` 要求 precision-tuning →
+    🛑 调用 Skill "tilelang2ascend-precision-tuning"，传入 output_dir + 错误输出
     等待返回取证→审计→修复分析。此步骤不可跳过。
 
-4.5 根据建议修改 kernel/ 代码，运行 evaluate_ascendc.sh
+4.5 根据建议修改 kernel/ 代码，运行 CLAUDE.md 规定的固定入口
 
-4.6 如果仍 FAIL 且连续失败 < 5 次 → 回到 4.4
+4.6 如果仍 FAIL 且 `next_step` 仍要求 precision-tuning、预算尚有剩余 → 回到 4.4
 
-4.7 如果所有步骤耗尽仍 FAIL → 报告当前状态，记录 trace
+4.7 如果预算耗尽仍 FAIL → 停止调用工具，报告当前状态并保留 `.best`
 ```
 
 ## 精度验证标准

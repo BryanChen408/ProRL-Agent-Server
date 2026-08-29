@@ -52,6 +52,8 @@ from msprof_perf_summary import (
     _find_cls as _find_model_class,
     _clone as _clone_value,
     _move as _move_to_device,
+    _resolve_input_groups,
+    _bind_case,
 )
 
 
@@ -918,20 +920,7 @@ def _summarize_value(value, name: str):
 
 
 def _get_input_groups(module):
-    # Prefer get_input_groups(); fall back to get_inputs() wrapped in a list.
-    if hasattr(module, "get_input_groups"):
-        input_groups = module.get_input_groups()
-        if not isinstance(input_groups, list) or not input_groups:
-            raise ValueError("get_input_groups() must return a non-empty list")
-        return input_groups
-
-    if hasattr(module, "get_inputs"):
-        inputs = module.get_inputs()
-        if not isinstance(inputs, list) or not inputs:
-            raise ValueError("get_inputs() must return a non-empty list")
-        return [inputs]
-
-    raise AttributeError(f"Neither get_input_groups() nor get_inputs() found in {module.__file__}")
+    return _resolve_input_groups(module)
 
 
 def _make_verification_report(op):
@@ -987,8 +976,9 @@ def _execute_models(ref_model, cand_model, input_groups, device):
         outs = []
         for inputs in input_groups:
             ref_inputs = _move_to_device(_clone_value(inputs), dev)
+            call_args, call_kwargs = _bind_case(ref_model, ref_inputs)
             with torch.no_grad():
-                outs.append(ref_model(*ref_inputs))
+                outs.append(ref_model(*call_args, **call_kwargs))
         return outs
 
     for index, inputs in enumerate(input_groups):
@@ -1011,8 +1001,11 @@ def _execute_models(ref_model, cand_model, input_groups, device):
     raw_cand_outputs = []
     for inputs in input_groups:
         cand_inputs = _move_to_device(_clone_value(inputs), device)
+        # Bind against the reference signature: it defines the task contract.
+        # The candidate must accept the exact same args/kwargs call shape.
+        call_args, call_kwargs = _bind_case(ref_model, cand_inputs)
         with torch.no_grad():
-            raw_cand_outputs.append(cand_model(*cand_inputs))
+            raw_cand_outputs.append(cand_model(*call_args, **call_kwargs))
 
     for inputs, ref_out, cand_out in zip(input_groups, raw_ref_outputs, raw_cand_outputs):
         if hasattr(ref_model, "postprocess_output"):

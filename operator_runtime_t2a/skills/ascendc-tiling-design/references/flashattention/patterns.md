@@ -236,4 +236,4 @@ Architect 在设计阶段按以下映射表推进(左列节点名见 §1.5 注�
 | 精度门禁 | `/ops-precision-standard` |
 | 平台差异 | `/npu-arch` |
 | Ascend C API | `/ascendc-api-best-practices` |
-| 编码规范 / 工程配置 | `ops-direct-invoke` plugin `workflows/development-guide.md` |
+| 编码规范 / 工程配置 | 工作目录 `CLAUDE.md` 的预生成骨架契约与 `tilelang2ascend-translator` |

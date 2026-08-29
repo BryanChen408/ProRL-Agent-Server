@@ -347,13 +347,13 @@ try:
 except Exception:
     print("0")' 2>/dev/null || echo 0)
   if [[ "$hit" == "1" ]]; then
-    echo "[ascendc-eval] 正确性已通过,speedup=${sp}x ≥ 目标线 ${PERF_TARGET}x —— 已达标。"
+    echo "[ascendc-eval] 正确性已通过,speedup=${sp}x ≥ 目标线 ${PERF_TARGET}x —— 已达标,停止性能迭代并提交最佳版本。"
   else
     echo "[ascendc-eval] 正确性已通过,但 speedup=${sp}x < 目标线 ${PERF_TARGET}x —— 未达标,不要结束任务。"
+    echo "[ascendc-eval] 下一次调用本固定入口进入 optimization 阶段:预算 ${PIPELINE_OPT_MAX} 次,已用 ${PIPELINE_OPT_COUNT} 次,剩 ${remain} 次。"
+    echo "[ascendc-eval] 先调用 ops-profiling skill 读取真实逐 case 结果并修改 kernel;源码变化后再重跑本入口。"
+    echo "[ascendc-eval] .best.tar.gz 只在 speedup 更高时才替换 —— 优化失败不会覆盖已知最佳版本。"
   fi
-  echo "[ascendc-eval] 下一次调用本固定入口进入 optimization 阶段:预算 ${PIPELINE_OPT_MAX} 次,已用 ${PIPELINE_OPT_COUNT} 次,剩 ${remain} 次。"
-  echo "[ascendc-eval] 继续优化 kernel(多核切分 / 双缓冲 / UB 利用率 / 搬运合并)后重跑本入口。加速比越高得分越高,没有上限。"
-  echo "[ascendc-eval] .best.tar.gz 只在 speedup 更高时才替换 —— 优化失败不会掉分,不试才会。"
 
   # 同一份指引再写进 metrics.json。上面那几行只走 stdout,而 stdout 经常整段丢失:
   # 评测常顶穿 Bash 超时被自动转后台,输出改写进一个临时文件,agent 只能轮询、还会撞上
@@ -379,22 +379,32 @@ target, remain = os.environ["TARGET"], int(os.environ["REMAIN"])
 d["next_step"] = {
     "perf_target_speedup": float(target),
     "target_met": hit,
-    "phase_next": "optimization",
+    "phase_next": "complete" if hit else "optimization",
     "optimization_budget": int(os.environ["OPT_MAX"]),
     "optimization_used": int(os.environ["OPT_USED"]),
     "optimization_remaining": remain,
     "action": (
-        (f"正确性已通过,speedup={os.environ.get('SP','')}x ≥ 目标线 {target}x —— 已达标。"
+        (f"正确性已通过,speedup={os.environ.get('SP','')}x ≥ 目标线 {target}x —— 已达标，停止性能迭代并提交最佳版本。"
          if hit else
          f"正确性已通过,但 speedup={os.environ.get('SP','')}x < 目标线 {target}x —— 未达标,不要结束任务。")
-        + f"下一次调用本固定入口即进入 optimization 阶段,还剩 {remain} 次预算。"
-        " 继续优化 kernel(多核切分 / 双缓冲 / UB 利用率 / 搬运合并)后重跑本入口。"
-        " 加速比越高得分越高,没有上限。"
-        " .best.tar.gz 只在 speedup 更高时才替换 —— 优化失败不会掉分,不试才会。"
+        + ("" if hit else
+           f"下一次调用本固定入口即进入 optimization 阶段,还剩 {remain} 次预算。"
+           " 先调用 ops-profiling skill 读取真实逐 case 结果并修改 kernel；源码变化后再重跑。"
+           " .best.tar.gz 只在 speedup 更高时才替换。")
     ),
 }
 p.write_text(json.dumps(d, ensure_ascii=False, indent=2), encoding="utf-8")
 PY
+}
+
+pipeline_over_limit() {
+  [[ "$PIPELINE_ATTEMPT" -gt "$PIPELINE_LIMIT" ]] && return 0
+  return 1
+}
+
+pipeline_at_limit() {
+  [[ "$PIPELINE_ATTEMPT" -ge "$PIPELINE_LIMIT" ]] && return 0
+  return 1
 }
 
 pack_best() {  # $1=verified?  $2=speedup?
@@ -445,19 +455,30 @@ print(int(data.get("gen_count") or 0), int(data.get("opt_count") or 0))' 2>/dev/
   fi
   pipeline_status_write
   echo "[pipeline-budget] phase=$PIPELINE_PHASE attempt=$PIPELINE_ATTEMPT/$PIPELINE_LIMIT"
-  pack_best
+  # 只有预算内的候选才能打包并参与 best 比较。第 limit+1 次之后的源码
+  # 未经评测，无论当前目录里还留有什么旧日志/性能文件，都不得影响 .best。
+  if ! pipeline_over_limit; then
+    pack_best
+  fi
 fi
 
 _on_exit() {
   local rc=$?
   [[ "$AGENT_SIDE" == "1" ]] || return 0
-  local corr sp
-  corr=$(python3 -c "import json;print('1' if json.load(open('$OUT_DIR/metrics.json')).get('correctness_ok') else '')" 2>/dev/null || echo "")
-  sp=$(python3 -c "import json;d=json.load(open('$OUT_DIR/metrics.json'));p=d.get('perf_data') or {};print(p.get('speedup_vs_torch') or '')" 2>/dev/null || echo "")
-  pack_best "$corr" "$sp"
-  [[ -n "$CUR_HASH" ]] && printf "%s" "$CUR_HASH" > "$STATE_DIR/.${OP_NAME}_last.hash"
-  if [[ "$PIPELINE_ATTEMPT" =~ ^[0-9]+$ && "$PIPELINE_ATTEMPT" -ge "$PIPELINE_LIMIT" ]]; then
-    if [[ "$PIPELINE_PHASE" != "generation" || "$rc" != "0" ]]; then
+  # 只有本次确实在预算内执行了评测，才能用 metrics 认证当前源码。
+  # 超限分支在 Step0 前退出，metrics.json 仍属于上一版源码；若在此读取，
+  # 会把旧的 correctness/speedup 错贴到未评测的当前代码上。
+  if [[ "$PIPELINE_ATTEMPT" =~ ^[0-9]+$ ]] && ! pipeline_over_limit; then
+    local corr sp
+    corr=$(python3 -c "import json;print('1' if json.load(open('$OUT_DIR/metrics.json')).get('correctness_ok') else '')" 2>/dev/null || echo "")
+    sp=$(python3 -c "import json;d=json.load(open('$OUT_DIR/metrics.json'));p=d.get('perf_data') or {};print(p.get('speedup_vs_torch') or '')" 2>/dev/null || echo "")
+    pack_best "$corr" "$sp"
+  fi
+  if [[ -n "$CUR_HASH" && "$PIPELINE_ATTEMPT" -le "$PIPELINE_LIMIT" ]]; then
+    printf "%s" "$CUR_HASH" > "$STATE_DIR/.${OP_NAME}_last.hash"
+  fi
+  if [[ "$PIPELINE_ATTEMPT" =~ ^[0-9]+$ ]] && pipeline_at_limit; then
+    if [[ "$PIPELINE_ATTEMPT" -gt "$PIPELINE_LIMIT" || "$PIPELINE_PHASE" != "generation" || "$rc" != "0" ]]; then
       echo "[pipeline-budget] LIMIT_EXHAUSTED phase=$PIPELINE_PHASE attempt=$PIPELINE_ATTEMPT/$PIPELINE_LIMIT"
       echo "本阶段固定评测入口调用次数已经用完。必须立即停止当前任务。"
       echo "禁止继续分析错误、禁止总结修复方案、禁止恢复文件、禁止再次验证。"
@@ -468,6 +489,19 @@ _on_exit() {
   fi
 }
 trap _on_exit EXIT
+
+# 超限调用只落状态并保留最佳提交物，不能再进入解包、编译、对拍和上板。之前第 N+1 次
+# 仍会把整条 pipeline 跑完，watcher 虽最终能取消 session，昂贵工作已经发生。
+if [[ "$AGENT_SIDE" == "1" ]] && pipeline_over_limit; then
+  echo "[pipeline-budget] budget already exhausted; skip evaluation work"
+  exit 0
+fi
+
+# 走到这里说明本次要对当前源码开始一次新评测。哈希缓存分支已在上方
+# 返回，因此下列文件都是上一版源码的遗留结果，不能再被 EXIT trap、case 统计
+# 或下一轮 Agent 当成当前结果。本轮各阶段会按实际进展重新产生它们。
+rm -f "$OUT_DIR/metrics.json" "$OUT_DIR/metrics_error.log" \
+      "$OUT_DIR/verify_report.json" "$OUT_DIR/performance.json"
 
 # Step0
 WORK="$OUT_DIR/work"
@@ -714,6 +748,7 @@ rm -f "$PERF_JSON"
 ( export PYTHONPATH="$SK/$PERF_SKILL/scripts:${PYTHONPATH:-}" \
   && run_npu_phase benchmark "$PY_BIN" "$PERF" --quick --output-dir "$TASK_DIR" \
        --warmup "$MSPROF_WARMUP" --repeats 1 ) >"$OUT_DIR/perf.log" 2>&1
+[[ -f "$PERF_JSON" ]] && cp -f "$PERF_JSON" "$OUT_DIR/performance.json"
 SP=$(python3 -c "import json;d=json.load(open('$PERF_JSON'));print(d.get('geomean_speedup') or d.get('mean_speedup') or '')" 2>/dev/null || echo "")
 FW=$(python3 -c "import json;d=json.load(open('$PERF_JSON'));v=d.get('geomean_ref_us') or d.get('mean_ref_us');print(round(v/1000.0,6) if v else '')" 2>/dev/null || echo "")
 IMPL=$(python3 -c "import json;d=json.load(open('$PERF_JSON'));v=d.get('geomean_asc_us') or d.get('mean_asc_us');print(round(v/1000.0,6) if v else '')" 2>/dev/null || echo "")
