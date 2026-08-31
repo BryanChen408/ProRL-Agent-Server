@@ -64,6 +64,12 @@ IMPL_FILE="${IMPL_FILE:-output/submission/${OP_NAME}_impl.tar.gz}"
 # 相对路径的 --impl / --out_dir 一律相对 WORK_ROOT 解析(而不是调用目录),
 # 这样从 <op>/ 或 <op>/kernel/build/ 里跑也能定位到 workdir 下的工程与提交物。
 case "$IMPL_FILE" in /*) ;; *) IMPL_FILE="$WORK_ROOT/$IMPL_FILE";; esac
+# Agent 可发现的公开路径始终保留原值。预算内评测会把同一份 tar 另存为不可变
+# candidate，并让 Step0 只解包该 candidate；这样 Agent 的固定命令/路径不变，
+# best 又能证明自己对应的确是本次实际评测字节。
+PUBLIC_IMPL_FILE="$IMPL_FILE"
+CANDIDATE_TARBALL=""
+EVALUATED_CANDIDATE_SHA256=""
 
 SRC_DIR="$WORK_ROOT/$OP_NAME"
 AGENT_SIDE=0; [[ -d "$SRC_DIR" ]] && AGENT_SIDE=1
@@ -150,6 +156,9 @@ metrics = {
     "error_bytes": len(full.encode("utf-8")) if full else 0,
     "error_sha256": hashlib.sha256(full.encode("utf-8")).hexdigest() if full else None,
     "error_truncated": False,
+    # agent 侧由 pack_candidate 对实际送入 Step0 的不可变 tar 求哈希。promote
+    # 必须逐字匹配它，旧 metrics 因而不可能被错贴到新源码。
+    "evaluated_candidate_sha256": os.environ.get("EVALUATED_CANDIDATE_SHA256") or None,
 }
 _CAP = int(os.environ.get("ASCENDC_ERRLOG_CAP_BYTES", "2097152"))
 _raw = full.encode("utf-8")
@@ -520,13 +529,27 @@ pipeline_at_limit() {
   return 1
 }
 
-pack_best() {  # $1=verified?  $2=speedup?
+pack_candidate() {
+  [[ -x "$PACK_SH" || -f "$PACK_SH" ]] || return 1
+  local safe_hash="${CUR_HASH:-unknown}"
+  mkdir -p "$STATE_DIR/candidates" || return 1
+  CANDIDATE_TARBALL="$STATE_DIR/candidates/${OP_NAME}.${safe_hash}.${PIPELINE_PHASE}-${PIPELINE_ATTEMPT}.$$.tar.gz"
+  # 从这里起 Step0 只认这个唯一文件；即使打包失败，也绝不能退回公开路径里上一版 tar。
+  IMPL_FILE="$CANDIDATE_TARBALL"
+  WORKDIR="$WORK_ROOT" bash "$PACK_SH" "$OP_NAME" \
+    --candidate "$CANDIDATE_TARBALL" --public "$PUBLIC_IMPL_FILE" || return 1
+  EVALUATED_CANDIDATE_SHA256=$(sha256sum "$CANDIDATE_TARBALL" 2>/dev/null | cut -d' ' -f1)
+  [[ -n "$EVALUATED_CANDIDATE_SHA256" ]] || return 1
+  export EVALUATED_CANDIDATE_SHA256
+}
+
+promote_candidate() {
   [[ -x "$PACK_SH" || -f "$PACK_SH" ]] || return 0
-  local args=("$OP_NAME"); [[ -n "${1:-}" ]] && args+=(--verified)
-  [[ -n "${2:-}" ]] && args+=(--speedup "$2")
-  # 打包目录用 WORK_ROOT(脚本位置反推的 workdir),不用调用时的 $PWD —— 否则在
-  # <op>/ 或 <op>/kernel/build/ 里跑时 pack 找不到 {op_name}/,submission missing。
-  WORKDIR="$WORK_ROOT" bash "$PACK_SH" "${args[@]}" || true
+  [[ -n "$CANDIDATE_TARBALL" && -f "$CANDIDATE_TARBALL" ]] || return 0
+  [[ -f "$OUT_DIR/metrics.json" ]] || return 0
+  # 这里只交给选择器“实际评测 tar + 本次 metrics”，不重新读取当前源码。
+  WORKDIR="$WORK_ROOT" bash "$PACK_SH" "$OP_NAME" --promote \
+    --candidate "$CANDIDATE_TARBALL" --metrics "$OUT_DIR/metrics.json" || true
 }
 
 if [[ "$AGENT_SIDE" == "1" ]]; then
@@ -572,7 +595,7 @@ print(int(data.get("gen_count") or 0), int(data.get("opt_count") or 0))' 2>/dev/
   # 只有预算内的候选才能打包并参与 best 比较。第 limit+1 次之后的源码
   # 未经评测，无论当前目录里还留有什么旧日志/性能文件，都不得影响 .best。
   if ! pipeline_over_limit; then
-    pack_best
+    pack_candidate || true
   fi
 fi
 
@@ -583,10 +606,7 @@ _on_exit() {
   # 超限分支在 Step0 前退出，metrics.json 仍属于上一版源码；若在此读取，
   # 会把旧的 correctness/speedup 错贴到未评测的当前代码上。
   if [[ "$PIPELINE_ATTEMPT" =~ ^[0-9]+$ ]] && ! pipeline_over_limit; then
-    local corr sp
-    corr=$(python3 -c "import json;print('1' if json.load(open('$OUT_DIR/metrics.json')).get('correctness_ok') else '')" 2>/dev/null || echo "")
-    sp=$(python3 -c "import json;d=json.load(open('$OUT_DIR/metrics.json'));p=d.get('perf_data') or {};print(p.get('speedup_vs_torch') or '')" 2>/dev/null || echo "")
-    pack_best "$corr" "$sp"
+    promote_candidate
   fi
   if [[ -n "$CUR_HASH" && "$PIPELINE_ATTEMPT" -le "$PIPELINE_LIMIT" ]]; then
     printf "%s" "$CUR_HASH" > "$STATE_DIR/.${OP_NAME}_last.hash"

@@ -308,8 +308,8 @@ def test_over_limit_gate_precedes_all_evaluation_work():
     assert script.index("budget already exhausted; skip evaluation work") < script.index("# Step0")
 
 
-def test_only_in_budget_candidate_is_packed_for_best_comparison():
-    """limit+1 次的候选不能在早退前偷偷参与 best 比较。"""
+def test_only_in_budget_candidate_is_packed_for_evaluation():
+    """limit+1 次的候选不能在早退前偷偷打包或参与 best 比较。"""
     script = PIPELINE.read_text(encoding="utf-8")
     start = script.index(
         "  pipeline_status_write\n  sync_task_state_budget\n  echo \"[pipeline-budget]"
@@ -319,7 +319,24 @@ def test_only_in_budget_candidate_is_packed_for_best_comparison():
 
     guard = "if ! pipeline_over_limit; then"
     assert guard in setup_block
-    assert setup_block.index(guard) < setup_block.index("    pack_best")
+    assert setup_block.index(guard) < setup_block.index("    pack_candidate")
+    assert "promote_candidate" not in setup_block
+
+
+def test_pipeline_evaluates_immutable_candidate_and_promotes_only_on_exit():
+    """公开 tar 便于 Agent 找到，实际评测和提升必须绑定同一个不可变 candidate。"""
+    script = PIPELINE.read_text(encoding="utf-8")
+    pack = _extract("pack_candidate")
+    promote = _extract("promote_candidate")
+    on_exit = _extract("_on_exit")
+
+    assert '--public "$PUBLIC_IMPL_FILE"' in pack
+    assert 'IMPL_FILE="$CANDIDATE_TARBALL"' in pack
+    assert 'sha256sum "$CANDIDATE_TARBALL"' in pack
+    assert '--candidate "$CANDIDATE_TARBALL" --metrics "$OUT_DIR/metrics.json"' in promote
+    assert "promote_candidate" in on_exit
+    assert "pack_candidate" not in on_exit, "评测后不得重新读取可能已变化的源码"
+    assert '"evaluated_candidate_sha256"' in script
 
 
 def test_new_evaluation_discards_previous_source_results_after_cache_and_budget_gates():
@@ -346,7 +363,7 @@ def test_over_limit_exit_does_not_attach_stale_metrics_to_current_source(tmp_pat
     capture = tmp_path / "pack_args.txt"
     script = "\n".join([
         "set -uo pipefail",
-        'pack_best() { printf "%s|%s\\n" "${1:-}" "${2:-}" >> "$CAPTURE"; }',
+        'promote_candidate() { printf "called\\n" >> "$CAPTURE"; }',
         _extract("pipeline_over_limit"),
         _extract("pipeline_at_limit"),
         _extract("_on_exit"),
@@ -365,5 +382,5 @@ def test_over_limit_exit_does_not_attach_stale_metrics_to_current_source(tmp_pat
         ["bash", "-c", script], capture_output=True, text=True, check=False
     )
     assert proc.returncode == 0, proc.stderr
-    assert not capture.exists(), "超限退出仍然用旧 metrics 调用了 pack_best"
+    assert not capture.exists(), "超限退出仍然用旧 metrics 提升了 candidate"
     assert "LIMIT_EXHAUSTED" in proc.stdout

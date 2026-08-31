@@ -549,8 +549,8 @@ class TestBestOrdinal:
 
     def test_tie_keeps_the_earlier_attempt(self):
         # 打平取「首次达到最高分」= 改进停止的时刻,这才是掩码要的边界。
-        # 注意它与 .best 的最后写入者不同:pack_submission.sh 在 tier<3 打平时
-        # 每次都覆写,所以那个文件是最后一个打平者写的。别按 .best 语义改这里。
+        # 新版 T2A .best 也使用严格 > 并保留首次最高分；旧落盘 session 可能仍是
+        # 历史上的同档末写者，但轨迹边界不依赖文件系统产物。
         assert attempt_spans.best_ordinal(
             {"a": (0, "c1"), "b": (1, "c2")},
             {"c1": _VERDICT_OK, "c2": _VERDICT_OK},

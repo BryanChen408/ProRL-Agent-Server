@@ -152,3 +152,20 @@ tarball 若打成 `tar -C {op} .`(内容直接在包根),解包后 `model_new_as
 后果:① `verification_ascendc.py` 收到 op="work" 直接 FileNotFoundError;
 ② 隔离闸的 `_TOP_REL` 等于 `.`,整段被跳过。以 `--op_name` 为准,把内容挪进
 `$WORK/$OP_NAME/` 再继续。
+
+## 十一、best 只能提升实际评测过的不可变 candidate
+
+Agent 仍只需要知道公开路径 `output/submission/{op}_impl.tar.gz`。预算内每次调用先把源码打成
+`output/.selfcheck/candidates/` 下的不可变 tar，再把相同字节原子复制到公开路径；Step0
+只解包这份 candidate；
+`metrics.json` 同时记录它的 SHA256。退出时 `pack_submission.sh --promote` 只接受
+“candidate + 哈希相符的 metrics”，不再重新打包可能已经变化的源码。
+
+历史机制在评测前就改 `.best`，并把所有失败粗压成同一个 T1；同档又采用末写覆盖。结果是
+后来的编译失败、运行失败或更低 case 通过率候选能覆盖更好的 correctness 候选。现在排序与
+`operator_reward.reward_from_metrics` 同梯度：infra 不参与，失败侧按 0/0.1/0.2/0.25/
+`0.3+weight×通过率`/0.4，成功侧按 speedup reward；只有严格变大才提升，同分保留首次最高。
+
+`.best.tar.gz`、meta 和 session mirror 的外部路径均不变。比较与替换持文件锁；meta 记录
+candidate 绝对路径与哈希。若进程在 meta/best 两次原子替换之间被杀，下次提升先从该不可变
+candidate 完成事务，不会把未评测源码或旧 metrics 拼成一个“伪 best”。

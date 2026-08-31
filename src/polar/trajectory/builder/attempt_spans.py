@@ -367,17 +367,14 @@ def best_ordinal(
     This is the moment improvement stopped, which is what post-best masking is
     about: everything after it is work that never beat what the agent already had.
 
-    NOT the same as "who last wrote ``{op}_impl.best.tar.gz``", and deliberately so.
-    ``pack_submission.sh`` compares tiers and falls through to ``update = True`` when
-    the tier merely TIES below tier 3, so at a tied failure tier the tarball is
-    rewritten every time and its last writer is the LAST tied attempt. Measured: the
-    max is tied in 72/138 sessions on run 092443 and 9/36 on 165820, ALWAYS at a
-    failure tier (0 success-tier ties), median 3 ordinals between first and last
-    tied attempt. Taking the first is the more aggressive of the two — tied-max
-    sessions mask a median 33.7% of their tokens vs 2.6% for a unique max, and
-    account for 67% of all masking on 165820 — but it is the boundary the masking
-    means, so it is the one to keep. Anyone "fixing" this to match ``.best`` would
-    be trading the intended semantics for a filesystem detail.
+    The T2A ``pack_submission.sh`` now uses the same strict ``>`` reward ordering,
+    so a newly produced ``.best.tar.gz`` also keeps the first tied maximum. Older
+    archived sessions can still contain the former last-writer behavior, but this
+    function is trajectory-derived and intentionally remains independent of that
+    filesystem artifact. Measured historical context: the max was tied in 72/138
+    sessions on run 092443 and 9/36 on 165820, always at a failure tier, with a
+    median 3 ordinals between first and last tied attempt. The first maximum is the
+    boundary post-best masking means and must remain stable across old/new runs.
 
     Attempts whose verdict never parsed (``score=None``) are not eligible. Returns
     ``None`` when no attempt in the trajectory carries a score, in which case the
