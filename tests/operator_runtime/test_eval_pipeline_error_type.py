@@ -36,6 +36,15 @@ LOG_CRASH = _ENV_DUMP + (
     "Traceback (most recent call last):\n"
     "RuntimeError: ACL stream synchronize failed\nResult: fail\n"
 )
+LOG_LOAD = _ENV_DUMP + (
+    "Traceback (most recent call last):\n"
+    "AttributeError: '_OpNamespace' 'npu' object has no attribute 'demo'\nResult: fail\n"
+)
+LOG_TIMEOUT = _ENV_DUMP + "RuntimeError: vector core timeout, error code 507034\nResult: fail\n"
+LOG_LAUNCH = _ENV_DUMP + "RuntimeError: kernel launch failed, ACL call failed\nResult: fail\n"
+LOG_LAUNCH_507035_WITH_TIMEOUT_NAME = _ENV_DUMP + (
+    "RuntimeError: rtDeviceSynchronizeWithTimeout failed, error code 507035\nResult: fail\n"
+)
 # 第二个碰撞词(实测 session-sk-polar-894vxu62):torch_npu 的例行 warning 里有
 # "performance degradation",撞上 classify() 的 AST 分支("degrad"),同样排在
 # 对拍分支之前 —> 被标 ast_check_failed(0.20 地板),而同一份 metrics 里
@@ -75,9 +84,22 @@ def _decide(log_text: str, tmp_path: Path) -> str:
         flags = "-qEi" if ci else "-qE"
         return subprocess.run([("grep"), flags, pat, str(p)], check=False).returncode == 0
 
-    if not _grep(_CASE_RE):
-        return "ascendc_run_crashed"
-    return "correctness_failed" if _grep(_NUM_RE, ci=True) else "output_precheck_failed"
+    if _grep(_CASE_RE):
+        return "correctness_failed" if _grep(_NUM_RE, ci=True) else "output_precheck_failed"
+    if _grep(
+        r"ModuleNotFoundError|ImportError|_OpNamespace|has no attribute|cannot open shared object|undefined symbol",
+        ci=True,
+    ):
+        return "ascendc_load_failed"
+    if _grep(r"507035"):
+        return "ascendc_launch_failed"
+    if _grep(r"507034"):
+        return "ascendc_run_timeout"
+    if _grep(r"kernel launch failed|aclrtlaunch[a-zA-Z0-9_]*.*failed|vector core exception|aic error", ci=True):
+        return "ascendc_launch_failed"
+    if _grep(r"timed?[[:space:]]*out|timeout|超时|kernel hang|vector core timeout", ci=True):
+        return "ascendc_run_timeout"
+    return "ascendc_run_crashed"
 
 
 def test_precision_failure_not_labeled_compile(tmp_path):
@@ -88,6 +110,20 @@ def test_precision_failure_not_labeled_compile(tmp_path):
 def test_crash_before_comparison_labeled_crash(tmp_path):
     """比较没跑完 + 日志里有 ccec ==> 崩溃(A类 0.30),不是编译失败。"""
     assert _decide(LOG_CRASH, tmp_path) == "ascendc_run_crashed"
+
+
+def test_incomplete_verify_is_split_into_load_timeout_launch(tmp_path):
+    assert _decide(LOG_LOAD, tmp_path) == "ascendc_load_failed"
+    assert _decide(LOG_TIMEOUT, tmp_path) == "ascendc_run_timeout"
+    assert _decide(LOG_LAUNCH, tmp_path) == "ascendc_launch_failed"
+    assert _decide(LOG_LAUNCH_507035_WITH_TIMEOUT_NAME, tmp_path) == "ascendc_launch_failed"
+
+
+def test_explicit_acl_codes_precede_ambiguous_timeout_words():
+    src = PIPELINE.read_text(encoding="utf-8")
+    explicit = src.index('elif grep -qE "507035"')
+    fallback = src.index('elif grep -qEi "timed?[[:space:]]*out|timeout')
+    assert explicit < fallback
 
 
 def test_shape_mismatch_is_precheck_not_crash(tmp_path):
@@ -107,9 +143,9 @@ def test_nan_mismatch_is_precheck_not_crash(tmp_path):
 def test_degradation_warning_not_labeled_ast_failure(tmp_path):
     """上游 warning 里的 "degradation" 不得把 verify 失败拖进 ast_check_failed。
 
-    判据只看比较有没有跑完,与上游措辞无关 —— 所以换一个碰撞词也不会误判。
+    比较没有形成 case 结论后再按真实故障细分；warning 不能抢走 launch 分类。
     """
-    assert _decide(LOG_DEGRAD_WARNING, tmp_path) == "ascendc_run_crashed"
+    assert _decide(LOG_DEGRAD_WARNING, tmp_path) == "ascendc_launch_failed"
 
 
 def test_verify_and_compile_call_sites_pass_explicit_force_type():
@@ -141,3 +177,24 @@ def test_fallback_classify_agrees_with_explicit_path():
     # fail_hint 的 crash_failure 同理。
     assert re.search(r'crash_failure = not bool\(re\.search\(r"case\\\[\\d\+\\\]:"', src), \
         "fail_hint 的 crash_failure 还在用旧的数值字段判据"
+
+
+def test_cannbot_class_boundaries_and_explicit_infra_types_are_locked():
+    src = PIPELINE.read_text(encoding="utf-8")
+    # CANNBot:shape/dtype/不可比较输出属于 A；D 只留给已有数值比较字段的精度失败。
+    assert 'label = "A类-输出契约/有效性错误' in src
+    assert 'D类-输出不可比较' not in src
+    assert 'label = "D类-精度不匹配"' in src
+    # 已知阶段不得再靠错误文案猜。
+    assert re.search(
+        r'"对拍结果不可信\(缓存/常量输出\).*?"stateful_impl_detected"',
+        src,
+        re.S,
+    )
+    assert re.search(r'"profiler_unavailable"\s*\n\s*echo "\[ascendc-eval\] msprof', src)
+    # 未覆盖类型是 judge 分类缺口，不得默认伪装成 agent 编译错误。
+    assert 'return "judge_classification_failed"' in src
+    assert "B类-INFRA-分类器未覆盖该error_type" in src
+    # 粗粒度 error_type 不能充当探索终止条件；停止只服从固定入口总预算。
+    assert "update_conductor_state" not in src
+    assert "C类-同一A类子类型连续失败" not in src

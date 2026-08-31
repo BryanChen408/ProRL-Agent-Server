@@ -240,6 +240,16 @@ def test_analyze_session_messages_classifies_partial_cached_verdict() -> None:
     assert summary["pipeline_stage_counts"]["profiling"]["attempts"] == 0
 
 
+def test_observer_accepts_task_state_cached_evaluation_format() -> None:
+    module = _load_module()
+    text = (
+        "[ascendc-eval] cached evaluation — operator_valid=True task_complete=False "
+        "ast_check_ok=True correctness_ok=True speedup_vs_torch=0.859"
+    )
+    assert module._cached_verdict_labels(text) == ["success"]
+    assert "success" in module._classify_tool_result(text)["labels"]
+
+
 def test_analyze_session_messages_recognizes_cannbot_verify_and_benchmark() -> None:
     module = _load_module()
     verify_json = json.dumps(

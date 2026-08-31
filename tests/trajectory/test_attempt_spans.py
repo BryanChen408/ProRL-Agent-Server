@@ -32,6 +32,10 @@ _VERDICT_FAIL = (
     "[ascendc-eval] verdict — success=False ast_check_ok=True correctness_ok=False "
     "error_type=correctness_failed speedup_vs_torch=None"
 )  # 本仓 ladder: correctness_failed 无 case 统计回退 0.35
+_VERDICT_TASK_PENDING = (
+    "[ascendc-eval] verdict — operator_valid=True task_complete=False "
+    "ast_check_ok=True correctness_ok=True error_type=None speedup_vs_torch=2.0"
+)  # task_complete 只控制 Stop hook，不改变成功档 reward
 
 
 def _tool_calls(name: str, call_id: str, command: str | None = None) -> list[dict]:
@@ -470,6 +474,12 @@ class TestParseVerdictPicksLast:
         assert attempt_spans.verdict_score(attempt_spans.parse_verdict(_VERDICT_FAIL)) == \
                attempt_spans.verdict_score(attempt_spans.parse_verdict(_VERDICT_FAIL))
 
+    def test_task_completion_state_does_not_change_reward_semantics(self):
+        parsed = attempt_spans.parse_verdict(_VERDICT_TASK_PENDING)
+        assert parsed is not None and parsed["success"] is True
+        assert attempt_spans.verdict_score(parsed) == \
+               attempt_spans.verdict_score(attempt_spans.parse_verdict(_VERDICT_OK))
+
     def test_no_verdict_still_none(self):
         assert attempt_spans.parse_verdict("nothing here") is None
 
@@ -493,6 +503,8 @@ class TestVerdictRejectsSourceCode:
          "print(\"[ascendc-eval] verdict — success=%s ast_check_ok=%s correctness_ok=%s "
          "error_type=%s speedup_vs_torch=%s\"%(d.get(\"success\"),d.get(\"ast_check_ok\"),"
          "d.get(\"correctness_ok\"),d.get(\"error_type\"),p.get(\"speedup_vs_torch\")))'"),
+        ("print('[ascendc-eval] verdict — operator_valid=%s task_complete=%s "
+         "ast_check_ok=%s correctness_ok=%s error_type=%s speedup_vs_torch=%s'%(...))"),
     ]
 
     def test_source_lines_are_not_verdicts(self):
@@ -506,6 +518,7 @@ class TestVerdictRejectsSourceCode:
             "[ascendc-eval] done — success=true speedup_vs_torch=1.5e-3",
             _VERDICT_OK,
             _VERDICT_FAIL,
+            _VERDICT_TASK_PENDING,
         ):
             assert attempt_spans.parse_verdict(line) is not None, line
 

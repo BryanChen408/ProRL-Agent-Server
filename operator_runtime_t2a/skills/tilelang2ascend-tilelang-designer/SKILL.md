@@ -21,7 +21,7 @@ argument-hint: >
 
 只在 Phase 0 根据实际计算图判定为 `fused` 或 `other` 的复杂路径使用本 skill；`single_op`
 路径跳过 TileLang，在下一阶段直接由 `tilelang2ascend-translator` 基于 `model.py` 补全 Polar
-预生成骨架。禁止按算子名称、文件名或历史白名单决定是否调用本 skill。
+预生成骨架。禁止按算子名称、文件名或历史白名单决定是否读取并采用本文件。
 
 ## 关键限制
 - 必须将核心计算融合成单个算子实现，不要拆分成多个独立算子。

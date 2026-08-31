@@ -18,7 +18,7 @@ description: 基于固定评测入口产出的真实逐 case 性能证据，定�
 
 ## 调用条件
 
-固定入口返回 `correctness_ok=true`，但 `perf_data.speedup_vs_torch < next_step.perf_target_speedup`（默认 `1.1`），且 `next_step.optimization_remaining > 0` 时必须调用本 skill。
+固定入口返回 `correctness_ok=true`，但 `perf_data.speedup_vs_torch < next_step.perf_target_speedup`（默认 `1.1`），且 `next_step.optimization_remaining > 0` 时必须直接 Read 本文件并按下述步骤执行。
 
 调用时至少提供或读取：
 
@@ -39,7 +39,7 @@ description: 基于固定评测入口产出的真实逐 case 性能证据，定�
 
 ### 2. 读取完整优化指导
 
-每次调用本 skill 都完整读取
+每轮性能优化都读取
 [optimization_quickref.md](references/optimization_quickref.md)，包括 Vector、MTE、Cube、
 Scalar、负载均衡、Bank Conflict、DoubleBuffer、流水线、L2 Cache，以及 GroupedMatmul、
 Matmul、FlashAttention 和 MC² 案例。当前算子看似简单也不跳过，避免后续融合算子或复杂
@@ -82,7 +82,7 @@ Matmul、FlashAttention 和 MC² 案例。当前算子看似简单也不跳过�
 
 - 修改后确认 AscendC 源码内容确实变化，再运行一次固定入口。
 - 若 `speedup >= next_step.perf_target_speedup`，停止优化并保留该正确实现。
-- 若仍未达标且有优化预算，使用新结果再次调用本 skill。
+- 若仍未达标且有优化预算，结合新结果继续按本文件指引优化。
 - 若预算耗尽，停止调用工具并提交 `.best` 保存的最佳正确实现。
 
 同一份未变化源码不得重复测速。固定入口是 attempt 计数和是否继续的唯一权威。

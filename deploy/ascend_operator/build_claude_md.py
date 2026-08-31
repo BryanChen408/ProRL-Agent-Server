@@ -50,9 +50,9 @@ def apply_deltas(text: str) -> str:
     text = text.replace("plugins-community/tilelang2ascendc-ops-generator/skills/", ".claude/skills/")
     text = text.replace("`workflows/templates/", "`.claude/workflows/templates/")
 
-    # [D2] Hook 机制在本环境不存在:prepare 写的 .claude/settings.json 只含 skillOverrides,
-    #      skill_script_hook.py 也没铺进容器。保留该章 = 告诉 agent 一个假事实
-    #      (它会以为脚本调用被托管代跑)。整章删除,覆盖区声明"无 hook,调用直通"。
+    # [D2] 上游的命令拦截 Hook 在本环境不存在:skill_script_hook.py 没铺进容器，Bash
+    #      仍然直通。保留该章 = 告诉 agent 一个假事实(它会以为评测被托管代跑)。
+    #      整章删除；覆盖区单独说明这里只装了一个只读 Stop 完成门禁。
     text = _cut(text, "## Hook 机制说明", "## 算子分类路由规则", "本环境无 hook")
 
     # [D3] 同上:分类权威从"Hook 输出"改成"固定入口输出"。分类纪律本身逐字保留。
@@ -166,8 +166,8 @@ def apply_deltas(text: str) -> str:
     text = _sub(text, "├── <op_name>.json.bak           # 原始用例备份\n", "")
     # d) Phase 2 整节(连同节前的 --- 分隔线一起去掉,避免残留双分隔线)
     text = _cut(text, "---\n\n## Phase 2: 测试用例精简", "## Phase 3: 设计表达", "Phase 2 判分链零作用")
-    # e) Phase 4 的固定入口已经完成第一轮测速。Phase 5 只在低于目标时读取真实结果、
-    #    调用性能 skill 修改实现，再由同一固定入口复测；不允许对未变化源码重复测速。
+    # e) Phase 4 的固定入口已经完成第一轮测速。Phase 5 只在低于目标时直接读取本地
+    #    profiling 知识文件和真实结果，再由同一固定入口复测；不允许对未变化源码重复测速。
     i = text.index("---\n\n## Phase 5: 性能分析")
     j = text.index("## 错误处理", i)
     phase5 = """---
@@ -177,12 +177,13 @@ def apply_deltas(text: str) -> str:
 Phase 4 的固定入口已经完成正确性验证和第一轮逐 case 测速，不要对同一份源码重复跑一次性能测试。
 
 当固定入口返回 `correctness_ok=true`、`perf_data.speedup_vs_torch < next_step.perf_target_speedup`，且
-`next_step.optimization_remaining > 0` 时，必须调用 `ops-profiling` skill：
+`next_step.optimization_remaining > 0` 时，必须先直接 Read
+`.claude/skills/ops-profiling/SKILL.md`（不要调用 Skill 工具）：
 
 1. 读取 `judge_out/metrics.json`、`judge_out/performance.json`、`judge_out/perf.log` 和当前 AscendC 源码；
 2. 基于真实慢 case 与源码提出一项通用优化假设，并实际修改 kernel；
 3. 确认源码内容发生变化后，重新运行一次固定入口验证正确性和 speedup；
-4. 达到 `1.1x` 即停止；未达到且仍有预算时，使用新证据再次调用该 skill；
+4. 达到 `1.1x` 即停止；未达到且仍有预算时，结合新证据继续按该文件指引优化；
 5. 预算耗尽时停止调用工具，提交固定入口保存的 `.best` 最佳正确实现。
 
 禁止把重复执行固定入口本身当作“性能优化”。attempt、limit、remaining 与 next_step
@@ -300,7 +301,7 @@ Phase 0 必须读取 `model.py` 的 `Model.__init__()`、`forward()`、`get_inpu
         "    参考 ops-direct-invoke Step 3-5：渐进式开发 → REVIEW.md → 修复循环\n"
         "    产出 → {output_dir}/kernel/* + {output_dir}/model_new_ascendc.py + {output_dir}/docs/REVIEW.md",
         "if op_type == \"simple\":\n"
-        "    调用 tilelang2ascend-translator,输入 model.py + 预生成骨架\n"
+        "    先 Read .claude/skills/tilelang2ascend-translator/SKILL.md,再以 model.py + 预生成骨架实现\n"
         "    不要求 design/tile_level/ 或 model_new_tilelang.py",
     )
     text = _sub(
@@ -313,7 +314,7 @@ Phase 0 必须读取 `model.py` 的 `Model.__init__()`、`forward()`、`get_inpu
         "    ── 退化检测 → 功能验证 ──────────────────────\n"
         "    A 类最大 5 次，D 类最大 12 次（D1:7 + D2:5），A/D 计数器独立",
         "elif op_type == \"complex\" and tilelang_ast_passed:\n"
-        "    调用 tilelang2ascend-translator,输入 model.py + design/tile_level/ + 预生成骨架\n"
+        "    先 Read .claude/skills/tilelang2ascend-translator/SKILL.md,再以 model.py + design/tile_level/ + 预生成骨架实现\n"
         "elif op_type == \"complex\":\n"
         "    TileLang 三份候选均未通过 AST；忽略退化 wrapper,输入 model.py + 预生成骨架\n\n"
         "两条路径都只在现有骨架上补全实现,随后执行相同的退化检测与功能验证。\n"
@@ -331,7 +332,7 @@ Phase 0 必须读取 `model.py` 的 `Model.__init__()`、`forward()`、`get_inpu
         "调用 tilelang2ascend-translator skill 生成 kernel/ 文件和 model_new_ascendc.py\n"
         "  首次: 传入 output_dir，基于 design/tile_level/ 转译\n"
         "  重试: 传入 output_dir + 本轮修复建议",
-        "调用 tilelang2ascend-translator skill，在预生成骨架中完成 kernel 数学、tiling 和必要接口接线：\n"
+        "先 Read `.claude/skills/tilelang2ascend-translator/SKILL.md`，再按其指引在预生成骨架中完成 kernel 数学、tiling 和必要接口接线：\n"
         "  简单算子首次: 传入 output_dir，以 model.py 为语义输入，不要求 TileLang 产物\n"
         "  复杂算子 AST 通过: 传入 output_dir，以 model.py + design/tile_level/ 为设计输入\n"
         "  复杂算子 AST 回退: 传入 output_dir，只以 model.py 为语义输入并忽略退化 TileLang wrapper\n"
@@ -340,7 +341,7 @@ Phase 0 必须读取 `model.py` 的 `Model.__init__()`、`forward()`、`get_inpu
     text = _sub(
         text,
         "[A2] 🛑 调用对应的 Skill 获取修复方案（复杂算子路径调用 tilelang2ascend-translator，简单算子路径调用 ops-direct-invoke），",
-        "[A2] 🛑 调用 tilelang2ascend-translator Skill 获取修复方案，",
+        "[A2] 🛑 直接 Read `.claude/skills/tilelang2ascend-translator/SKILL.md` 获取修复指引，",
     )
     text = text.replace("- 设计路径（ops-direct-invoke / TileLang）", "- 设计路径（简单算子直达骨架 / 复杂算子 TileLang）")
     text = _sub(text, "| Phase 3-S | DESIGN.md / PLAN.md 生成失败 | 重试 1 次，失败则终止 |\n", "")
@@ -462,7 +463,7 @@ Phase 0 必须读取 `model.py` 的 `Model.__init__()`、`forward()`、`get_inpu
     #       计数器,而 Polar 固定入口实际按总候选上限计数，
     #       generation/optimization 只是其中的阶段子上限。两套计数
     #       会让超限 session 继续编译和上板。分类纪律保留,路由和停止条件统一服从
-    #       metrics.json/固定入口输出；每轮仍必须调用对应 skill 后才能修改。
+    #       metrics.json/固定入口输出；知识入口改为直接 Read 本地 SKILL.md。
     text = _sub(
         text,
         "Phase 5: 性能分析              (ops-profiling --quick 模式)",
@@ -493,7 +494,7 @@ tl_ast_attempt = 1
 max_tl_ast_attempts = 3
 ```
 
-首次候选调用 `tilelang2ascend-tilelang-designer`，生成：
+首次候选先 Read `.claude/skills/tilelang2ascend-tilelang-designer/SKILL.md`，再按其指引生成：
 
 - `{output_dir}/design/block_level/`
 - `{output_dir}/design/tile_level/`
@@ -536,14 +537,18 @@ AST 通过时的有效产物是 block-level、tile-level 与 `model_new_tilelang
 `judge_out/metrics_error.log`。这些字段是分类、预算和下一动作的唯一权威，不自行维护 A/D
 计数器：
 
-| 分类 | 本轮动作 |
+| 分类 | 本轮动作（全部使用 Read，不调用 Skill 工具） |
 |---|---|
-| `A类-代码/编译错误` | 调用 `tilelang2ascend-translator`，只查错误涉及的 API/示例，实施一项根因修复 |
-| `D类-精度不匹配` | 按 `next_step` 调用 `ascendc-precision-debug`；仅当它明确要求时再调用 `tilelang2ascend-precision-tuning` |
-| `INFRA-环境故障` | 不改 kernel，立即停止并保留现有提交物 |
-| `通过` | 进入 Phase 5 |
+| `A类-提交物/AST/编译` | Read `.claude/skills/tilelang2ascend-translator/SKILL.md`；API/符号不明再 Read `ascendc-docs-search/SKILL.md` |
+| `A类-注册/加载` | Read `ascendc-runtime-debug/SKILL.md` 与其 `references/kernel_binary_debug.md` |
+| `A类-崩溃/超时/启动失败` | Read `ascendc-crash-debug/SKILL.md`；有 ACL 错误码再 Read `ascendc-runtime-debug/references/error_codes.md` |
+| `A类-输出契约/状态化退化` | 按固定入口路径 Read translator 或 precision-debug 的 `SKILL.md`，不要进入 D 类容差调优 |
+| `D类-精度不匹配` | 先 Read `ops-precision-standard/SKILL.md`，再 Read `ascendc-precision-debug/SKILL.md` |
+| `A类-benchmark执行失败` | Read `ops-profiling/SKILL.md`；若日志是 kernel/ACL 崩溃则改走运行期路线 |
+| `B类-INFRA` | 不改 kernel、不读取修复文档，立即停止并保留现有提交物 |
+| `通过` | 进入 Phase 5；是否结束只看 `task_complete` |
 
-每次 skill 返回后必须实际修改实现，才允许重新运行固定入口。新结果改变分类时立即改走新分类；
+读完对应文件后必须实际修改实现，才允许重新运行固定入口。新结果改变分类时立即改走新分类；
 `remaining` 耗尽时停止调用工具，提交固定入口保存的 `.best`。禁止为凑轮次重复读无关文档、
 重复运行未变化源码，或在 D 类问题未解决时进入性能优化。
 
@@ -553,11 +558,11 @@ AST 通过时的有效产物是 block-level、tile-level 与 `model_new_tilelang
     text = text[:i] + repair_flow + text[j:]
     text = text.replace(
         "| Phase 4 | AscendC 编译/验证失败 (A类) | 最多 5 次迭代（a_retry: 0→4），A/D 计数器独立，A 类用完后若转入 D 类则 D 类仍有完整 12 次机会 |",
-        "| Phase 4 | AscendC 编译/验证失败 (A类) | 调 translator 做一项根因修复；是否继续只看固定入口 remaining/next_step |",
+        "| Phase 4 | AscendC 编译/验证失败 (A类) | 直接 Read 分类指定的本地知识文件并做一项根因修复；是否继续只看固定入口 remaining/next_step |",
     )
     text = text.replace(
         "| Phase 4 | D 类精度不匹配 | D-1 (ascendc-precision-debug) 最多 7 次 → D-2 (ascendc-precision-tuning) 最多 5 次，合计 12 次（d_retry: 0→11），与 A 类计数器独立 |",
-        "| Phase 4 | D 类精度不匹配 | 按固定入口 next_step 调 precision-debug/precision-tuning；预算耗尽即停 |",
+        "| Phase 4 | D 类精度不匹配 | 直接 Read precision-standard/precision-debug 的 SKILL.md；预算耗尽即停 |",
     )
     text = text.replace(
         "| Phase 3-C | TileLang 退化检测失败 | 标记 A-TileLangFallback-Type{N}，不执行功能验证，直接修复迭代 |",
@@ -585,11 +590,23 @@ AST 通过时的有效产物是 block-level、tile-level 与 `model_new_tilelang
     text = text.replace("| C 类 — 重复失败 | 同一 A 类子类型连续 ≥ 3 次 | 立即终止 |\n", "")
     text = text.replace(
         "| 🛑 A 类修复硬约束 | 每次 A 类修复必须先查阅 asc-devkit 文档（[A1]），再调用 Skill 获取修复方案（[A2]），禁止跳过这两步直接改代码 |",
-        "| 🛑 A 类修复硬约束 | 调用 translator，并只查本轮错误或拟修改 API 的文档后实施一项根因修复 |",
+        "| 🛑 A 类修复硬约束 | 直接 Read 分类指定的 SKILL.md，并只查本轮错误或拟修改 API 的文档后实施一项根因修复 |",
     )
     text = text.replace(
         "| 🛑 D 类入口前置校验 | 进入 D 类流程前必须确认固定入口输出 `错误分类: D类`，且 kernel 无 crash/编译错误/shape 错误。segfault/crash/编译错误都是 A 类，禁止用 D 类计数器 |",
         "| 🛑 D 类入口前置校验 | 只在固定入口输出 `错误分类: D类` 时进入；segfault/crash/编译错误仍是 A 类 |",
+    )
+    text = text.replace(
+        "| 🛑 D 类修复硬约束 | 每次 D 类修复必须先调用 precision-debug/precision-tuning Skill，禁止跳过 Skill 直接改代码 |",
+        "| 🛑 D 类修复硬约束 | 先直接 Read precision-standard/precision-debug 的 SKILL.md，再按证据改代码；禁止调用 Skill 工具 |",
+    )
+    text = text.replace(
+        "**注意：**不管走哪条算子的开发路径，在实现AscendC代码的时候，都还需要调用 `npu-arch` skill去动态得获取和使用硬件的相关信息，如coreNum等。",
+        "**注意：**不管走哪条开发路径，实现 AscendC 前都先 Read `.claude/skills/npu-arch/SKILL.md`，按本机 SOC 信息确定 coreNum 等硬件参数；不要调用 Skill 工具。",
+    )
+    text = text.replace(
+        "> asc-devkit 的代码生成时查阅职责已下沉到 `tilelang2ascend-translator` skill 内部。agent 无需在调用 skill 前自行查阅。",
+        "> asc-devkit 的查阅路线写在 `.claude/skills/tilelang2ascend-translator/SKILL.md`；直接 Read 该文件后，只按当前错误或拟用 API 查必要文档。",
     )
     text = text.replace("| A/D 计数器独立 | A 类计数器 a_retry 与 D 类计数器 d_retry 互不干扰 |\n", "")
     text = text.replace(

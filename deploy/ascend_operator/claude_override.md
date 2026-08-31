@@ -2,6 +2,13 @@
 
 以上内容与本节冲突时,一律以本节为准。
 
+## Skill 只作为本地知识文件
+
+本 profile 禁用了 `Skill` 工具。任何“调用某个 skill”的上游表述，一律解释为先用 `Read`
+打开 `.claude/skills/<skill-name>/SKILL.md`，再按其中明确引用的相对路径读取必要的
+`references/` 文件。不要尝试调用 Skill，也不要等待 Skill 返回内容；读完后由当前会话直接
+检查和修改工程。路径不确定时先列出 `.claude/skills/`，不要猜路径。
+
 ## 预生成骨架是唯一工程契约
 
 Polar prepare 在 Agent 启动前已经读取本题 `model.py` 的 `__init__` / `forward`，并在
@@ -33,7 +40,7 @@ Polar prepare 在 Agent 启动前已经读取本题 `model.py` 的 `__init__` / 
 
 任何让你运行 `evaluate_ascendc.sh`、`validate_ascendc_impl.py`、
 `msprof_profile_run.sh`、`msprof_perf_summary.py`、`verification_ascendc.py` 的地方,
-一律改跑这一条 —— 包括本文档以上各 Phase、以及你运行期调用任何 Skill 后读到的指示:
+一律改跑这一条 —— 包括本文档以上各 Phase、以及本地 SKILL.md 中读到的指示:
 
 ```bash
 bash /opt/workspace/agent_workdir/tools/ascendc_eval_pipeline.sh --op_name {op_name} \
@@ -65,26 +72,34 @@ bash /opt/workspace/agent_workdir/tools/ascendc_eval_pipeline.sh --op_name {op_n
 - `verification_tilelang.py` 是占卡诊断工具，不属于自动 pipeline。只有后续错误明确需要验证
   TileLang DSL 时才允许经 NPU lease 手工调用；其结果不作为最终 correctness/performance gate。
 
-## 本环境无 Hook
+## 本环境只有完成门禁 Hook
 
-上游的 `skill_script_hook.py` 拦截机制在本环境**未启用**:`.claude/settings.json` 只写了
-`skillOverrides`,没有 hooks。你的 Bash 调用一律**直通执行**,不会被托管代跑。
-凡上游文中说"由 Hook 拦截/代为执行"的地方,实际都是你自己在跑 —— 而按上方「固定入口」,
-那些脚本一律改跑固定入口。
+上游的 `skill_script_hook.py` 命令拦截机制仍然**未启用**。你的 Bash 调用一律直通执行，
+不会被托管代跑；凡上游文中说“由 Hook 拦截/代为执行”的脚本，仍一律改跑上方固定入口。
 
-本环境也没有插件的 SessionStart 上下文注入。执行所需的路径、环境事实和流程约束已经写在
+本环境只安装一个 `Stop` 完成门禁。它只读 `judge_out/metrics.json` 与持久的
+`judge_out/task_state.json`，不执行评测、不替换 Bash、也不修改任何文件。当历史最佳实现已经
+正确但 `task_complete=false`（性能目标未达且仍有优化预算）时，即使当前优化候选编译或运行
+失败，它仍会拒绝结束；只有达到目标、预算耗尽，或当前属于 INFRA 时才放行。不要尝试绕过
+或修改这个门禁。
+
+本环境没有插件的 SessionStart 上下文注入。执行所需的路径、环境事实和流程约束已经写在
 当前 `CLAUDE.md` 中，不要等待 hook 补充，也不要把“可能会被 hook 接管”作为跳过步骤的理由。
 
 ## 错误分类
 
 固定入口输出末尾的 `错误分类:` 行是分类的权威来源:
 
-| 分类 | 处理 |
+| 分类 | 处理（全部直接 Read，不调用 Skill） |
 |---|---|
-| `通过` | 进入下一 Phase |
-| `A类-代码/编译错误` | 读取 `judge_out/metrics_error.log`，调用 `tilelang2ascend-translator` 实施一项根因修复；是否继续只看固定入口的 `remaining/next_step` |
-| `D类-精度不匹配` | 按固定入口的 `next_step` 调用 `ascendc-precision-debug`；仅在它明确要求时调用 `tilelang2ascend-precision-tuning`，预算耗尽即停 |
-| `INFRA-环境故障` | **不要迭代修复**,直接停止并说明 |
+| `通过` | 仅表示 `operator_valid=true`；严格按 `task_complete/next_step` 进入优化或结束 |
+| `A类-提交物/AST/编译` | 读 `metrics_error.log` 与 `tilelang2ascend-translator/SKILL.md`；API 不明再读 `ascendc-docs-search/SKILL.md` |
+| `A类-注册/加载` | 读 `ascendc-runtime-debug/SKILL.md` 和 `references/kernel_binary_debug.md` |
+| `A类-崩溃/超时/启动失败` | 读 `ascendc-crash-debug/SKILL.md`；ACL 错误码再读 runtime-debug 的 `error_codes.md` |
+| `A类-输出契约/状态化退化` | 严格按固定入口给出的 translator/precision-debug 文件路径修，不得冒充 D 类 |
+| `D类-精度不匹配` | 仅当正常运行、输出契约正确且存在数值差异字段时进入；先读 precision-standard，再读 precision-debug |
+| `A类-benchmark执行失败` | 读 `ops-profiling/SKILL.md`；若是 kernel/ACL 崩溃改走运行期路线 |
+| `B类-INFRA` | **不要改 kernel、不要读取修复文档**,直接停止并说明 |
 
 [A1] 照做:asc-devkit 就在 `$ASC_DEVKIT_DIR`。完整错误在 `judge_out/metrics_error.log`,先读它。
 
@@ -107,9 +122,11 @@ Phase 6(全量恢复)因此已从工作流移除。不要自行精简、修改�
 - 统一主指标：`judge_out/performance.json` 的 `geomean_speedup`，即各有效用例相对 PyTorch reference
   加速比的几何平均值。
 - 加速比 **≥ 1.1x** PyTorch reference → 达标；低于 `1.1x` → 未达标。
-- 正确性通过不等于任务结束。固定入口提示未达标且仍有 optimization 预算时，必须调用
-  `ops-profiling` skill：让它读取真实逐 case 结果和当前 kernel，实施一项有证据的通用性能
-  改动。只有源码内容确实变化后才能重跑固定入口。
+- `operator_valid=true` 只表示实现正确；只有 `task_complete=true` 才表示任务允许结束。
+  固定入口提示未达标且仍有 optimization 预算时，必须先 Read
+  `.claude/skills/ops-profiling/SKILL.md`，再读取真实逐 case 结果和当前 kernel，实施一项有证据的
+  通用性能改动。只有源码内容确实变化后才能重跑固定入口。
+- `task_complete=false` 时 Stop 完成门禁会拒绝总结；按 `next_step.action` 继续即可。
 - 达到 `1.1x` 后停止性能迭代；预算耗尽则停止调用工具，并使用固定入口保存的 `.best` 最佳
   正确实现。`1.1x` 只决定性能目标状态，不改变正确性判定，也不能成为不提交 tarball 的理由。
 - attempt、limit、remaining、next_step 只服从固定入口输出。本文档或 skill 中残留的其他固定

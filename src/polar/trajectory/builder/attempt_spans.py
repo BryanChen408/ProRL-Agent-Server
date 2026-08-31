@@ -149,12 +149,18 @@ def _normalize_command(command: str) -> str:
 
 
 _VERDICT_RE = re.compile(
-    # 兼容三种 pipeline 输出行:
+    # 兼容新旧 pipeline 输出行:
     #   [ascendc-eval] verdict — success=False ... error_type=... speedup_vs_torch=...  (fail_hint)
     #   [ascendc-eval] done — success=true correctness_ok=true speedup_vs_torch=2.08 (成功路径)
     #   [ascendc-eval] cached verdict — success=... (哈希短路)
+    #   [ascendc-eval] verdict — operator_valid=True task_complete=False ... (新状态机)
+    #   [ascendc-eval] cached evaluation — operator_valid=True task_complete=False ...
+    # operator_valid 与历史 success 的判分语义相同；task_complete 只控制 agent 能否结束，
+    # 不得改变 reward ladder。
     # 成功(done)路径无 error_type 字段、且无 ast_check_ok 字段 → 两组皆可选。
-    r"\[ascendc-eval\]\s*(?:verdict|done|cached verdict)\b.*?success=(?P<success>\S+)"
+    r"\[ascendc-eval\]\s*(?:verdict|done|cached verdict|cached evaluation)\b.*?"
+    r"(?:success|operator_valid)=(?P<success>\S+)"
+    r"(?:\s+task_complete=(?P<complete>\S+))?"
     r"(?:\s+ast_check_ok=(?P<ast>\S+))?(?:\s+correctness_ok=(?P<corr>\S+))?"
     r"(?:\s+error_type=(?P<etype>\S+))?\s+speedup_vs_torch=(?P<speedup>[-+0-9.eE]+|None|null|nan|NaN)\b"
 )

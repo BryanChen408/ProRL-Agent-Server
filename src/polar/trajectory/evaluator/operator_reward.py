@@ -33,6 +33,8 @@ INFRA_ERROR_TYPES = frozenset({
                                  # cut off; retry instead of scoring the agent 0.2 for our plumbing.
                                  # NOTE: plain "submission_missing" (file genuinely absent) stays
                                  # the AGENT's fault and keeps its real 0.2 signal.
+    "profiler_unavailable",       # msprof binary/tooling is absent -> benchmark could not run
+    "judge_classification_failed",  # evaluator could not establish operator-vs-infra ownership
 })
 
 
@@ -94,7 +96,7 @@ def reward_from_metrics(metrics: dict, env: dict | None = None) -> float:
     not success:  correctness_ok -> 0.4
                   ast_check_ok  -> 按 error_type 细分「编译→能跑→跑完」的进度:
                       ascendc_compile_failed                 -> 0.1  (AST 过、编译没过)
-                      op_not_registered / ascendc_run_crashed -> 0.2  (编译过但没能有效跑完)
+                      注册/加载/崩溃/超时/启动/状态化退化    -> 0.2  (编译过但没能有效跑完)
                       correctness_failed / output_precheck_failed
                         -> 0.3 + α×用例通过率  (对拍跑完、结果不对;统计缺失回退 0.35)
                       其他(阶段挂但类型未知)                 -> 0.25 (兜底中间档)
@@ -113,7 +115,14 @@ def reward_from_metrics(metrics: dict, env: dict | None = None) -> float:
         et = str(metrics.get("error_type") or "")
         if et == "ascendc_compile_failed":
             return 0.1
-        if et in ("op_not_registered", "ascendc_run_crashed"):
+        if et in (
+            "op_not_registered",
+            "ascendc_load_failed",
+            "ascendc_run_crashed",
+            "ascendc_run_timeout",
+            "ascendc_launch_failed",
+            "stateful_impl_detected",
+        ):
             return 0.2
         # correctness_failed(数值差异)与 output_precheck_failed(形状/dtype/NaN 前置
         # 检查不通过)同档同公式:两者都是「对拍跑完了、结果不对」,通过率天然区分
@@ -572,6 +581,9 @@ def test_ladder_not_success():
     assert reward_from_metrics({"success": False, "ast_check_ok": True, "error_type": "ascendc_compile_failed"}) == 0.1
     assert reward_from_metrics({"success": False, "ast_check_ok": True, "error_type": "op_not_registered"}) == 0.2
     assert reward_from_metrics({"success": False, "ast_check_ok": True, "error_type": "ascendc_run_crashed"}) == 0.2
+    assert reward_from_metrics({"success": False, "ast_check_ok": True, "error_type": "ascendc_run_timeout"}) == 0.2
+    assert reward_from_metrics({"success": False, "ast_check_ok": True, "error_type": "ascendc_launch_failed"}) == 0.2
+    assert reward_from_metrics({"success": False, "ast_check_ok": True, "error_type": "stateful_impl_detected"}) == 0.2
     assert reward_from_metrics({"success": False, "ast_check_ok": True, "error_type": None}) == 0.25  # 未知类型兜底中间档
     # 对拍跑完但未全过:0.3 + 0.10×通过率;统计缺失/越界 → 回退 0.35(旧固定档)
     base = {"success": False, "ast_check_ok": True, "error_type": "correctness_failed"}
@@ -606,6 +618,8 @@ def test_is_infra_failure():
     assert is_infra_failure({"error_type": "judge_container_failed"}) is True
     assert is_infra_failure({"error_type": "task_missing"}) is True
     assert is_infra_failure({"error_type": "npu_runtime_unavailable"}) is True
+    assert is_infra_failure({"error_type": "profiler_unavailable"}) is True
+    assert is_infra_failure({"error_type": "judge_classification_failed"}) is True
     assert is_infra_failure({"error_type": "correctness_failed"}) is False    # operator
     assert is_infra_failure({"error_type": "submission_missing"}) is False    # operator
     assert is_infra_failure({"error_type": "output_precheck_failed"}) is False  # operator(输出结构不对) (agent didn't deliver)
@@ -619,6 +633,8 @@ def test_judge_outcome_infra_retries_not_scored():
     assert o2["status"] == "ERROR" and o2["retry"] is True
     o3 = judge_outcome({"error_type": "npu_runtime_unavailable", "success": False})
     assert o3["status"] == "ERROR" and o3["retry"] is True and o3["reward"] is None
+    o4 = judge_outcome({"error_type": "profiler_unavailable", "success": False})
+    assert o4["status"] == "ERROR" and o4["retry"] is True and o4["reward"] is None
 
 
 def test_classify_infra_error_text_detects_npu_init_not_shape_mismatch():

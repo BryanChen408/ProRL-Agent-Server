@@ -398,6 +398,22 @@ def test_infra_timeout_raises():
     raise AssertionError("expected TimeoutError on judge timeout")
 
 
+def test_profiler_unavailable_is_infra_retry_not_benchmark_score():
+    try:
+        _run(
+            {
+                "success": False,
+                "ast_check_ok": True,
+                "correctness_ok": True,
+                "error_type": "profiler_unavailable",
+            }
+        )
+    except RuntimeError as exc:
+        assert "profiler_unavailable" in str(exc)
+    else:
+        raise AssertionError("expected infra retry when msprof is unavailable")
+
+
 def test_submission_missing_is_operator_floor():
     res, _agent, judge = _run({"success": True}, impl=False)  # agent wrote no kernel
     assert res.outcome_reward == 0.0 and res.metadata["error_type"] == "submission_missing"

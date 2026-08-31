@@ -9,7 +9,8 @@
 
 2. 正确性一过就收工。实测 179 个成功 session 只有 2 个进过 optimization 阶段,
    speedup 中位数 0.859x、58.8% 比 torch 慢 —— 而 phase 是在下一次调用开头才判定的,
-   agent 只看到 "错误分类: 通过",永远不知道 optimization 阶段存在。
+   agent 只看到 "错误分类: 通过",永远不知道 optimization 阶段存在。现在固定入口必须把
+   operator_valid 与 task_complete 分开，供 Stop hook 做机械门禁。
 
 口径说明:这份状态文件和 workdir 里的 `.selfcheck` 计数器一样在 session bind mount 内,
 agent 够得到 —— 它是第二信号 + 遥测。真正的强制层是 watcher 从 gateway completion 流里
@@ -119,6 +120,7 @@ def _prompt_env(**over: str) -> dict[str, str]:
         "AGENT_SIDE": "1", "PERF_TARGET": "1.1",
         "PIPELINE_OPT_MAX": "4", "PIPELINE_OPT_COUNT": "0",
         "OUT_DIR": ".",   # _run 的 cwd=tmp_path,配合 _seed_metrics 使用
+        "TASK_STATE_FILE": "task_state.json",
     }
     env.update(over)
     return env
@@ -146,7 +148,7 @@ def test_prompt_says_not_met_below_target(tmp_path):
     assert "未达标" in out and "不要结束任务" in out
     assert "0.859x" in out and "1.1x" in out
     assert "剩 4 次" in out
-    assert "ops-profiling skill" in out
+    assert "Read .claude/skills/ops-profiling/SKILL.md" in out
 
 
 def test_prompt_stops_optimization_above_target(tmp_path):
@@ -156,14 +158,26 @@ def test_prompt_stops_optimization_above_target(tmp_path):
                _prompt_env(), tmp_path)
     assert "已达标" in out and "停止性能迭代" in out
     assert "进入 optimization" not in out
-    assert json.loads(f.read_text(encoding="utf-8"))["next_step"]["phase_next"] == "complete"
+    metrics = json.loads(f.read_text(encoding="utf-8"))
+    assert metrics["operator_valid"] is True
+    assert metrics["task_complete"] is True
+    assert metrics["completion_reason"] == "target_met"
+    assert metrics["next_step"]["phase_next"] == "complete"
 
 
-def test_prompt_silent_when_optimization_budget_gone(tmp_path):
-    """优化预算用完就闭嘴,不要劝一个已经没预算的 session 继续跑。"""
+def test_budget_exhaustion_marks_task_complete_without_claiming_target_met(tmp_path):
+    """优化预算用完要明确放行，但不能谎称性能达标。"""
+    f = _seed_metrics(tmp_path)
     out = _run("emit_optimization_prompt", 'emit_optimization_prompt "0.5"',
                _prompt_env(PIPELINE_OPT_COUNT="4"), tmp_path)
-    assert out.strip() == ""
+    assert "task_complete=true" in out and "budget_exhausted" in out
+    assert "预算已耗尽" in out
+    d = json.loads(f.read_text(encoding="utf-8"))
+    assert d["operator_valid"] is True
+    assert d["task_complete"] is True
+    assert d["completion_reason"] == "budget_exhausted"
+    assert d["next_step"]["target_met"] is False
+    assert d["next_step"]["optimization_remaining"] == 0
 
 
 def test_prompt_silent_on_judge_side(tmp_path):
@@ -186,6 +200,9 @@ def test_prompt_is_also_written_into_metrics_json(tmp_path):
     _run("emit_optimization_prompt", 'emit_optimization_prompt "0.859"', _prompt_env(), tmp_path)
     d = json.loads(f.read_text(encoding="utf-8"))
     ns = d["next_step"]
+    assert d["operator_valid"] is True
+    assert d["task_complete"] is False
+    assert d["completion_reason"] == "pending_optimization"
     assert ns["target_met"] is False
     assert ns["perf_target_speedup"] == 1.1
     assert ns["phase_next"] == "optimization"
@@ -194,15 +211,54 @@ def test_prompt_is_also_written_into_metrics_json(tmp_path):
     # 原有键一个都不能动:judge 侧的 reward 只认这几个
     for k in ("success", "error_type", "perf_data", "ast_check_ok", "correctness_ok"):
         assert d[k] == _METRICS[k]
+    state = json.loads((tmp_path / "task_state.json").read_text(encoding="utf-8"))
+    assert state["operator_valid"] is True
+    assert state["task_complete"] is False
+    assert state["next_step"]["optimization_remaining"] == 4
 
 
-def test_metrics_next_step_absent_when_nothing_to_say(tmp_path):
-    """预算用完 / judge 侧:stdout 闭嘴,metrics.json 也不能被掺东西。"""
-    for over in ({"PIPELINE_OPT_COUNT": "4"}, {"AGENT_SIDE": "0"}):
-        f = _seed_metrics(tmp_path)
-        _run("emit_optimization_prompt", 'emit_optimization_prompt "0.5"',
-             _prompt_env(**over), tmp_path)
-        assert json.loads(f.read_text(encoding="utf-8")) == _METRICS, over
+def test_persistent_task_state_consumes_budget_even_if_next_candidate_fails(tmp_path):
+    """持久状态在新 metrics 被失败结果覆盖前就同步预算，不能永远停在旧 remaining。"""
+    state = {
+        "schema_version": 1,
+        "operator_valid": True,
+        "task_complete": False,
+        "completion_reason": "pending_optimization",
+        "perf_data": {"speedup_vs_torch": 0.859},
+        "next_step": {
+            "target_met": False,
+            "optimization_budget": 4,
+            "optimization_used": 0,
+            "optimization_remaining": 4,
+        },
+    }
+    path = tmp_path / "task_state.json"
+    path.write_text(json.dumps(state), encoding="utf-8")
+    env = _prompt_env(
+        PIPELINE_PHASE="optimization",
+        PIPELINE_OPT_COUNT="2",
+        TASK_STATE_FILE=str(path),
+    )
+    _run("sync_task_state_budget", "sync_task_state_budget", env, tmp_path)
+    updated = json.loads(path.read_text(encoding="utf-8"))
+    assert updated["task_complete"] is False
+    assert updated["next_step"]["optimization_used"] == 2
+    assert updated["next_step"]["optimization_remaining"] == 2
+
+    env["PIPELINE_OPT_COUNT"] = "4"
+    _run("sync_task_state_budget", "sync_task_state_budget", env, tmp_path)
+    exhausted = json.loads(path.read_text(encoding="utf-8"))
+    assert exhausted["task_complete"] is True
+    assert exhausted["completion_reason"] == "budget_exhausted"
+    assert exhausted["next_step"]["optimization_remaining"] == 0
+
+
+def test_judge_metrics_remain_byte_semantically_unchanged(tmp_path):
+    """task 状态只写 agent 侧，judge/reward 的 metrics schema 不掺控制字段。"""
+    f = _seed_metrics(tmp_path)
+    _run("emit_optimization_prompt", 'emit_optimization_prompt "0.5"',
+         _prompt_env(AGENT_SIDE="0"), tmp_path)
+    assert json.loads(f.read_text(encoding="utf-8")) == _METRICS
 
 
 def test_prompt_survives_missing_metrics_json(tmp_path):
@@ -224,6 +280,26 @@ def test_perf_target_default_matches_claude_md():
     assert "1.1x the PyTorch reference" in tasks
 
 
+def test_success_output_no_longer_aliases_operator_valid_to_task_completion():
+    """agent-facing 成功路径不能再出现会诱导 end_turn 的 `done — success=true`。"""
+    script = PIPELINE.read_text(encoding="utf-8")
+    assert '[ascendc-eval] done — success=true' not in script
+    assert "operator_valid=true task_complete=false" in script
+
+
+def test_only_t2a_profile_disables_skill_tool():
+    """直接 Read 是 polar t2a 的局部策略，不能改变其他 profile 的工具能力。"""
+    t2a = (ROOT / "deploy" / "ascend_operator" / "profile.t2a.yaml").read_text(
+        encoding="utf-8"
+    )
+    assert 'allowed_tools: "Bash Read Edit Write Grep Glob"' in t2a
+    assert 'allowed_tools: "Bash Read Edit Write Grep Glob Skill"' not in t2a
+    assert 'disallowed_tools: "Skill ' in t2a
+    for name in ("profile.yaml", "profile.ascendc.yaml", "profile.legacy.yaml"):
+        other = (ROOT / "deploy" / "ascend_operator" / name).read_text(encoding="utf-8")
+        assert 'allowed_tools: "Bash Read Edit Write Grep Glob"' not in other
+
+
 def test_over_limit_gate_precedes_all_evaluation_work():
     script = PIPELINE.read_text(encoding="utf-8")
     gate = '"$PIPELINE_ATTEMPT" -gt "$PIPELINE_LIMIT"'
@@ -235,7 +311,9 @@ def test_over_limit_gate_precedes_all_evaluation_work():
 def test_only_in_budget_candidate_is_packed_for_best_comparison():
     """limit+1 次的候选不能在早退前偷偷参与 best 比较。"""
     script = PIPELINE.read_text(encoding="utf-8")
-    start = script.index("  pipeline_status_write\n  echo \"[pipeline-budget]")
+    start = script.index(
+        "  pipeline_status_write\n  sync_task_state_budget\n  echo \"[pipeline-budget]"
+    )
     end = script.index("\nfi\n\n_on_exit()", start)
     setup_block = script[start:end]
 
@@ -247,7 +325,7 @@ def test_only_in_budget_candidate_is_packed_for_best_comparison():
 def test_new_evaluation_discards_previous_source_results_after_cache_and_budget_gates():
     """新源码开跑前清理旧结果；未改源码的缓存和超限收尾仍可先返回。"""
     script = PIPELINE.read_text(encoding="utf-8")
-    cache_gate = "cached verdict"
+    cache_gate = "cached evaluation"
     budget_gate = "budget already exhausted; skip evaluation work"
     stale_clear = 'rm -f "$OUT_DIR/metrics.json"'
 

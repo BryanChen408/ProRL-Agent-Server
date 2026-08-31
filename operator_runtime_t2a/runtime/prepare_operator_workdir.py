@@ -96,7 +96,7 @@ _BINOPS = {ast.Add: operator.add, ast.Sub: operator.sub, ast.Mult: operator.mul,
 @dataclass
 class _Param:
     name: str
-    kind: str                 # tensor|tensor?|int|int?|float|float?|bool|str|int[]|tensor[]|unknown
+    kind: str                 # tensor|tensor?|int|int?|float|float?|bool|str|int[]|int[]?|tensor[]|unknown
     default: str | None = None  # Python 源码形式的默认值(仅 forward/可选位)
     in_op: bool = True         # 不进 op 签名的参数在调用处留 TODO
 
@@ -115,14 +115,16 @@ class _OpSig:
 _SCHEMA_TYPE = {
     "tensor": "Tensor", "tensor?": "Tensor?",
     "int": "int", "int?": "int?", "float": "float", "float?": "float?",
-    "bool": "bool", "str": "str", "int[]": "int[]", "tensor[]": "Tensor[]",
+    "bool": "bool", "str": "str", "int[]": "int[]", "int[]?": "int[]?",
+    "tensor[]": "Tensor[]",
 }
 _CPP_TYPE = {
     "tensor": "const at::Tensor &", "tensor?": "const c10::optional<at::Tensor> &",
     "int": "int64_t ", "int?": "const c10::optional<int64_t> &",
     "float": "double ", "float?": "const c10::optional<double> &",
     "bool": "bool ", "str": "const std::string &",
-    "int[]": "at::IntArrayRef ", "tensor[]": "at::TensorList ",
+    "int[]": "at::IntArrayRef ", "int[]?": "at::OptionalIntArrayRef ",
+    "tensor[]": "at::TensorList ",
 }
 # 能接进 kernel 入口的标量 kind → kernel 形参类型;不在表里的 kind 只到 host(留 TODO)
 _KERNEL_SCALAR = {"int": "int64_t", "float": "float", "bool": "int64_t"}
@@ -268,8 +270,13 @@ def _get_init_values(tree, consts) -> list:
 
 
 def _opt_wrap(kind: str) -> str:
-    """None 默认值 → optional 形式(标量/tensor 都放宽兼容)。"""
-    return {"tensor": "tensor?", "int": "int?", "float": "float?"}.get(kind, kind)
+    """None 默认值 → optional 形式(标量/tensor/int-list 都放宽兼容)。"""
+    return {
+        "tensor": "tensor?",
+        "int": "int?",
+        "float": "float?",
+        "int[]": "int[]?",
+    }.get(kind, kind)
 
 
 def _extract_op_signature(task_path: Path, json_path: Path | None) -> _OpSig | None:
@@ -513,6 +520,14 @@ def _render_model_new(op: str, sig: _OpSig) -> str:
 
 def _render_register_cpp(op: str, sig: _OpSig, ordered: list[_Param], schema_args: str) -> str:
     ret = "Tensor" if sig.ret_arity <= 1 else "(" + ", ".join(["Tensor"] * sig.ret_arity) + ")"
+    # Dispatcher 只有从必需 Tensor/Tensor[] 实参中才能稳定推导 PrivateUse1。
+    # 纯标量或仅 Optional[Tensor] 的签名在实参无 Tensor 时没有 dispatch key，必须使用
+    # CatchAll 才能进入 host 实现。这里按签名属性选择，不依赖算子名或数据集白名单。
+    dispatch_key = (
+        "PrivateUse1"
+        if any(p.kind in ("tensor", "tensor[]") for p in ordered)
+        else "CatchAll"
+    )
     return f'''#include <torch/extension.h>
 #include <torch/library.h>
 
@@ -529,7 +544,7 @@ TORCH_LIBRARY_FRAGMENT(npu, m)
     m.def("{op}({schema_args}) -> {ret}");
 }}
 
-TORCH_LIBRARY_IMPL(npu, PrivateUse1, m)
+TORCH_LIBRARY_IMPL(npu, {dispatch_key}, m)
 {{
     m.impl("{op}", TORCH_FN(ascend_kernel::{op}));
 }}
@@ -561,7 +576,10 @@ namespace ascend_kernel {{
 def _render_op_host_cpp(op: str, sig: _OpSig, ordered: list[_Param], cpp_args: str) -> str:
     tensors = [p for p in ordered if p.kind == "tensor"]
     tensor_lists = [p for p in ordered if p.kind == "tensor[]"]
-    unwired = [p for p in ordered if p.kind in ("tensor?", "int?", "float?", "str", "int[]", "tensor[]")]
+    unwired = [
+        p for p in ordered
+        if p.kind in ("tensor?", "int?", "float?", "str", "int[]", "int[]?", "tensor[]")
+    ]
     scalars = [p for p in ordered if p.kind in _KERNEL_SCALAR]
     lines: list[str] = []
     a = lines.append
@@ -988,6 +1006,8 @@ _CLI_BUNDLED_SKILLS = (
     "security-review",
 )
 
+_STOP_GUARD_COMMAND = 'python3 "$CLAUDE_PROJECT_DIR/tools/ascendc_stop_guard.py"'
+
 
 def _non_project_skills(canonical: Path) -> list[str]:
     """规则:凡不是本项目(canonical/skills)提供的 CLI 自带 skill,一律关掉。
@@ -999,15 +1019,21 @@ def _non_project_skills(canonical: Path) -> list[str]:
     return [name for name in _CLI_BUNDLED_SKILLS if name not in ours]
 
 
-def _write_skill_overrides(workdir: Path, names: list[str]) -> None:
-    """把 CLI 自带的 skill 从"模型可见清单"里摘掉(Claude Code projectSettings.skillOverrides)。
+def _write_claude_settings(
+    workdir: Path,
+    names: list[str],
+    *,
+    enable_stop_guard: bool = False,
+) -> None:
+    """合并 project settings：关闭无关 skill，并按需安装只读完成门禁。
 
     `{name: "off"}` = 既不列进 prompt 也不允许模型调用(claude 2.1.168 起支持,
     实测 schema: skillOverrides: Record<str, on|name-only|user-invocable-only|off>)。
     更高版本另有 CLAUDE_CODE_DISABLE_BUNDLED_SKILLS=1 可一把关(2.1.168 不认)。
-    **不传 --skill-overrides-off 就一个字节都不写**,triton 路径与旧 topology 行为不变。
+    Stop hook 不执行评测、不改状态，只在 metrics 明确 task_complete=false 时拒绝结束。
+    两部分都没启用时一个字节都不写；已有 permissions/hooks 原样合并保留。
     """
-    if not names:
+    if not names and not enable_stop_guard:
         return
     settings_path = workdir / ".claude" / "settings.json"
     settings_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1019,14 +1045,53 @@ def _write_skill_overrides(workdir: Path, names: list[str]) -> None:
             loaded = None
         if isinstance(loaded, dict):
             data = loaded
-    overrides = data.get("skillOverrides")
-    if not isinstance(overrides, dict):
-        overrides = {}
-    overrides.update({name: "off" for name in names})
-    data["skillOverrides"] = overrides
+    if names:
+        overrides = data.get("skillOverrides")
+        if not isinstance(overrides, dict):
+            overrides = {}
+        overrides.update({name: "off" for name in names})
+        data["skillOverrides"] = overrides
+
+    if enable_stop_guard:
+        hooks = data.get("hooks")
+        if not isinstance(hooks, dict):
+            hooks = {}
+        stop_groups = hooks.get("Stop")
+        if not isinstance(stop_groups, list):
+            stop_groups = []
+        already_present = any(
+            isinstance(group, dict)
+            and isinstance(group.get("hooks"), list)
+            and any(
+                isinstance(hook, dict)
+                and hook.get("type") == "command"
+                and hook.get("command") == _STOP_GUARD_COMMAND
+                for hook in group["hooks"]
+            )
+            for group in stop_groups
+        )
+        if not already_present:
+            stop_groups.append(
+                {
+                    "hooks": [
+                        {
+                            "type": "command",
+                            "command": _STOP_GUARD_COMMAND,
+                            "timeout": 10,
+                        }
+                    ]
+                }
+            )
+        hooks["Stop"] = stop_groups
+        data["hooks"] = hooks
     settings_path.write_text(
         json.dumps(data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
     )
+
+
+def _write_skill_overrides(workdir: Path, names: list[str]) -> None:
+    """Backward-compatible helper retained for callers/tests that only manage skills."""
+    _write_claude_settings(workdir, names)
 
 
 def _prepare_ascendc_workdir(args) -> int:
@@ -1086,7 +1151,16 @@ def _prepare_ascendc_workdir(args) -> int:
     ]
     if off_names:
         print(f"[prepare] skillOverrides off ({len(off_names)}): {','.join(off_names)}")
-    _write_skill_overrides(workdir, off_names)
+    stop_guard_enabled = bool(
+        args.require_claude and (workdir / "tools" / "ascendc_stop_guard.py").is_file()
+    )
+    _write_claude_settings(
+        workdir,
+        off_names,
+        enable_stop_guard=stop_guard_enabled,
+    )
+    if stop_guard_enabled:
+        print("[prepare] Stop hook enabled: task_complete guard")
 
     if args.require_claude and shutil.which("claude") is None:
         raise FileNotFoundError("required executable missing on PATH: claude")

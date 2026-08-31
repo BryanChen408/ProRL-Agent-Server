@@ -1111,7 +1111,9 @@ def _tool_name_and_target(tool: dict[str, Any]) -> tuple[str, str]:
 
 
 _CACHED_VERDICT_RE = re.compile(
-    r"cached verdict\s*—\s*success=(\w+)\s+ast_check_ok=(\w+)\s+correctness_ok=(\w+)\s+speedup_vs_torch=(\S+)"
+    r"cached (?:verdict|evaluation)\s*—\s*(?:success|operator_valid)=(\w+)"
+    r"(?:\s+task_complete=\w+)?\s+ast_check_ok=(\w+)\s+correctness_ok=(\w+)"
+    r"\s+speedup_vs_torch=(\S+)"
 )
 
 
@@ -1119,9 +1121,9 @@ def _cached_verdict_labels(text: str) -> list[str] | None:
     """缓存复用(源码没变 → pipeline 复用上次结论)的判定。
 
     完整跑一遍的输出格式(observer 的 success/verify/compile 等标记)这里都不会出现,
-    cached verdict 是另一套:`cached verdict — success=X ast_check_ok=Y correctness_ok=Z
-    speedup_vs_torch=W`。不单独解析就会全部落 unknown。返回对应标签;不是 cached
-    verdict 返回 None。"""
+    新旧格式分别是 `cached evaluation — operator_valid=... task_complete=...` 与
+    `cached verdict — success=...`。不单独解析就会全部落 unknown。返回对应标签；
+    不是缓存结论则返回 None。"""
     m = _CACHED_VERDICT_RE.search(text)
     if not m:
         return None
@@ -1154,7 +1156,12 @@ def _classify_tool_result(text: str) -> dict[str, Any]:
         if "coredim" in low:
             labels.append("core_dim")
         return {"labels": labels, "snippet": _snippet(text, 900)}
-    if "success=true" in low or "[triton-eval] done" in low or "[ascendc-eval] done" in low:
+    if (
+        "success=true" in low
+        or "operator_valid=true" in low
+        or "[triton-eval] done" in low
+        or "[ascendc-eval] done" in low
+    ):
         labels.append("success")
     if "ast failed" in low or "ast_check_failed" in low:
         labels.append("ast_fail")

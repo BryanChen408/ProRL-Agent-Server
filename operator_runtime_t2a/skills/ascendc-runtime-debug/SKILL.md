@@ -41,7 +41,7 @@ description: Ascend C 算子运行时错误调试技能。用于处理算子运�
 | 工具 | 用途 | 使用 |
 |-----|------|------|
 | `aclGetRecentErrMsg()` | 获取错误详情 | 返回码非0时调用 |
-| 环境检查 | ascendc-env-check skill | 见 skill:ascendc-env-check |
+| 环境/工具链异常 | 以固定评测入口的 `B类-INFRA` 为准 | 停止修改 kernel，交由 Polar 重试/回收 |
 | `parse_plog.py` | 日志解析 | `python3 scripts/parse_plog.py [plog_file]` |
 | `ASCEND_SLOG_PRINT_TO_STDOUT=1` | 日志打屏 | 实时查看日志 |
 
@@ -52,4 +52,4 @@ description: Ascend C 算子运行时错误调试技能。用于处理算子运�
 - **[debug_workflow.md](references/debug_workflow.md)**：详细调试流程（错误码处理、环境检查）
 - **[kernel_binary_debug.md](references/kernel_binary_debug.md)**：Kernel 二进制构建调试（编译缓存、SEL匹配、多版本冲突、opParaSize）
 - **[error_codes.md](references/error_codes.md)**：完整错误码表（基本状态码、内部异常状态码）
-- **[ascendc-env-check skill](skill:ascendc-env-check)**：环境变量配置指南
+- 环境变量、驱动或工具链缺失若被固定入口标为 `B类-INFRA`，不属于算子修复范围；不要再读取或调用额外 skill。

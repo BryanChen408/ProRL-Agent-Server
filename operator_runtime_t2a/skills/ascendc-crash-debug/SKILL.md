@@ -64,4 +64,4 @@ description: Ascend C 算子卡死/崩溃/内存错误调试路由技能。用�
   - [msSanitizer 工具指南](references/memcheck/mssanitizer_guide.md) — 6类内存异常详解
 - **[自动化检测脚本](scripts/run_memcheck_pre.sh)**：一键执行内存检测
 - **[配置文件模板](scripts/memcheck_input.json.template)**：memcheck_input.json 模板
-- **[ascendc-env-check skill](skill:ascendc-env-check)**：环境变量配置指南
+- 环境变量、驱动或工具链缺失若被固定入口标为 `B类-INFRA`，停止修改 kernel，交由 Polar 重试/回收。

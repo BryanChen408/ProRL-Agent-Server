@@ -103,24 +103,36 @@ def classify(t):
         or ("filenotfounderror" in l and ".json" in l):
         return "input_load_failed"
     if "aclinit" in c and ("invaliddeviceid" in c or "getdevicecntfailed" in c) or "invalid device id" in l: return "npu_runtime_unavailable"
-    if "ast退化" in l or "ast_check" in l or "ast check" in l or "退化" in t or "degrad" in l:
-        return "ast_check_failed"
-    if "cmake" in l or "make error" in l or "ccec" in l or "bisheng" in l or "编译" in t or "compil" in l: return "ascendc_compile_failed"
-    # 崩溃/异常 vs 真精度:不看错误文案(关键词白名单补不完),看「比较有没有跑完」。
-    # 对拍阶段失败且日志里有比较数值字段(max_abs_diff=/MERE=/matched_ratio=)→ 比较
-    # 跑完、数值不符 → 真精度错(D类);没有 → 比较没跑完(崩溃/超时/加载异常等),
-    # 与错误形态无关 —— 新报错不用补关键词,自动归入 ascendc_run_crashed(A类)。
+    if "找不到msprof" in c or "msprof:notfound" in c: return "profiler_unavailable"
+    # CANNBot 的 D 类入口必须同时满足:编译通过、正常运行完成、输出契约正确、已有
+    # 数值差异字段。对拍日志可能带 ccec_compiler/PATH、degradation warning 等无关词，
+    # 所以对拍分支必须先于 AST/编译关键词判定。
     if "对拍" in t or "mare" in l or "mere" in l or "correctness" in l or "result: fail" in l:
-        # 判据:对拍有没有给出结论(有 case[N]: 行)。上游无论什么措辞都带这个前缀,
-        # 加新的前置检查也自动归对,不用补词。有结论再分「数值差异」和「前置检查不通过」
-        # (形状/NaN/dtype —— 这类算不出逐元素差,但对拍确实跑完了)。
+        # 有结论再分「数值差异」和「输出契约/前置检查不通过」。后者虽然已经跑到
+        # comparator,但不满足 D 类的 shape/可比较前提,粗分类仍是 A 类。
         if re.search(r"case\[\d+\]:", l):
             if re.search(r"(max_abs_diff|mere|matched_ratio)\s*=", l):
                 return "correctness_failed"
             return "output_precheck_failed"
+        if re.search(r"modulenotfounderror|importerror|_opnamespace|has no attribute|cannot open shared object|undefined symbol", l):
+            return "ascendc_load_failed"
+        # 明确 ACL 错误码优先于函数名/描述关键词。507035 的常见日志包含
+        # rtDeviceSynchronizeWithTimeout，若先搜 timeout 会被错误路由到超时。
+        if "507035" in l:
+            return "ascendc_launch_failed"
+        if "507034" in l:
+            return "ascendc_run_timeout"
+        if re.search(r"kernel launch failed|aclrtlaunch\w*.*failed|vector core exception|aic error", l):
+            return "ascendc_launch_failed"
+        if re.search(r"timed?\s*out|timeout|超时|kernel hang|vector core timeout", l):
+            return "ascendc_run_timeout"
         return "ascendc_run_crashed"
+    if "ast退化" in l or "ast_check" in l or "ast check" in l or "退化" in t or "degrad" in l:
+        return "ast_check_failed"
+    if "cmake" in l or "make error" in l or "ccec" in l or "bisheng" in l or "编译" in t or "compil" in l: return "ascendc_compile_failed"
     if "speedup" in l or "performance" in l or "性能" in t: return "benchmark_failed"
-    return "unknown"
+    # 无法建立责任边界时不能默认为代码/编译错并向训练注入假负样本。
+    return "judge_classification_failed"
 perf = None
 if fw and impl and sp:
     perf = {"framework_latency_ms": float(fw), "impl_latency_ms": float(impl), "speedup_vs_torch": float(sp)}
@@ -186,7 +198,10 @@ print('%d %d' % (sum(1 for x in oks if x), len(oks)) if isinstance(oks, list) an
 }
 
 fail_hint() {
-  python3 -c "import json;d=json.load(open('$OUT_DIR/metrics.json'));p=d.get('perf_data') or {};print('[ascendc-eval] verdict — success=%s ast_check_ok=%s correctness_ok=%s error_type=%s speedup_vs_torch=%s'%(d.get('success'),d.get('ast_check_ok'),d.get('correctness_ok'),d.get('error_type'),p.get('speedup_vs_torch')))" 2>/dev/null || true
+  # success 是 judge/reward 的历史字段,语义只能保持「实现正确且完成性能测量」；不能再把它
+  # 原样展示成 agent 的任务完成信号。agent 侧用 operator_valid/task_complete 两个正交状态，
+  # judge 侧没有 task_complete 时明确打印 None，不凭空声称任务已经结束。
+  python3 -c "import json;d=json.load(open('$OUT_DIR/metrics.json'));p=d.get('perf_data') or {};print('[ascendc-eval] verdict — operator_valid=%s task_complete=%s ast_check_ok=%s correctness_ok=%s error_type=%s speedup_vs_torch=%s'%(d.get('operator_valid',d.get('success')),d.get('task_complete'),d.get('ast_check_ok'),d.get('correctness_ok'),d.get('error_type'),p.get('speedup_vs_torch')))" 2>/dev/null || true
   python3 - "$OUT_DIR/metrics.json" "$OUT_DIR/metrics_error.log" <<'CLASSIFY' 2>/dev/null || true
 import json, re, sys
 try:
@@ -194,7 +209,8 @@ try:
 except Exception:
     sys.exit(0)
 if d.get("success"):
-    print("[ascendc-eval] 错误分类: 通过"); sys.exit(0)
+    print("[ascendc-eval] 错误分类: 通过（仅表示 operator_valid=true；是否允许结束只看 task_complete）")
+    sys.exit(0)
 et = str(d.get("error_type") or "")
 
 # Pull the first real exception line out of metrics_error.log. Without this the
@@ -235,44 +251,65 @@ crash_failure = not bool(re.search(r"case\[\d+\]:", _log_low))
 
 # 错误分类行内嵌路由:agent 必读此行,把「下一步去哪查」直接写在这里。
 # 目标全部是现有 skill 的现有小文档,无新增内容;词表与分类行原话对齐(agent 能逐字命中)。
-_CRASH_ROUTE = (";下一步:先 Read .claude/skills/ascendc-crash-debug/references/crash_workflow.md 再改代码"
-                "(acl 错误码查 ascendc-runtime-debug/references/error_codes.md)")
+_SUBMISSION_ROUTE = (";下一步:检查工程顶层、model_new_ascendc.py、kernel/ 与 tarball 布局,"
+                     "不需要读取调试 Skill")
+_COMPILE_ROUTE = (";下一步:先 Read .claude/skills/tilelang2ascend-translator/SKILL.md;"
+                  "符号/API 错再 Read .claude/skills/ascendc-docs-search/SKILL.md,"
+                  "按错误符号查 $ASC_DEVKIT_DIR 文档")
+_LOAD_ROUTE = (";下一步:先 Read .claude/skills/ascendc-runtime-debug/SKILL.md 和 "
+               ".claude/skills/ascendc-runtime-debug/references/kernel_binary_debug.md")
+_CRASH_ROUTE = (";下一步:先 Read .claude/skills/ascendc-crash-debug/SKILL.md 和 "
+                ".claude/skills/ascendc-crash-debug/references/crash_workflow.md;"
+                "ACL错误码再 Read .claude/skills/ascendc-runtime-debug/references/error_codes.md")
+_OUTPUT_ROUTE = (";下一步:shape/dtype/输出数量错误先 Read "
+                 ".claude/skills/tilelang2ascend-translator/SKILL.md;"
+                 "NaN/Inf/全零输出再 Read .claude/skills/ascendc-precision-debug/SKILL.md")
 _PRECISION_ROUTE = (";下一步:先 Read .claude/skills/ops-precision-standard/SKILL.md 对容差表,"
                     "再按 .claude/skills/ascendc-precision-debug/SKILL.md 的指引修")
-_COMPILE_ROUTE = (";下一步:符号/API 错 → 拿错误里的符号名查 ascendc-docs-search 或 "
-                  "ascendc-api-best-practices;级联错误 → compile.log 里搜下一个 \"error:\"")
+_STATEFUL_ROUTE = (";下一步:先 Read .claude/skills/tilelang2ascend-translator/SKILL.md,"
+                   "删除跨调用缓存、常量输出或输入无关捷径")
+_BENCHMARK_ROUTE = (";下一步:先 Read .claude/skills/ops-profiling/SKILL.md;"
+                    "若 perf.log 是 kernel/ACL 崩溃,再按运行期错误路线处理")
 
 INFRA = {"npu_runtime_unavailable", "input_load_failed", "judge_container_failed",
          "judge_metrics_unreadable", "judge_no_metrics", "task_missing",
-         "submission_fetch_failed"}
+         "submission_fetch_failed", "profiler_unavailable",
+         "judge_classification_failed"}
 if et in INFRA:
-    label = "INFRA-环境故障(不是你的代码问题,不要迭代修复)"
+    label = "B类-INFRA-环境/基础设施故障(不是你的代码问题,不要改kernel或读取修复文档)"
+elif et == "submission_missing":
+    label = "A类-提交物/工程布局错误" + _SUBMISSION_ROUTE
+elif et == "ast_check_failed":
+    label = "A类-AST退化/实现不合规" + _COMPILE_ROUTE
+elif et == "ascendc_compile_failed":
+    label = "A类-编译/链接错误" + _COMPILE_ROUTE
 elif et in ("op_not_registered", "ascendc_load_failed"):
-    label = "A类-算子未注册/加载失败(不是精度问题:改 setup.py 打包与 import,别调数值)"
-elif et == "ascendc_run_crashed":
-    label = "A类-kernel崩溃/运行期错误(不是精度问题:查越界/非法访存/核间划分/对齐,别调数值)" + _CRASH_ROUTE
+    label = "A类-算子未注册/加载失败(不是精度问题)" + _LOAD_ROUTE
+elif et in ("ascendc_run_crashed", "ascendc_run_timeout", "ascendc_launch_failed"):
+    label = "A类-kernel崩溃/超时/启动失败(不是精度问题)" + _CRASH_ROUTE
 elif et == "output_precheck_failed":
-    # 对拍跑完了,但输出连「可比较」都不满足(形状/dtype 不符、或算出了 NaN)。
-    # 这不是精度问题:调 tolerance/数值写法治不了形状算错,方向必须分开说。
-    label = ("D类-输出不可比较(形状/dtype/NaN;对拍已跑完但输出结构不对:"
-             "查输出 shape 推导、tiling 边界、是否产生 NaN/Inf,别调数值精度)")
+    label = "A类-输出契约/有效性错误(shape/dtype/输出数量/NaN前置检查未通过,不满足D类入口)" + _OUTPUT_ROUTE
+elif et == "stateful_impl_detected":
+    label = "A类-状态化/缓存/常量输出退化(对拍结果不可信)" + _STATEFUL_ROUTE
 elif et == "correctness_failed" and crash_failure:
     # 兜底:error_type 没被 classify 拆出 ascendc_run_crashed 时
-    label = "A类-kernel崩溃/运行期错误(不是精度问题:查越界/非法访存/核间划分/对齐,别调数值)" + _CRASH_ROUTE
+    label = "A类-kernel崩溃/运行期错误(不是精度问题)" + _CRASH_ROUTE
 elif et == "correctness_failed" and load_failure:
-    label = "A类-算子未注册/加载失败(对拍未比较任何元素,不是精度问题:改 setup.py 打包与 import)"
+    label = "A类-算子未注册/加载失败(对拍未比较任何元素,不是精度问题)" + _LOAD_ROUTE
 elif et == "correctness_failed":
     label = "D类-精度不匹配" + _PRECISION_ROUTE
-elif et in ("ascendc_compile_failed", "ast_check_failed", "submission_missing",
-            "benchmark_failed"):
-    label = "A类-代码/编译错误" + _COMPILE_ROUTE
+elif et == "benchmark_failed":
+    label = "A类-benchmark执行失败(正确性已通过,但没有形成有效性能结果)" + _BENCHMARK_ROUTE
 else:
-    label = "A类-代码/编译错误" + _COMPILE_ROUTE
+    # 新增 error_type 未进入映射属于 judge 分类器缺口,不能假装是代码错误。
+    label = "B类-INFRA-分类器未覆盖该error_type(停止并上报,不要猜测修复):" + et
 print(f"[ascendc-eval] 错误分类: {label}")
 if first_exc:
     print(f"[ascendc-eval] 首个异常: {first_exc}")
 CLASSIFY
-  echo "  ↳ 完整错误在 $OUT_DIR/metrics_error.log;只改 {op}/ 下实现、重打 tarball、重跑本固定入口。"
+  if ! python3 -c "import json;raise SystemExit(0 if json.load(open('$OUT_DIR/metrics.json')).get('success') else 1)" 2>/dev/null; then
+    echo "  ↳ 完整错误在 $OUT_DIR/metrics_error.log;只改 {op}/ 下实现、重打 tarball、重跑本固定入口。"
+  fi
 }
 
 PIPELINE_GEN_MAX="${POLAR_GEN_PIPELINE_MAX:-6}"
@@ -280,6 +317,7 @@ PIPELINE_OPT_MAX="${POLAR_OPT_PIPELINE_MAX:-3}"
 PIPELINE_PHASE="generation"; PIPELINE_LIMIT="$PIPELINE_GEN_MAX"; PIPELINE_ATTEMPT=1
 PIPELINE_GEN_COUNT=0; PIPELINE_OPT_COUNT=0; PIPELINE_FIRST_SUCCESS=0
 BEST_META="$WORK_ROOT/output/submission/.${OP_NAME}_impl.best.meta.json"
+TASK_STATE_FILE="$OUT_DIR/task_state.json"
 CUR_HASH=""
 # 性能目标线。reward = 0.75 + 0.25*tanh(ln speedup)(operator_reward.reward_from_metrics):
 # 1.0x 只拿 0.75,低于 1.0x 反而往 0.5 掉。CLAUDE.md 4-S.4 的达标判定必须同步这个数。
@@ -332,14 +370,14 @@ PY
 }
 
 # 正确性一过就收工是当前最大的分数漏点(实测 179 个成功 session 只有 2 个继续优化,
-# speedup 中位数 0.859x、58.8% 慢于 torch)。成功回显里必须明说「阶段 / 剩余预算 / 离目标线差多少」:
-# phase 是在下一次调用开头才判定的,不说的话 agent 永远看不到 optimization 阶段的存在,
-# 只看到 "错误分类: 通过" 就结束。
+# speedup 中位数 0.859x、58.8% 慢于 torch)。这里把「实现有效」和「任务完成」拆开:
+# operator_valid 只表示正确性/测速通过；task_complete 才是 Stop hook 的唯一放行信号。
+# 目标未达且仍有 optimization 预算时 task_complete=false，不能再被 success=true 误导结束。
 emit_optimization_prompt() {  # $1=speedup
   [[ "$AGENT_SIDE" == "1" ]] || return 0
   local sp="${1:-}" remain=$(( PIPELINE_OPT_MAX - PIPELINE_OPT_COUNT ))
-  [[ "$remain" -gt 0 ]] || return 0
-  local hit
+  [[ "$remain" -ge 0 ]] || remain=0
+  local hit task_complete completion_reason phase_next
   hit=$(SP="$sp" TARGET="$PERF_TARGET" python3 -c '
 import os
 try:
@@ -347,26 +385,20 @@ try:
 except Exception:
     print("0")' 2>/dev/null || echo 0)
   if [[ "$hit" == "1" ]]; then
-    echo "[ascendc-eval] 正确性已通过,speedup=${sp}x ≥ 目标线 ${PERF_TARGET}x —— 已达标,停止性能迭代并提交最佳版本。"
+    task_complete="1"; completion_reason="target_met"; phase_next="complete"
+  elif [[ "$remain" -le 0 ]]; then
+    task_complete="1"; completion_reason="budget_exhausted"; phase_next="complete"
   else
-    echo "[ascendc-eval] 正确性已通过,但 speedup=${sp}x < 目标线 ${PERF_TARGET}x —— 未达标,不要结束任务。"
-    echo "[ascendc-eval] 下一次调用本固定入口进入 optimization 阶段:预算 ${PIPELINE_OPT_MAX} 次,已用 ${PIPELINE_OPT_COUNT} 次,剩 ${remain} 次。"
-    echo "[ascendc-eval] 先调用 ops-profiling skill 读取真实逐 case 结果并修改 kernel;源码变化后再重跑本入口。"
-    echo "[ascendc-eval] .best.tar.gz 只在 speedup 更高时才替换 —— 优化失败不会覆盖已知最佳版本。"
+    task_complete="0"; completion_reason="pending_optimization"; phase_next="optimization"
   fi
 
-  # 同一份指引再写进 metrics.json。上面那几行只走 stdout,而 stdout 经常整段丢失:
-  # 评测常顶穿 Bash 超时被自动转后台,输出改写进一个临时文件,agent 只能轮询、还会撞上
-  # harness 的 "Wasted call — file unchanged" 护栏。实测 run 133937 的 45 个会话里只有 9 个
-  # 收到过这段话(送达率 20%);而 4 个「正确性过了、speedup 低于目标线、预算没用完就收工」
-  # 的会话中,有 2 个恰恰是靠读 metrics.json 才拿到 speedup 的 —— 它们知道自己没达标,只是
-  # 没人告诉它们还有优化预算。写进这里,指引就和 stdout 通道解耦了。
-  # 只在 agent 侧写(judge 侧 AGENT_SIDE=0,上面已 return),judge 的 metrics.json 一字不变;
-  # 即便写了也无害:reward 路径只读 success/error_type/perf_data,不认识的键直接忽略。
-  # 拿不到 metrics.json 就只留 stdout —— 这段是附加指引,永远不该让固定入口失败。
-  [[ -n "${OUT_DIR:-}" && -f "${OUT_DIR}/metrics.json" ]] || return 0
-  SP="$sp" HIT="$hit" TARGET="$PERF_TARGET" OPT_MAX="$PIPELINE_OPT_MAX" \
-  OPT_USED="$PIPELINE_OPT_COUNT" REMAIN="$remain" MJ="$OUT_DIR/metrics.json" python3 - <<'PY' 2>/dev/null || true
+  # 先落权威状态再回显。Stop hook 只读这份文件；stdout 即使因 Bash 自动转后台而丢失，
+  # 也不会把「目标未达」误当成已完成。只在 agent 侧写，judge 的 metrics schema/奖励字段不变。
+  if [[ -n "${OUT_DIR:-}" && -f "${OUT_DIR}/metrics.json" ]]; then
+    SP="$sp" HIT="$hit" COMPLETE="$task_complete" REASON="$completion_reason" \
+    PHASE_NEXT="$phase_next" TARGET="$PERF_TARGET" OPT_MAX="$PIPELINE_OPT_MAX" \
+    OPT_USED="$PIPELINE_OPT_COUNT" REMAIN="$remain" MJ="$OUT_DIR/metrics.json" \
+    TS="$TASK_STATE_FILE" python3 - <<'PY' 2>/dev/null || true
 import json, os
 from pathlib import Path
 p = Path(os.environ["MJ"])
@@ -375,25 +407,106 @@ try:
 except Exception:
     raise SystemExit(0)
 hit = os.environ.get("HIT") == "1"
+complete = os.environ.get("COMPLETE") == "1"
 target, remain = os.environ["TARGET"], int(os.environ["REMAIN"])
+reason = os.environ["REASON"]
+if hit:
+    action = (f"正确性已通过,speedup={os.environ.get('SP','')}x ≥ 目标线 {target}x —— "
+              "已达标，停止性能迭代并提交最佳版本。")
+elif complete:
+    action = (f"正确性已通过,但 speedup={os.environ.get('SP','')}x < 目标线 {target}x；"
+              "optimization 预算已耗尽，停止调用工具并提交 .best 最佳版本。")
+else:
+    action = (f"正确性已通过,但 speedup={os.environ.get('SP','')}x < 目标线 {target}x —— "
+              f"未达标,不要结束任务。下一次调用本固定入口进入 optimization 阶段，还剩 {remain} 次预算。"
+              " 先 Read .claude/skills/ops-profiling/SKILL.md，再读取真实逐 case 结果并修改 kernel；"
+              "源码变化后再重跑。"
+              " .best.tar.gz 只在 speedup 更高时才替换。")
+d["operator_valid"] = bool(d.get("success") and d.get("correctness_ok"))
+d["task_complete"] = complete
+d["completion_reason"] = reason
 d["next_step"] = {
     "perf_target_speedup": float(target),
     "target_met": hit,
-    "phase_next": "complete" if hit else "optimization",
+    "phase_next": os.environ["PHASE_NEXT"],
     "optimization_budget": int(os.environ["OPT_MAX"]),
     "optimization_used": int(os.environ["OPT_USED"]),
     "optimization_remaining": remain,
-    "action": (
-        (f"正确性已通过,speedup={os.environ.get('SP','')}x ≥ 目标线 {target}x —— 已达标，停止性能迭代并提交最佳版本。"
-         if hit else
-         f"正确性已通过,但 speedup={os.environ.get('SP','')}x < 目标线 {target}x —— 未达标,不要结束任务。")
-        + ("" if hit else
-           f"下一次调用本固定入口即进入 optimization 阶段,还剩 {remain} 次预算。"
-           " 先调用 ops-profiling skill 读取真实逐 case 结果并修改 kernel；源码变化后再重跑。"
-           " .best.tar.gz 只在 speedup 更高时才替换。")
-    ),
+    "action": action,
 }
 p.write_text(json.dumps(d, ensure_ascii=False, indent=2), encoding="utf-8")
+state = {
+    "schema_version": 1,
+    "op_name": d.get("op_name"),
+    "operator_valid": d["operator_valid"],
+    "task_complete": complete,
+    "completion_reason": reason,
+    "perf_data": d.get("perf_data"),
+    "next_step": d["next_step"],
+}
+ts = Path(os.environ["TS"])
+tmp = ts.with_suffix(ts.suffix + ".tmp")
+tmp.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
+tmp.replace(ts)
+PY
+  fi
+
+  if [[ "$hit" == "1" ]]; then
+    echo "[ascendc-eval] task status — operator_valid=true task_complete=true completion_reason=target_met"
+    echo "[ascendc-eval] 正确性已通过,speedup=${sp}x ≥ 目标线 ${PERF_TARGET}x —— 已达标,停止性能迭代并提交最佳版本。"
+  elif [[ "$remain" -le 0 ]]; then
+    echo "[ascendc-eval] task status — operator_valid=true task_complete=true completion_reason=budget_exhausted"
+    echo "[ascendc-eval] 正确性已通过,但 speedup=${sp}x < 目标线 ${PERF_TARGET}x；optimization 预算已耗尽,提交 .best 最佳版本。"
+  else
+    echo "[ascendc-eval] task status — operator_valid=true task_complete=false completion_reason=pending_optimization"
+    echo "[ascendc-eval] 正确性已通过,但 speedup=${sp}x < 目标线 ${PERF_TARGET}x —— 未达标,不要结束任务。"
+    echo "[ascendc-eval] 下一次调用本固定入口进入 optimization 阶段:预算 ${PIPELINE_OPT_MAX} 次,已用 ${PIPELINE_OPT_COUNT} 次,剩 ${remain} 次。"
+    echo "[ascendc-eval] 先 Read .claude/skills/ops-profiling/SKILL.md,再读取真实逐 case 结果并修改 kernel;源码变化后重跑本入口。"
+    echo "[ascendc-eval] .best.tar.gz 只在 speedup 更高时才替换 —— 优化失败不会覆盖已知最佳版本。"
+  fi
+
+}
+
+# task_state.json 与当前候选 metrics 分离。进入 optimization 后，即使新候选编译/运行失败、
+# metrics.json 被失败结果覆盖，历史正确实现仍然存在，Stop 门禁也不能忘掉尚未用完的预算。
+# 每次实际 optimization 调用一开始就同步剩余预算；最后一次即使失败也按 best 放行。
+sync_task_state_budget() {
+  [[ "$AGENT_SIDE" == "1" && "$PIPELINE_PHASE" == "optimization" \
+      && -f "$TASK_STATE_FILE" ]] || return 0
+  TS="$TASK_STATE_FILE" USED="$PIPELINE_OPT_COUNT" LIMIT="$PIPELINE_OPT_MAX" \
+  TARGET="$PERF_TARGET" python3 - <<'PY' 2>/dev/null || true
+import json, os
+from pathlib import Path
+
+p = Path(os.environ["TS"])
+try:
+    d = json.loads(p.read_text(encoding="utf-8"))
+except Exception:
+    raise SystemExit(0)
+if not isinstance(d, dict) or d.get("operator_valid") is not True:
+    raise SystemExit(0)
+used = max(0, int(os.environ["USED"]))
+limit = max(0, int(os.environ["LIMIT"]))
+remaining = max(0, limit - used)
+ns = d.get("next_step") if isinstance(d.get("next_step"), dict) else {}
+ns["perf_target_speedup"] = float(os.environ["TARGET"])
+ns["optimization_budget"] = limit
+ns["optimization_used"] = used
+ns["optimization_remaining"] = remaining
+if d.get("task_complete") is not True:
+    if remaining == 0:
+        d["task_complete"] = True
+        d["completion_reason"] = "budget_exhausted"
+        ns["phase_next"] = "complete"
+        ns["action"] = "optimization 预算已耗尽；停止调用工具并提交 .best 历史最佳正确版本。"
+    else:
+        d["task_complete"] = False
+        d["completion_reason"] = "pending_optimization"
+        ns["phase_next"] = "optimization"
+d["next_step"] = ns
+tmp = p.with_suffix(p.suffix + ".tmp")
+tmp.write_text(json.dumps(d, ensure_ascii=False, indent=2), encoding="utf-8")
+tmp.replace(p)
 PY
 }
 
@@ -427,7 +540,7 @@ if [[ "$AGENT_SIDE" == "1" ]]; then
   if [[ -n "$CUR_HASH" && -f "$_HASH_FILE" && -f "$OUT_DIR/metrics.json" \
         && "$CUR_HASH" == "$(cat "$_HASH_FILE" 2>/dev/null)" ]]; then
     echo "[ascendc-eval] {op}/ 源码与上次评测完全一致 → 复用上次结论,跳过编译/对拍/性能(不消耗预算)"
-    python3 -c "import json;d=json.load(open('$OUT_DIR/metrics.json'));p=d.get('perf_data') or {};print('[ascendc-eval] cached verdict — success=%s ast_check_ok=%s correctness_ok=%s speedup_vs_torch=%s'%(d.get('success'),d.get('ast_check_ok'),d.get('correctness_ok'),p.get('speedup_vs_torch')))" 2>/dev/null || true
+    python3 -c "import json;d=json.load(open('$OUT_DIR/metrics.json'));p=d.get('perf_data') or {};print('[ascendc-eval] cached evaluation — operator_valid=%s task_complete=%s ast_check_ok=%s correctness_ok=%s speedup_vs_torch=%s'%(d.get('operator_valid',d.get('success')),d.get('task_complete'),d.get('ast_check_ok'),d.get('correctness_ok'),p.get('speedup_vs_torch')))" 2>/dev/null || true
     exit 0
   fi
   if [[ -f "$BEST_META" ]] && python3 -c "
@@ -454,6 +567,7 @@ print(int(data.get("gen_count") or 0), int(data.get("opt_count") or 0))' 2>/dev/
     PIPELINE_ATTEMPT="${PIPELINE_GEN_COUNT:-1}"
   fi
   pipeline_status_write
+  sync_task_state_budget
   echo "[pipeline-budget] phase=$PIPELINE_PHASE attempt=$PIPELINE_ATTEMPT/$PIPELINE_LIMIT"
   # 只有预算内的候选才能打包并参与 best 比较。第 limit+1 次之后的源码
   # 未经评测，无论当前目录里还留有什么旧日志/性能文件，都不得影响 .best。
@@ -555,6 +669,9 @@ find "$TASK_DIR" \( -name '*.so' -o -name '*.a' -o -name '*.o' -o -name '*.whl' 
      -exec rm -rf {} + 2>/dev/null || true
 
 TASK_SRC="${TASK_FILE:-input/${OP_NAME}.py}"
+# 与 --impl / --out_dir 保持一致:相对 --task 固定从 workdir 解析，避免 agent
+# 在 <op>/kernel/build/ 等子目录调用时把 input/ 错当成当前目录的子目录。
+case "$TASK_SRC" in /*) ;; *) TASK_SRC="$WORK_ROOT/$TASK_SRC";; esac
 JSON_SRC="$(dirname "$TASK_SRC")/${OP_NAME}.json"
 TASK_SRC="$(realpath "$TASK_SRC" 2>/dev/null || echo "$TASK_SRC")"
 JSON_SRC="$(realpath "$JSON_SRC" 2>/dev/null || echo "$JSON_SRC")"
@@ -691,13 +808,24 @@ if ! VER_OUT=$(cd "$WORK" && export WORKDIR="$WORK" PYTHONPATH="$SK/$TRANS_SKILL
   #   有 case[N] 行 → 对拍给出结论了
   #        ├─ 有 max_abs_diff/MERE/matched_ratio → 数值差异   correctness_failed
   #        └─ 没有(形状/NaN/dtype 前置检查不通过) → output_precheck_failed
-  #   无 case[N] 行 → 对拍中途崩了 → ascendc_run_crashed(崩因让 agent 读日志)
+  #   无 case[N] 行 → 对拍未形成有效结论,再按加载/超时/启动/其他崩溃细分(A类)
   if grep -qE "case\[[0-9]+\]:" "$OUT_DIR/verify.log"; then
     if grep -qEi "(max_abs_diff|mere|matched_ratio)[[:space:]]*=" "$OUT_DIR/verify.log"; then
       _VER_TYPE="correctness_failed"
     else
       _VER_TYPE="output_precheck_failed"
     fi
+  elif grep -qEi "ModuleNotFoundError|ImportError|_OpNamespace|has no attribute|cannot open shared object|undefined symbol" "$OUT_DIR/verify.log"; then
+    _VER_TYPE="ascendc_load_failed"
+  # 错误码必须先于文本关键词。507035 日志中的 WithTimeout 是同步 API 名，不代表 507034 超时。
+  elif grep -qE "507035" "$OUT_DIR/verify.log"; then
+    _VER_TYPE="ascendc_launch_failed"
+  elif grep -qE "507034" "$OUT_DIR/verify.log"; then
+    _VER_TYPE="ascendc_run_timeout"
+  elif grep -qEi "kernel launch failed|aclrtlaunch[a-zA-Z0-9_]*.*failed|vector core exception|aic error" "$OUT_DIR/verify.log"; then
+    _VER_TYPE="ascendc_launch_failed"
+  elif grep -qEi "timed?[[:space:]]*out|timeout|超时|kernel hang|vector core timeout" "$OUT_DIR/verify.log"; then
+    _VER_TYPE="ascendc_run_timeout"
   else
     _VER_TYPE="ascendc_run_crashed"
   fi
@@ -723,7 +851,8 @@ if [[ -f "$DETECT" ]]; then
   DET_OUT=$(cd "$WORK" && run_npu_phase detect "$PY_BIN" "$DETECT" "$TASK_DIR" 2>&1); DET_RC=$?
   printf "%s\n" "$DET_OUT" > "$OUT_DIR/detect.log"
   if [[ "$DET_RC" == "1" ]]; then
-    write_metrics true false false "" "" "" "对拍结果不可信(缓存/常量输出): $DET_OUT"
+    write_metrics true false false "" "" "" "对拍结果不可信(缓存/常量输出): $DET_OUT" \
+      "$OUT_DIR/detect.log" "stateful_impl_detected"
     echo "[ascendc-eval] stateful/cache DETECTED"; fail_hint; exit 1
   fi
   [[ "$DET_RC" == "2" ]] && echo "  ↳ ${DET_OUT}"
@@ -738,7 +867,9 @@ if [[ -z "$MSPROF_BIN" ]]; then
   else MSPROF_BIN="$(command -v msprof 2>/dev/null || true)"; fi
 fi
 if [[ -z "$MSPROF_BIN" ]]; then
-  write_metrics true true false "" "" "" "judge 环境异常:找不到 msprof(ASCEND_HOME_PATH=${ASCEND_HOME_PATH})"
+  write_metrics true true false "" "" "" \
+    "judge 环境异常:找不到 msprof(ASCEND_HOME_PATH=${ASCEND_HOME_PATH})" "" \
+    "profiler_unavailable"
   echo "[ascendc-eval] msprof NOT FOUND"; fail_hint; exit 1
 fi
 export PATH="$(dirname "$MSPROF_BIN"):$PATH"
@@ -759,6 +890,5 @@ fi
 
 extract_case_stats
 write_metrics true true true "$FW" "$IMPL" "$SP" ""
-echo "[ascendc-eval] done — success=true correctness_ok=true speedup_vs_torch=$SP"
-fail_hint
 emit_optimization_prompt "$SP"
+fail_hint

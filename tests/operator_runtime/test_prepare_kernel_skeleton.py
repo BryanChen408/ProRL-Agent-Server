@@ -148,6 +148,15 @@ CAT_CASE = {"inputs": [
     {"name": "dim", "type": "attr", "required": False, "dtype": "int", "value": 0},
 ]}
 
+SCALAR_ONLY = """
+import torch
+class Model(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+    def forward(self, rows: int, cols: int = 4):
+        return torch.ones((rows, cols))
+"""
+
 KWONLY = """
 import torch
 class Model(torch.nn.Module):
@@ -271,6 +280,19 @@ def test_tensor_list_from_json(tmp_path):
     out = _instantiate(tmp_path, task, js)
     reg = (out / "kernel" / "register.cpp").read_text()
     assert "Tensor[] tensors" in reg
+    assert "TORCH_LIBRARY_IMPL(npu, PrivateUse1, m)" in reg
+
+
+def test_scalar_only_signature_uses_catchall_dispatch(tmp_path):
+    """无 Tensor 实参时 dispatcher 无法推导 PrivateUse1，注册必须按签名属性切换。"""
+    task, js = _write_model(tmp_path, SCALAR_ONLY)
+    out = _instantiate(tmp_path, task, js)
+    reg = (out / "kernel" / "register.cpp").read_text()
+    assert 'm.def("my_op(int rows, int cols=4) -> Tensor")' in reg
+    assert "TORCH_LIBRARY_IMPL(npu, CatchAll, m)" in reg
+    assert "TORCH_LIBRARY_IMPL(npu, PrivateUse1, m)" not in reg
+    host = (out / "kernel" / "op_host" / "my_op.cpp").read_text()
+    assert "该算子没有 tensor 输入" in host
 
 
 def test_kwonly_mirrored_with_defaults(tmp_path):
@@ -334,6 +356,7 @@ def test_extraction_failure_falls_back_to_template(tmp_path):
 #   bug#1 bool 默认值被小写成 false → torch 只认 True/False("invalid numeric default value")
 #   bug#2 __init__ 分支 None 默认值没包 optional → impl 非可选 int64_t 接 None 调用崩
 #   bug#3 list 默认值渲成 Python 元组 (1, 1)/(1,) → torch 只认方括号 [1, 1]/[1]
+#   bug#4 int[] 的 None 默认值没包 optional → `int[] size=None` 无法 parse_schema
 # --------------------------------------------------------------------------
 
 def _mdef_schema(out: Path) -> str:
@@ -373,6 +396,23 @@ def get_inputs():
 def get_init_inputs():
     return [3, 2, 1, 1]
 """
+
+INTERPOLATE_OPTIONAL_SIZE_LIKE = """
+import torch
+class Model(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+    def forward(self, x, size=None, antialias=False):
+        return torch.nn.functional.interpolate(
+            x, size=size, mode="bilinear", antialias=antialias
+        )
+"""
+
+INTERPOLATE_OPTIONAL_SIZE_CASE = {"inputs": [
+    {"name": "x", "type": "tensor", "required": True, "dtype": "float32"},
+    {"name": "size", "type": "attr", "required": False, "value": [8, 8]},
+    {"name": "antialias", "type": "attr", "required": False, "value": False},
+]}
 
 CONV3D_TUPLE_LIKE = """
 import torch
@@ -425,6 +465,24 @@ def test_none_default_wrapped_optional(tmp_path):
     assert "const c10::optional<int64_t> &stride" in ops_h   # impl 侧同步 optional,传 None 不崩
     mn = (out / "model_new_ascendc.py").read_text()
     model = _construct(mn, 3, 2, 1, 1)                       # cls(*get_init_inputs()) 契约
+
+
+def test_none_default_int_list_wrapped_optional(tmp_path):
+    task, js = _write_model(
+        tmp_path, INTERPOLATE_OPTIONAL_SIZE_LIKE, INTERPOLATE_OPTIONAL_SIZE_CASE
+    )
+    sig = prep._extract_op_signature(task, js)
+    assert {p.name: p.kind for p in sig.fwd}["size"] == "int[]?"
+
+    out = _instantiate(tmp_path, task, js)
+    schema = _mdef_schema(out)
+    assert schema == "my_op(Tensor x, int[]? size=None, bool antialias=False) -> Tensor"
+    _assert_schema_parses(schema)
+
+    ops_h = (out / "kernel" / "ops.h").read_text()
+    assert "at::OptionalIntArrayRef size" in ops_h
+    host = (out / "kernel" / "op_host" / "my_op.cpp").read_text()
+    assert "TODO: size(int[]?)" in host
 
 
 def test_list_default_renders_brackets(tmp_path):

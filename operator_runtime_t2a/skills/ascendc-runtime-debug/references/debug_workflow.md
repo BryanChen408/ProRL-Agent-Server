@@ -146,7 +146,8 @@ ACLNN_ERR_INNER_FIND_KERNEL_ERROR
 
 ##### 561107 - 环境变量缺失
 
-详细配置步骤及常见错误见 [ascendc-env-check skill](skill:ascendc-env-check)
+若固定评测入口把该故障标为 `B类-INFRA`，停止修改 kernel，保留日志并交由 Polar
+重试/回收；不要调用额外的环境检查 skill。
 
 ##### 561112 - 算子二进制包未加载
 
@@ -260,7 +261,8 @@ uint32_t testTileRows = 1;  // 最小测试
 
 ### 流程4：环境检查
 
-使用 [ascendc-env-check skill](skill:ascendc-env-check) 进行环境检查
+只核对本文件列出的日志和环境证据。若固定评测入口输出 `B类-INFRA`，停止修改
+kernel，交由 Polar 重试/回收；不要调用额外的环境检查 skill。
 
 ## 调试工具速查
 

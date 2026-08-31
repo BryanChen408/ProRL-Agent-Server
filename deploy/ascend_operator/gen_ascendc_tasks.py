@@ -75,7 +75,8 @@ def _instruction(op_name: str, model_rel: str) -> str:
         # 只写"实现算子"时实测中位 speedup 0.859x、58.8% 慢于 torch:agent 精度一过就收工,
         # 而 reward 在 1.0x 才 0.75、更快才涨,等于把分数留在桌上。
         "- Correctness is not the finish line: anything slower than 1.1x the PyTorch reference does "
-        "NOT meet the bar. After the entry reports success, keep optimizing the kernel and re-run it; "
+        "NOT meet the bar. operator_valid=true only means correctness passed; obey task_complete. "
+        "While task_complete=false, keep optimizing the kernel and re-run the fixed entry; "
         "it keeps a .best.tar.gz of your fastest verified version, so a failed optimization attempt "
         "never costs the score you already banked.\n"
         "- The fixed entry has a call budget; when it prints LIMIT_EXHAUSTED, stop immediately.\n"
