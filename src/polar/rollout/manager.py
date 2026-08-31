@@ -109,6 +109,8 @@ class RolloutManager:
         self.event_bus = event_bus or EventBus()
         self._tasks: dict[str, _TaskRecord] = {}
         self._cancelled_before_submit: dict[str, str] = {}
+        self._policy_cutoff_tasks: set[asyncio.Task[None]] = set()
+        self._policy_cutoff_task_ids: set[str] = set()
         self._lock = threading.RLock()
         self._loop: asyncio.AbstractEventLoop | None = None
 
@@ -232,12 +234,15 @@ class RolloutManager:
         *,
         reason: str = "policy_cutoff",
     ) -> dict[str, Any]:
-        """Logically cancel tasks and wait only for gateway cancellation acknowledgement.
+        """Logically cancel tasks and start gateway cancellation.
 
         Cancelling the background task propagates into every ``Pipeline`` session.  Each
         session's cancellation handler closes its gateway session (which fences inference
         immediately); runtime/container teardown remains gateway-owned background cleanup.
-        Late callbacks find no pending future and cannot resurrect a cancelled task.
+        Late callbacks find no pending future and cannot resurrect a cancelled task.  A
+        policy cutoff acknowledges the local ownership change immediately and tracks the
+        gateway acknowledgements as a resume fence.  Other cancellation reasons preserve
+        the synchronous acknowledgement behaviour.
         """
         requested = list(dict.fromkeys(str(task_id) for task_id in task_ids))
         tasks_to_cancel: list[asyncio.Task[None]] = []
@@ -280,12 +285,60 @@ class RolloutManager:
 
         for task in tasks_to_cancel:
             task.cancel()
-        if tasks_to_cancel:
-            await asyncio.gather(*tasks_to_cancel, return_exceptions=True)
 
+        fence_pending = False
+        if reason == "policy_cutoff" and cancelled:
+            with self._lock:
+                self._policy_cutoff_tasks.update(tasks_to_cancel)
+                self._policy_cutoff_task_ids.update(cancelled)
+            fence_pending = True
+            cancel_errors: dict[str, str] = {}
+        elif tasks_to_cancel:
+            await asyncio.gather(*tasks_to_cancel, return_exceptions=True)
+            cancel_errors = self._cancel_errors(cancelled)
+        else:
+            cancel_errors = self._cancel_errors(cancelled)
+
+        all_fenced = not fence_pending and not cancel_errors
+        all_acknowledged = not missing
+        if reason == "policy_cutoff":
+            # A duplicate cutoff request can arrive after the task record has already
+            # become terminal while its previously registered session fence is still
+            # running.  Keep the response conservative until resume verifies/consumes it.
+            with self._lock:
+                registered_task_ids = bool(self._policy_cutoff_task_ids)
+            if registered_task_ids:
+                all_fenced = False
+                fence_pending = True
+        else:
+            all_acknowledged = all_acknowledged and all_fenced
+
+        return {
+            "requested": len(requested),
+            "cancelled": len(cancelled),
+            "already_terminal": len(already_terminal),
+            "cancelled_before_submit": len(cancelled_before_submit),
+            "missing": missing,
+            "sessions_cancel_requested": session_count,
+            # Kept for trainer compatibility.  At a policy cutoff this means Polar
+            # atomically accepted ownership of every requested task; ``all_fenced``
+            # separately reports whether gateway session deletion is already complete.
+            "all_acknowledged": all_acknowledged,
+            "all_fenced": all_fenced,
+            "fence_pending": fence_pending,
+            "errors": cancel_errors,
+            "task_ids": {
+                "cancelled": cancelled,
+                "already_terminal": already_terminal,
+                "cancelled_before_submit": cancelled_before_submit,
+            },
+        }
+
+    def _cancel_errors(self, task_ids: list[str]) -> dict[str, str]:
+        """Return session-fence failures after cancelled task coroutines have stopped."""
         cancel_errors: dict[str, str] = {}
         with self._lock:
-            for task_id in cancelled:
+            for task_id in task_ids:
                 record = self._tasks[task_id]
                 for session in record.sessions.values():
                     if (
@@ -305,21 +358,112 @@ class RolloutManager:
                         cancel_errors[session.session_id] = (
                             "gateway cancellation was not acknowledged"
                         )
+        return cancel_errors
 
+    def _policy_cutoff_sessions_needing_retry(
+        self,
+        task_ids: list[str],
+    ) -> list[SessionContext]:
+        with self._lock:
+            return [
+                session
+                for task_id in task_ids
+                for session in self._tasks[task_id].sessions.values()
+                if session.gateway_url is not None
+                and (session.cancel_error is not None or not session.cancel_acknowledged)
+            ]
+
+    async def wait_for_policy_cutoff_fences(
+        self,
+        *,
+        timeout_seconds: float = 5.0,
+    ) -> dict[str, Any]:
+        """Verify all old-policy Gateway sessions are fenced before inference resumes.
+
+        Waiting here is intentionally bounded below the trainer's HTTP timeout.  Pending
+        or failed fences remain registered, so a failed resume can never accidentally
+        clear the safety barrier on a later retry.
+        """
+        with self._lock:
+            tasks = list(self._policy_cutoff_tasks)
+        pending = [task for task in tasks if not task.done()]
+        if pending and timeout_seconds > 0:
+            await asyncio.wait(pending, timeout=timeout_seconds)
+
+        with self._lock:
+            current_tasks = list(self._policy_cutoff_tasks)
+            task_ids = list(self._policy_cutoff_task_ids)
+        pending = [task for task in current_tasks if not task.done()]
+        if pending:
+            return {
+                "all_fenced": False,
+                "pending": len(pending),
+                "completed": len(current_tasks) - len(pending),
+                "retried_sessions": 0,
+                "errors": {},
+            }
+
+        errors = self._cancel_errors(task_ids)
+        retried_sessions = 0
+        retry_sessions = self._policy_cutoff_sessions_needing_retry(task_ids)
+        retry_client_ready = getattr(self.pipeline, "_client", None) is not None
+        if errors and retry_sessions and timeout_seconds > 0 and retry_client_ready:
+            retried_sessions = len(retry_sessions)
+            logger.warning(
+                "Retrying %s unacknowledged policy-cutoff session deletions before resume",
+                retried_sessions,
+            )
+            try:
+                await asyncio.wait_for(
+                    asyncio.gather(
+                        *(
+                            self.pipeline._cleanup_session(
+                                session,
+                                reason="policy_cutoff",
+                                strict=True,
+                            )
+                            for session in retry_sessions
+                        ),
+                        return_exceptions=True,
+                    ),
+                    timeout=timeout_seconds,
+                )
+            except TimeoutError:
+                logger.error(
+                    "Policy-cutoff session deletion retry exceeded %.1fs",
+                    timeout_seconds,
+                )
+            errors = self._cancel_errors(task_ids)
+
+        for task in current_tasks:
+            try:
+                task.result()
+            except asyncio.CancelledError:
+                # Direct cancellation is expected if the wrapper did not absorb it.
+                pass
+            except Exception as exc:
+                errors[f"_task_{id(task)}"] = str(exc)
+        if errors:
+            return {
+                "all_fenced": False,
+                "pending": 0,
+                "completed": len(current_tasks),
+                "retried_sessions": retried_sessions,
+                "errors": errors,
+            }
+
+        with self._lock:
+            for task in current_tasks:
+                self._policy_cutoff_tasks.discard(task)
+            for task_id in task_ids:
+                self._policy_cutoff_task_ids.discard(task_id)
+            remaining = len(self._policy_cutoff_task_ids)
         return {
-            "requested": len(requested),
-            "cancelled": len(cancelled),
-            "already_terminal": len(already_terminal),
-            "cancelled_before_submit": len(cancelled_before_submit),
-            "missing": missing,
-            "sessions_cancel_requested": session_count,
-            "all_acknowledged": not missing and not cancel_errors,
-            "errors": cancel_errors,
-            "task_ids": {
-                "cancelled": cancelled,
-                "already_terminal": already_terminal,
-                "cancelled_before_submit": cancelled_before_submit,
-            },
+            "all_fenced": remaining == 0,
+            "pending": remaining,
+            "completed": len(current_tasks),
+            "retried_sessions": retried_sessions,
+            "errors": {},
         }
 
     async def _execute_task(self, request: TaskRequest) -> TaskResult:

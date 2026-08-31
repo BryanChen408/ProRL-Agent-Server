@@ -162,6 +162,19 @@ gateway:
 
 
 def test_rollout_admin_resume_reports_partial_gateway_failure(monkeypatch) -> None:
+    class Manager:
+        async def wait_for_policy_cutoff_fences(self, *, timeout_seconds):  # noqa: ANN001, ANN202
+            assert timeout_seconds == 5.0
+            return {
+                "all_fenced": True,
+                "pending": 0,
+                "completed": 1,
+                "errors": {},
+            }
+
+    class State:
+        manager = Manager()
+
     async def forward(path, *, params=None):  # noqa: ANN001, ANN202
         assert path == "/admin/inference/resume"
         assert params is None
@@ -176,11 +189,41 @@ def test_rollout_admin_resume_reports_partial_gateway_failure(monkeypatch) -> No
             ]
         }
 
+    monkeypatch.setattr(server, "get_state", lambda: State())
     monkeypatch.setattr(server, "_forward_gateway_admin", forward)
 
     payload = asyncio.run(server.resume_gateway_generation())
 
     assert payload["all_resumed"] is False
+
+
+def test_rollout_admin_resume_fails_closed_before_gateway_forward(monkeypatch) -> None:
+    class Manager:
+        async def wait_for_policy_cutoff_fences(self, *, timeout_seconds):  # noqa: ANN001, ANN202
+            assert timeout_seconds == 5.0
+            return {
+                "all_fenced": False,
+                "pending": 1,
+                "completed": 0,
+                "errors": {},
+            }
+
+    class State:
+        manager = Manager()
+
+    async def forward(path, *, params=None):  # noqa: ANN001, ANN202
+        raise AssertionError("gateway resume must remain fail-closed")
+
+    monkeypatch.setattr(server, "get_state", lambda: State())
+    monkeypatch.setattr(server, "_forward_gateway_admin", forward)
+
+    try:
+        asyncio.run(server.resume_gateway_generation())
+    except server.HTTPException as exc:
+        assert exc.status_code == 409
+        assert exc.detail["pending"] == 1
+    else:
+        raise AssertionError("resume should fail while a cutoff fence is pending")
 
 
 def test_rollout_admin_policy_version_requires_every_gateway(monkeypatch) -> None:

@@ -36,6 +36,8 @@ logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("httpcore").setLevel(logging.WARNING)
 logger = logging.getLogger(__name__)
 
+_POLICY_CUTOFF_RESUME_FENCE_TIMEOUT_SECONDS = 5.0
+
 
 @dataclass(slots=True)
 class RolloutState:
@@ -160,11 +162,12 @@ async def cancel_rollout_tasks(request: TaskCancelRequest):
         raise HTTPException(status_code=409, detail=result)
     logger.info(
         "Cancelled rollout tasks at policy boundary: requested=%s cancelled=%s "
-        "terminal=%s sessions=%s",
+        "terminal=%s sessions=%s fence_pending=%s",
         result["requested"],
         result["cancelled"],
         result["already_terminal"],
         result["sessions_cancel_requested"],
+        result["fence_pending"],
     )
     return result
 
@@ -212,6 +215,19 @@ async def pause_gateway_generation(
 
 @app.post("/rollout/admin/inference/resume")
 async def resume_gateway_generation():
+    fence = await get_state().manager.wait_for_policy_cutoff_fences(
+        timeout_seconds=_POLICY_CUTOFF_RESUME_FENCE_TIMEOUT_SECONDS,
+    )
+    if not fence["all_fenced"]:
+        logger.error("Refusing inference resume before policy cutoff fence: %s", fence)
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "message": "old-policy sessions are not fully fenced",
+                **fence,
+            },
+        )
+    logger.info("Policy-cutoff session fence verified before inference resume: %s", fence)
     result = await _forward_gateway_admin("/admin/inference/resume")
     nodes = result["nodes"]
     successful = [

@@ -61,6 +61,8 @@ def test_rollout_manager_policy_cutoff_cancels_all_owned_sessions() -> None:
         assert manager.get_task("task-old-policy").status == "cancelled"
         assert all(session.cancel_requested for session in pipeline.sessions)
         assert all(session.cancel_reason == "policy_cutoff" for session in pipeline.sessions)
+        fence = await manager.wait_for_policy_cutoff_fences()
+        assert fence["all_fenced"] is True
 
     asyncio.run(scenario())
 
@@ -89,11 +91,13 @@ def test_rollout_manager_policy_cutoff_fences_submit_that_arrives_late() -> None
     asyncio.run(scenario())
 
 
-def test_rollout_manager_waits_for_real_pipeline_delete_ack() -> None:
+def test_rollout_manager_defers_real_pipeline_delete_ack_to_resume_fence() -> None:
     async def scenario() -> None:
         delete_calls = []
         dispatch_count = 0
         all_dispatched = asyncio.Event()
+        delete_started = asyncio.Event()
+        allow_delete = asyncio.Event()
 
         class Response:
             status_code = 200
@@ -104,6 +108,8 @@ def test_rollout_manager_waits_for_real_pipeline_delete_ack() -> None:
         class Client:
             async def delete(self, url, params=None):
                 delete_calls.append((url, params))
+                delete_started.set()
+                await allow_delete.wait()
                 return Response()
 
         pipeline = Pipeline(
@@ -139,9 +145,21 @@ def test_rollout_manager_waits_for_real_pipeline_delete_ack() -> None:
         )
 
         assert result["all_acknowledged"] is True
+        assert result["all_fenced"] is False
+        assert result["fence_pending"] is True
         assert result["sessions_cancel_requested"] == 2
+        await delete_started.wait()
         assert len(delete_calls) == 2
         assert all(params == {"reason": "policy_cutoff"} for _, params in delete_calls)
+
+        pending = await manager.wait_for_policy_cutoff_fences(timeout_seconds=0)
+        assert pending["all_fenced"] is False
+        assert pending["pending"] == 1
+
+        allow_delete.set()
+        fence = await manager.wait_for_policy_cutoff_fences()
+        assert fence["all_fenced"] is True
+        assert fence["retried_sessions"] == 0
 
     asyncio.run(scenario())
 
@@ -149,6 +167,7 @@ def test_rollout_manager_waits_for_real_pipeline_delete_ack() -> None:
 def test_rollout_manager_is_fail_closed_when_gateway_delete_fails() -> None:
     async def scenario() -> None:
         dispatched = asyncio.Event()
+        delete_calls = 0
 
         class Response:
             status_code = 503
@@ -158,6 +177,8 @@ def test_rollout_manager_is_fail_closed_when_gateway_delete_fails() -> None:
 
         class Client:
             async def delete(self, url, params=None):
+                nonlocal delete_calls
+                delete_calls += 1
                 return Response()
 
         request = _task_request().model_copy(update={"num_samples": 1})
@@ -190,9 +211,84 @@ def test_rollout_manager_is_fail_closed_when_gateway_delete_fails() -> None:
             reason="policy_cutoff",
         )
 
-        assert result["all_acknowledged"] is False
-        assert len(result["errors"]) == 1
-        assert "gateway unavailable" in next(iter(result["errors"].values()))
+        assert result["all_acknowledged"] is True
+        assert result["all_fenced"] is False
+        assert result["errors"] == {}
+
+        fence = await manager.wait_for_policy_cutoff_fences()
+        assert fence["all_fenced"] is False
+        assert fence["retried_sessions"] == 1
+        assert delete_calls == 2
+        assert len(fence["errors"]) == 1
+        assert "gateway unavailable" in next(iter(fence["errors"].values()))
+
+        retry = await manager.wait_for_policy_cutoff_fences(timeout_seconds=0)
+        assert retry["all_fenced"] is False
+        assert retry["errors"] == fence["errors"]
+
+    asyncio.run(scenario())
+
+
+def test_rollout_manager_resume_fence_recovers_transient_gateway_delete_failure() -> None:
+    async def scenario() -> None:
+        dispatched = asyncio.Event()
+        delete_calls = 0
+        dispatched_session = None
+
+        class Response:
+            def __init__(self, status_code: int) -> None:
+                self.status_code = status_code
+
+            def raise_for_status(self) -> None:
+                if self.status_code != 200:
+                    raise RuntimeError("temporary gateway failure")
+
+        class Client:
+            async def delete(self, url, params=None):
+                nonlocal delete_calls
+                delete_calls += 1
+                return Response(503 if delete_calls == 1 else 200)
+
+        request = _task_request().model_copy(update={"num_samples": 1})
+        pipeline = Pipeline(
+            callback_url="http://127.0.0.1:8080/callbacks/session_result",
+            save_dir=None,
+            scheduler=NodeScheduler(),
+        )
+
+        async def start() -> None:
+            pipeline._client = Client()
+            pipeline._started = True
+
+        async def dispatch(session):
+            nonlocal dispatched_session
+            dispatched_session = session
+            session.gateway_url = "http://127.0.0.1:8100"
+            dispatched.set()
+            await asyncio.Event().wait()
+
+        pipeline.start = start
+        pipeline._dispatch_session = dispatch
+        manager = RolloutManager(
+            pipeline=pipeline,
+            scheduler=NodeScheduler(),
+        )
+        await manager.submit_task(request)
+        await dispatched.wait()
+
+        result = await manager.cancel_tasks(
+            ["task-old-policy"],
+            reason="policy_cutoff",
+        )
+        assert result["all_acknowledged"] is True
+
+        fence = await manager.wait_for_policy_cutoff_fences()
+
+        assert fence["all_fenced"] is True
+        assert fence["retried_sessions"] == 1
+        assert delete_calls == 2
+        assert dispatched_session.cancel_acknowledged is True
+        assert dispatched_session.cancel_error is None
 
     asyncio.run(scenario())
 

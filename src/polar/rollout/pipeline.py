@@ -459,6 +459,7 @@ class Pipeline:
         if self._client is None or session.gateway_url is None:
             if reason:
                 session.cancel_acknowledged = True
+                session.cancel_error = None
             return
 
         try:
@@ -470,6 +471,7 @@ class Pipeline:
                 response.raise_for_status()
             if reason:
                 session.cancel_acknowledged = True
+                session.cancel_error = None
         except Exception as exc:
             if reason:
                 session.cancel_error = f"{type(exc).__name__}: {exc}"
