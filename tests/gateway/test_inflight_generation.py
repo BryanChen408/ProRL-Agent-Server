@@ -86,6 +86,47 @@ def test_inflight_tracker_session_close_cancels_active_generation() -> None:
     asyncio.run(_run())
 
 
+def test_repeated_waiter_cancellation_cannot_retain_dead_generation() -> None:
+    async def _run() -> None:
+        tracker = InflightGenerationTracker()
+        factory_started = asyncio.Event()
+
+        async def factory() -> dict:
+            factory_started.set()
+            await asyncio.Event().wait()
+
+        request = {"model": "served", "messages": []}
+        waiter = asyncio.create_task(tracker.run("sess1", request, factory))
+        await factory_started.wait()
+
+        # The old awaited waiter release could be interrupted while this lock was held,
+        # leaving waiters=1 after both the HTTP waiter and upstream task were dead.
+        await tracker._lock.acquire()
+        try:
+            waiter.cancel()
+            await asyncio.sleep(0)
+            waiter.cancel()
+        finally:
+            tracker._lock.release()
+
+        try:
+            await waiter
+        except asyncio.CancelledError:
+            pass
+        else:
+            raise AssertionError("expected waiter cancellation")
+
+        await tracker.close_session("sess1", reason="policy_cutoff")
+        for _ in range(10):
+            if tracker.status()["active"] == 0:
+                break
+            await asyncio.sleep(0)
+
+        assert tracker.status()["active"] == 0
+
+    asyncio.run(_run())
+
+
 def test_inflight_tracker_session_close_fences_future_generation() -> None:
     """DELETE-before-register cannot leave an old request parked until resume."""
 

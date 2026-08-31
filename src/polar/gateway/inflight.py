@@ -101,7 +101,11 @@ class InflightGenerationTracker:
                 should_save=should_save,
             )
         finally:
-            await self._release_waiter(key, entry)
+            # Keep local ownership bookkeeping non-suspending.  The request handler can
+            # itself be cancelled again while session close is cancelling ``entry.task``;
+            # an awaited lock here used to make that second cancellation leak a waiter
+            # and retain an already-dead entry indefinitely.
+            self._release_waiter(key, entry)
 
     async def close_session(self, session_id: str, *, reason: str | None = None) -> int:
         """Mark and cancel active upstream generations for a finalized session."""
@@ -167,15 +171,18 @@ class InflightGenerationTracker:
         )
         return entry
 
-    async def _release_waiter(
+    def _release_waiter(
         self,
         key: tuple[str, str],
         entry: _GenerationEntry,
     ) -> None:
-        async with self._lock:
-            entry.waiters = max(0, entry.waiters - 1)
-            if entry.waiters == 0 and entry.task.done() and self._entries.get(key) is entry:
-                self._entries.pop(key, None)
+        # This tracker is event-loop-local, and every other mutation protected by
+        # ``_lock`` has no suspension point inside its critical section.  Performing
+        # this tiny mutation synchronously is therefore atomic with respect to them and,
+        # importantly, cannot be interrupted by a repeated Task.cancel().
+        entry.waiters = max(0, entry.waiters - 1)
+        if entry.waiters == 0 and entry.task.done() and self._entries.get(key) is entry:
+            self._entries.pop(key, None)
 
     async def _cleanup_done_entry(
         self,

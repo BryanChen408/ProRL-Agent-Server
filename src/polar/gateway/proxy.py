@@ -86,6 +86,8 @@ class InferenceClient:
         self._client: httpx.AsyncClient | None = None
         self._generation_paused = False
         self._inflight_generations = 0
+        self._generation_drained = asyncio.Event()
+        self._generation_drained.set()
         self._generation_condition = asyncio.Condition()
 
     @classmethod
@@ -175,37 +177,42 @@ class InferenceClient:
         observability -- never affects generation.
         """
         await self._acquire_generation_slot()
-        client = await self._get_client()
-        from copy import deepcopy
-
-        request_copy = deepcopy(request)
-        request_copy.pop("stream", None)
-        request_copy["stream"] = False
-        request_copy = self.engine.prepare_request(request_copy)
-        headers = {"Content-Type": "application/json", "x-polar-engine-url": self.base_url}
-        if trace_headers:
-            headers.update({str(k): str(v) for k, v in trace_headers.items()})
-            # 引擎会话亲和:vime 的 PD/LB proxy 收到 x-session-id 时,把同一 session 的每轮
-            # 稳定哈希到固定引擎(prefill/decode 各自 sticky),让前缀 KV 跨轮复用、只 prefill
-            # 增量;收不到就退回 round-robin/active_tokens,前缀被打散 → 每轮重灌整段上下文。
-            # gateway 自管 session id 但从不下发,这条亲和路径从上线起没被走到过。session id
-            # 已在 x-polar-trace-id 里(格式 "{session_id}:{turn_seq}"),取冒号前段补发。
-            # 无 trace-id → 不补,行为不变(PD 分离功能零影响)。
-            _trace_id = headers.get("x-polar-trace-id", "")
-            if _trace_id and "x-session-id" not in headers:
-                _session_id = _trace_id.rsplit(":", 1)[0]
-                if _session_id:
-                    headers["x-session-id"] = _session_id
         try:
-            resp = await client.post(
-                "/v1/chat/completions",
-                json=request_copy,
-                headers=headers,
-            )
-        except httpx.RequestError as exc:
-            raise self._translate_transport_error(exc) from exc
+            client = await self._get_client()
+            from copy import deepcopy
+
+            request_copy = deepcopy(request)
+            request_copy.pop("stream", None)
+            request_copy["stream"] = False
+            request_copy = self.engine.prepare_request(request_copy)
+            headers = {"Content-Type": "application/json", "x-polar-engine-url": self.base_url}
+            if trace_headers:
+                headers.update({str(k): str(v) for k, v in trace_headers.items()})
+                # 引擎会话亲和:vime 的 PD/LB proxy 收到 x-session-id 时,把同一 session 的每轮
+                # 稳定哈希到固定引擎(prefill/decode 各自 sticky),让前缀 KV 跨轮复用、只 prefill
+                # 增量;收不到就退回 round-robin/active_tokens,前缀被打散 → 每轮重灌整段上下文。
+                # gateway 自管 session id 但从不下发,这条亲和路径从上线起没被走到过。session id
+                # 已在 x-polar-trace-id 里(格式 "{session_id}:{turn_seq}"),取冒号前段补发。
+                # 无 trace-id → 不补,行为不变(PD 分离功能零影响)。
+                _trace_id = headers.get("x-polar-trace-id", "")
+                if _trace_id and "x-session-id" not in headers:
+                    _session_id = _trace_id.rsplit(":", 1)[0]
+                    if _session_id:
+                        headers["x-session-id"] = _session_id
+            try:
+                resp = await client.post(
+                    "/v1/chat/completions",
+                    json=request_copy,
+                    headers=headers,
+                )
+            except httpx.RequestError as exc:
+                raise self._translate_transport_error(exc) from exc
         finally:
-            await self._release_generation_slot()
+            # Session deletion and engine abort can cancel the same request more than
+            # once.  Slot release must therefore contain no suspension point: a second
+            # cancellation must not interrupt the decrement and leave a false non-zero
+            # drain count that blocks the next training boundary forever.
+            self._release_generation_slot()
 
         await self._raise_for_status(resp)
         return self.engine.normalize_response(resp.json())
@@ -214,11 +221,12 @@ class InferenceClient:
         async with self._generation_condition:
             await self._generation_condition.wait_for(lambda: not self._generation_paused)
             self._inflight_generations += 1
+            self._generation_drained.clear()
 
-    async def _release_generation_slot(self) -> None:
-        async with self._generation_condition:
-            self._inflight_generations -= 1
-            self._generation_condition.notify_all()
+    def _release_generation_slot(self) -> None:
+        self._inflight_generations -= 1
+        if self._inflight_generations == 0:
+            self._generation_drained.set()
 
     async def pause_generation(
         self,
@@ -238,22 +246,25 @@ class InferenceClient:
         async with self._generation_condition:
             self._generation_paused = True
             self._generation_condition.notify_all()
-            timed_out = False
-            if wait_for_drain and self._inflight_generations != 0:
-                try:
-                    await asyncio.wait_for(
-                        self._generation_condition.wait_for(
-                            lambda: self._inflight_generations == 0
-                        ),
-                        timeout=timeout_seconds,
-                    )
-                except TimeoutError:
-                    timed_out = True
 
-            status = self.generation_status()
-            status["timed_out"] = timed_out
-            status["wait_for_drain"] = wait_for_drain
-            return status
+        timed_out = False
+        if wait_for_drain and self._inflight_generations != 0:
+            # The scalar is authoritative.  Reconcile the notification event here as
+            # well so recovery from an older process state (or test instrumentation)
+            # cannot turn a non-zero count into a false drained acknowledgement.
+            self._generation_drained.clear()
+            try:
+                await asyncio.wait_for(
+                    self._generation_drained.wait(),
+                    timeout=timeout_seconds,
+                )
+            except TimeoutError:
+                timed_out = True
+
+        status = self.generation_status()
+        status["timed_out"] = timed_out
+        status["wait_for_drain"] = wait_for_drain
+        return status
 
     async def resume_generation(self) -> dict[str, Any]:
         async with self._generation_condition:

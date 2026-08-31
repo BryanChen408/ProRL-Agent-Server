@@ -98,3 +98,42 @@ def test_pause_can_close_admission_without_waiting_for_drain() -> None:
         assert status["inflight"] == 1
 
     asyncio.run(run())
+
+
+def test_repeated_cancellation_cannot_leak_generation_slot() -> None:
+    async def run() -> None:
+        request_started = asyncio.Event()
+
+        class BlockingHTTPClient:
+            is_closed = False
+
+            async def post(self, *args, **kwargs):  # noqa: ANN002, ANN003, ANN202
+                request_started.set()
+                await asyncio.Event().wait()
+
+        client = InferenceClient("http://127.0.0.1:30000", SGLangEngine())
+        client._client = BlockingHTTPClient()
+        generation = asyncio.create_task(
+            client.completion({"model": "served", "messages": []})
+        )
+        await request_started.wait()
+
+        # Model the policy-cutoff race: one cancellation starts request cleanup while
+        # another arrives before the old condition-based slot release can take its lock.
+        await client._generation_condition.acquire()
+        try:
+            generation.cancel()
+            await asyncio.sleep(0)
+            generation.cancel()
+        finally:
+            client._generation_condition.release()
+
+        with pytest.raises(asyncio.CancelledError):
+            await generation
+
+        assert client.generation_status()["inflight"] == 0
+        status = await client.pause_generation(timeout_seconds=0.001)
+        assert status["drained"] is True
+        assert status["timed_out"] is False
+
+    asyncio.run(run())
