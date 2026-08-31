@@ -16,7 +16,7 @@ service:
   gateway_url: http://80.48.5.64:8200
   sglang_router_url: http://80.48.5.56:8011
   inference_engine: vllm
-  model_served: /home/docker/Qwen3.6-35B-A3B-agentical-ascendc-hf-4t-bf16
+  model_served: /home/docker/Qwen3.6-35B-A3B-agentical-ascendc-hf-YaRN-525k-15020-bf16
 
 paths:
   output_dir: output/ascend_operator
