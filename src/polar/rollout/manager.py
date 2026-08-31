@@ -322,6 +322,28 @@ class RolloutManager:
             },
         }
 
+    async def cancel_task(
+        self,
+        task_id: str,
+        *,
+        reason: str = "sync_oversubscribe_abort",
+    ) -> dict[str, object] | None:
+        """Cancel one known task using the canonical batch cancellation path."""
+        with self._lock:
+            if task_id not in self._tasks:
+                return None
+
+        result = await self.cancel_tasks([task_id], reason=reason)
+        with self._lock:
+            status = self._tasks[task_id].status
+        return {
+            "task_id": task_id,
+            "status": status,
+            "all_cancelled": bool(result["all_acknowledged"]),
+            "cancelled_sessions": int(result["sessions_cancel_requested"]),
+            "failed_sessions": len(result["errors"]),
+        }
+
     async def _execute_task(self, request: TaskRequest) -> TaskResult:
         sessions = [
             SessionContext(

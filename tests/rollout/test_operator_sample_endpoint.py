@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 from pathlib import Path
 
+import pytest
 from fastapi.testclient import TestClient
 
 from polar.rollout import server
@@ -62,6 +63,75 @@ gateway:
     assert task_request.metadata["op_name"] == "op"
     assert task_request.metadata["rendered_op"] == "op"
     assert task_request.metadata["policy_version"] == 7
+
+
+def test_rollout_task_cancel_endpoint_delegates_to_manager(monkeypatch, tmp_path: Path) -> None:
+    topology_path = tmp_path / "topology.yaml"
+    topology_path.write_text(
+        """
+rollout:
+  public_url: http://127.0.0.1:8080
+gateway:
+  nodes:
+    - id: n1
+      public_url: http://127.0.0.1:8100
+""".strip()
+    )
+    server.configure_server(str(topology_path))
+    state = server.get_state()
+
+    async def cancel_task(task_id: str, *, reason: str):
+        return {
+            "task_id": task_id,
+            "status": "cancelled",
+            "all_cancelled": True,
+            "cancelled_sessions": 2,
+            "failed_sessions": 0,
+            "reason": reason,
+        }
+
+    async def noop() -> None:
+        return None
+
+    monkeypatch.setattr(state.manager, "cancel_task", cancel_task)
+    monkeypatch.setattr(state.pipeline, "start", noop)
+    monkeypatch.setattr(state.pipeline, "close", noop)
+
+    import asyncio
+
+    response = asyncio.run(
+        server.cancel_task("task-1", reason="sync_oversubscribe_abort")
+    )
+
+    assert response["task_id"] == "task-1"
+    assert response["all_cancelled"] is True
+
+
+def test_rollout_task_cancel_endpoint_returns_404_for_unknown_task(monkeypatch, tmp_path: Path) -> None:
+    topology_path = tmp_path / "topology.yaml"
+    topology_path.write_text(
+        "rollout:\n  public_url: http://127.0.0.1:8080\n"
+        "gateway:\n  nodes:\n    - id: n1\n      public_url: http://127.0.0.1:8100\n"
+    )
+    server.configure_server(str(topology_path))
+    state = server.get_state()
+
+    async def cancel_task(task_id: str, *, reason: str):
+        return None
+
+    async def noop() -> None:
+        return None
+
+    monkeypatch.setattr(state.manager, "cancel_task", cancel_task)
+    monkeypatch.setattr(state.pipeline, "start", noop)
+    monkeypatch.setattr(state.pipeline, "close", noop)
+
+    import asyncio
+    from fastapi import HTTPException
+
+    with pytest.raises(HTTPException) as exc_info:
+        asyncio.run(server.cancel_task("missing"))
+    assert exc_info.value.status_code == 404
 
 
 def test_rollout_admin_inference_pause_fans_out_to_gateway(monkeypatch, tmp_path: Path) -> None:

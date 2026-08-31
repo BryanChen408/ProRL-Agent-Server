@@ -169,6 +169,15 @@ async def cancel_rollout_tasks(request: TaskCancelRequest):
     return result
 
 
+@app.post("/rollout/task/{task_id}/cancel")
+async def cancel_task(task_id: str, reason: str = "sync_oversubscribe_abort"):
+    """Cancel one task for synchronous oversubscription cleanup."""
+    result = await get_state().manager.cancel_task(task_id, reason=reason)
+    if result is None:
+        raise HTTPException(status_code=404, detail="Task not found")
+    return result
+
+
 @app.get("/rollout/status")
 async def rollout_status():
     return get_state().manager.status()
