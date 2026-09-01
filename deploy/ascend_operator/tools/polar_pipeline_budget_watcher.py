@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
 """Cancel Polar sessions that exceed their operator validation budget.
 
-The watcher intentionally stays outside Polar's critical path. It reads the same
-gateway completion stream as the rollout observer and uses DELETE /sessions/{id}
-only after session artifacts report an exhausted validation budget. Completion
-parsing remains as a legacy diagnostic fallback; cancellation is driven by
-pipeline_budget_status.json.
+The watcher intentionally stays outside Polar's critical path. It reads the
+agent-immutable gateway completion stream and uses DELETE /sessions/{id} after
+the fixed pipeline's validation budget is exhausted. Explicit unchanged-source
+cache hits are excluded because the pipeline marks them as zero-budget calls.
 """
 
 from __future__ import annotations
@@ -32,7 +31,7 @@ PIPELINE_MARKER = "tools/triton_eval_pipeline.sh"
 ASCENDC_PIPELINE_MARKER = "tools/ascendc_eval_pipeline.sh"
 PIPELINE_STATUS_NAME = "pipeline_budget_status.json"
 SUCCESS_RE = re.compile(
-    r"(\[triton-eval\]\s+done\s+.*success=true|verdict\s+.*success=True|cached verdict\s+.*success=True)",
+    r"(\[triton-eval\]\s+done\s+.*success=true|verdict\s+.*(?:success|operator_valid)=True|cached (?:verdict|evaluation)\s+.*(?:success|operator_valid)=True)",
     re.IGNORECASE,
 )
 
@@ -209,6 +208,16 @@ def _is_pipeline_feedback(text: str) -> bool:
     )
 
 
+def _is_pipeline_cache_hit(text: str) -> bool:
+    """True only for the fixed pipeline's zero-budget unchanged-source path."""
+    low = text.lower()
+    return (
+        "[pipeline-budget]" not in low
+        and "[ascendc-eval] cached evaluation" in low
+        and "不消耗预算" in text
+    )
+
+
 @dataclass
 class PipelineCall:
     index: int
@@ -217,6 +226,7 @@ class PipelineCall:
     result: str
     success: bool
     completed: bool
+    cached: bool
 
 
 @dataclass
@@ -256,6 +266,7 @@ def _extract_pipeline_calls(record: dict[str, Any]) -> list[PipelineCall]:
                     result="",
                     success=False,
                     completed=True,
+                    cached=False,
                 )
                 calls.append(call)
                 tool_id = tool.get("id")
@@ -268,6 +279,7 @@ def _extract_pipeline_calls(record: dict[str, Any]) -> list[PipelineCall]:
                     result = str(item.get("content") or "")
                     call.result = result
                     call.success = bool(SUCCESS_RE.search(result))
+                    call.cached = _is_pipeline_cache_hit(result)
 
     if current:
         turn += 1
@@ -282,6 +294,7 @@ def _extract_pipeline_calls(record: dict[str, Any]) -> list[PipelineCall]:
                         result="",
                         success=False,
                         completed=False,
+                        cached=False,
                     )
                 )
     return calls
@@ -289,13 +302,16 @@ def _extract_pipeline_calls(record: dict[str, Any]) -> list[PipelineCall]:
 
 def analyze_budget(session_id: str, record: dict[str, Any]) -> BudgetState:
     calls = _extract_pipeline_calls(record)
-    first_success = next((call.index for call in calls if call.completed and call.success), None)
+    counted = [call for call in calls if not call.cached]
+    first_success = next(
+        (call.index for call in counted if call.completed and call.success), None
+    )
     if first_success is None:
-        gen = len(calls)
+        gen = len(counted)
         opt = 0
     else:
-        gen = first_success
-        opt = sum(1 for call in calls if call.index > first_success)
+        gen = sum(1 for call in counted if call.index <= first_success)
+        opt = sum(1 for call in counted if call.index > first_success)
     return BudgetState(
         session_id=session_id,
         pipeline_calls=calls,
@@ -454,13 +470,15 @@ def run_once(args: argparse.Namespace, cancelled: set[str]) -> None:
     for session_id in ids:
         if session_id in cancelled:
             continue
-        # Bypass-proof: count pipeline invocations from the conversation
-        # transcript (analyze_budget/should_cancel), not the agent-resettable
-        # status file. Kills the runaway that the file counter never caught.
+        # Gateway completion history is agent-immutable. Count fixed-pipeline
+        # invocations there, excluding the pipeline's explicit zero-budget
+        # unchanged-source cache result so this agrees with its attempt counter.
         record = latest_completion_record(args.gateway, args.root, session_id, args.timeout)
         if record is None:
             continue
-        cancel, reason = should_cancel(analyze_budget(session_id, record), args.gen_max, args.opt_max)
+        cancel, reason = should_cancel(
+            analyze_budget(session_id, record), args.gen_max, args.opt_max
+        )
         if not cancel:
             if args.verbose:
                 _log(f"ok {session_id}: {reason}", args.log_file)

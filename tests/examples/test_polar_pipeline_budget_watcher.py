@@ -194,6 +194,79 @@ def test_missing_status_does_not_cancel(tmp_path: Path) -> None:
     assert reason == "pipeline status missing"
 
 
+def test_cached_pipeline_calls_do_not_consume_transcript_budget() -> None:
+    module = _load_module()
+    messages = []
+    for attempt in range(1, 8):
+        tool_id = f"real-{attempt}"
+        messages.extend(
+            [
+                {
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "tool_use",
+                            "id": tool_id,
+                            "name": "Bash",
+                            "input": {
+                                "command": "bash tools/ascendc_eval_pipeline.sh --op_name op"
+                            },
+                        }
+                    ],
+                },
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": tool_id,
+                            "content": f"[pipeline-budget] phase=generation attempt={attempt}/8",
+                        }
+                    ],
+                },
+            ]
+        )
+    for index in range(2):
+        tool_id = f"cached-{index}"
+        messages.extend(
+            [
+                {
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "tool_use",
+                            "id": tool_id,
+                            "name": "Bash",
+                            "input": {
+                                "command": "bash tools/ascendc_eval_pipeline.sh --op_name op"
+                            },
+                        }
+                    ],
+                },
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": tool_id,
+                            "content": (
+                                "[ascendc-eval] {op}/ 源码与上次评测完全一致 → "
+                                "复用上次结论,跳过编译/对拍/性能(不消耗预算)\n"
+                                "[ascendc-eval] cached evaluation — operator_valid=False"
+                            ),
+                        }
+                    ],
+                },
+            ]
+        )
+    state = module.analyze_budget("s1", {"original_request": {"messages": messages}})
+
+    assert len(state.pipeline_calls) == 9
+    assert sum(call.cached for call in state.pipeline_calls) == 2
+    assert state.generation_calls == 7
+    assert module.should_cancel(state, gen_max=8, opt_max=4) == (False, "")
+
+
 def test_completion_parser_ignores_reading_pipeline_script() -> None:
     module = _load_module()
     record = {
@@ -268,6 +341,17 @@ def test_completion_parser_still_recognizes_real_pipeline_execution() -> None:
 
     assert len(state.pipeline_calls) == 1
     assert state.pipeline_calls[0].success is True
+
+    record["original_request"]["messages"][0]["content"][0]["input"]["command"] = (
+        "bash tools/ascendc_eval_pipeline.sh --op_name op"
+    )
+    record["original_request"]["messages"][1]["content"][0]["content"] = (
+        "[ascendc-eval] verdict — operator_valid=True task_complete=False"
+    )
+    state = module.analyze_budget("s1", record)
+
+    assert state.pipeline_calls[0].success is True
+    assert state.first_success_index == 1
 
 
 def test_completion_parser_recognizes_cannbot_verify_execution() -> None:
