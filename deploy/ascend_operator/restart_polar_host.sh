@@ -23,6 +23,7 @@ ROLLOUT_URL="${POLAR_ROLLOUT_URL}"
 GATEWAY_URL="${POLAR_GATEWAY_URL}"
 EXTRA_STALE_PORTS="${POLAR_EXTRA_STALE_GATEWAY_PORTS:-8110}"
 SKIP_INTERNAL_PORT_CLEANUP="${POLAR_SKIP_INTERNAL_PORT_CLEANUP:-0}"
+CONTROL_FILE="${POLAR_CONTROL_DIR:-${POLAR_OUTPUT_ROOT}/control}/policy-transition.json"
 
 if [[ -t 1 && -z "${NO_COLOR:-}" ]]; then
   BOLD=$'\033[1m'; DIM=$'\033[2m'; RESET=$'\033[0m'
@@ -140,6 +141,8 @@ if [[ -n "${remaining_port_state}" ]]; then
   exit 1
 fi
 ok "ports ${ROLLOUT_PORT}/${GATEWAY_PORT}${EXTRA_STALE_PORTS:+ plus ${EXTRA_STALE_PORTS}} are free"
+rm -f -- "${CONTROL_FILE}"
+ok "removed previous policy transition state ${CONTROL_FILE}"
 
 section "Start Services"
 bash "${POLAR_DEPLOY_DIR}/start_polar_nohup.sh"

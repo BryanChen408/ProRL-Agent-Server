@@ -8,7 +8,7 @@ index d7a2087..b76c187 100644
  import itertools
  import logging
  import multiprocessing
-@@ -508,6 +509,40 @@ class RolloutManager:
+@@ -508,6 +509,48 @@ class RolloutManager:
      def load(self, rollout_id=None):
          self.data_source.load(rollout_id)
  
@@ -44,12 +44,20 @@ index d7a2087..b76c187 100644
 +
 +    def finish_policy_update(self, policy_version: int):
 +        """Notify a custom rollout function after serving weights advance."""
-+        self._call_rollout_function_hook("finish_policy_update", policy_version)
++        self._call_rollout_function_hook(
++            "finish_policy_update", policy_version, raise_on_error=True
++        )
++
++    def fail_policy_update(self, policy_version: int, reason: str):
++        """Keep a failed/ambiguous serving-weight transition fail-closed."""
++        self._call_rollout_function_hook(
++            "fail_policy_update", policy_version, reason, raise_on_error=True
++        )
 +
      def offload(self):
          self.health_monitoring_pause()
          for srv in self.servers.values():
-@@ -1151,13 +1186,15 @@ def _log_eval_rollout_data(rollout_id, args, data, extra_metrics: dict[str, Any]
+@@ -1151,13 +1194,15 @@ def _log_eval_rollout_data(rollout_id, args, data, extra_metrics: dict[str, Any]
      log_dict = extra_metrics or {}
      for key in data.keys():
          rewards = data[key]["rewards"]
@@ -128,7 +136,7 @@ index 94cc296..647fabd 100644
  
          if args.check_weight_update_equal:
              ray.get(rollout_manager.check_weights.remote(action="compare"))
-@@ -66,11 +91,32 @@ def train(args):
+@@ -66,11 +91,44 @@ def train(args):
                  ray.get(rollout_manager.save.remote(rollout_id))
  
          if (rollout_id + 1) % args.update_weights_interval == 0:
@@ -143,25 +151,37 @@ index 94cc296..647fabd 100644
 +                rollout_data_next_future = None
              if not args.critic_train_only:
 -                actor_model.update_weights()
++                prepared_policy_update = False
 +                if allow_weight_update_overlap:
-+                    _call_rollout_function_hook(
-+                        args,
-+                        "prepare_policy_update",
-+                        next_policy_version,
-+                        raise_on_error=True,
++                    ray.get(
++                        rollout_manager.prepare_policy_update.remote(next_policy_version)
 +                    )
++                    prepared_policy_update = True
 +                try:
 +                    actor_model.update_weights()
-+                    version_ref = rollout_manager.update_policy_version.remote(next_policy_version)
-+                    if not allow_weight_update_overlap:
-+                        ray.get(version_ref)
-+                finally:
 +                    if allow_weight_update_overlap:
-+                        _call_rollout_function_hook(
-+                            args,
-+                            "finish_policy_update",
-+                            next_policy_version,
++                        ray.get(
++                            rollout_manager.finish_policy_update.remote(next_policy_version)
 +                        )
++                    else:
++                        ray.get(
++                            rollout_manager.update_policy_version.remote(next_policy_version)
++                        )
++                except Exception as exc:
++                    if allow_weight_update_overlap and prepared_policy_update:
++                        try:
++                            ray.get(
++                                rollout_manager.fail_policy_update.remote(
++                                    next_policy_version,
++                                    f"{type(exc).__name__}: {exc}",
++                                )
++                            )
++                        except Exception:
++                            logger.exception(
++                                "Failed to persist Polar policy-update failure; "
++                                "serving remains fail-closed"
++                            )
++                    raise
  
          if should_run_periodic_action(rollout_id, args.eval_interval, num_rollout_per_epoch):
              ray.get(rollout_manager.eval.remote(rollout_id))

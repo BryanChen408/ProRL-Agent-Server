@@ -757,7 +757,11 @@ async def _reconcile_transition(
     wait_timeout_seconds: float = 0.0,
 ) -> PolicyTransitionRecord:
     if record.phase == PolicyTransitionPhase.QUIESCING:
-        return await _drive_quiescing(state, record)
+        return await _drive_quiescing(
+            state,
+            record,
+            reset_epoch=record.kind == PolicyTransitionKind.BOOTSTRAP,
+        )
     if record.phase == PolicyTransitionPhase.COMMITTING:
         return await _drive_commit(state, record)
     if record.phase == PolicyTransitionPhase.ABORTING:

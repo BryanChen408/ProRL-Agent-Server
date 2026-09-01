@@ -8,6 +8,7 @@ import httpx
 
 from polar.rollout import server
 from polar.rollout.models import (
+    PolicyBootstrapBeginRequest,
     PolicyEpochInitializeRequest,
     PolicyTransitionBeginRequest,
     PolicyTransitionCommitRequest,
@@ -336,6 +337,21 @@ def test_policy_transition_begin_commit_and_duplicate_commit(monkeypatch, tmp_pa
     ).snapshot()
     assert restored.active_epoch == 1
     assert actions.count(("resume", "t-0-1", 1)) == 1
+
+    bootstrap = asyncio.run(
+        server.begin_policy_bootstrap(
+            PolicyBootstrapBeginRequest(
+                transition_id="run-b-bootstrap",
+                policy_namespace="run-b",
+                epoch=0,
+            )
+        )
+    )
+    assert bootstrap["phase"] == "admission_closed"
+    admission = state.manager.status()["policy_admission"]
+    assert admission["closed"] is True
+    assert admission["active_namespace"] == "run-b"
+    assert admission["active_epoch"] == 0
 
 
 def test_ambiguous_engine_failure_stays_fail_closed(monkeypatch, tmp_path: Path) -> None:
