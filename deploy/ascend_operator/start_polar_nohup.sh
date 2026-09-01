@@ -11,6 +11,7 @@ PYTHON_FOR_PROFILE="${POLAR_PYTHON:-python3}"
 source <("${PYTHON_FOR_PROFILE}" "${POLAR_DEPLOY_DIR}/tools/load_polar_profile.py" \
   --profile "${POLAR_PROFILE}" \
   --repo-root "${POLAR_REPO_ROOT}")
+export POLAR_CONTROL_DIR="${POLAR_CONTROL_DIR:-${POLAR_OUTPUT_ROOT}/control}"
 
 ROOT="${POLAR_OUTPUT_DIR}"
 POLAR_ROOT="${POLAR_REPO_ROOT}"

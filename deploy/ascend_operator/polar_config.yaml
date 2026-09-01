@@ -9,6 +9,11 @@ polar_reward_key: "score"
 polar_task_id_template: "polar-op-{rollout_id}-{sample.group_index}"
 polar_instruction_template: null
 
+# Durable epoch-transition coordinator.  The legacy Slime path stays disabled;
+# synchronous VIME enables its matching bridge explicitly in start_sync_hybrid.sh.
+polar_policy_transition_enabled: false
+polar_policy_control_timeout: 45
+
 rollout_max_async_level: 1
 rollout_request_timeout: 4000
 rollout_scheduler_mode: "session_pool"
