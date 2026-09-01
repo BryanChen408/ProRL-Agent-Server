@@ -175,9 +175,10 @@ def test_non_streaming_handler_coalesces_duplicate_request_and_saves_once(monkey
                 request: dict,
                 *,
                 trace_headers: dict[str, str] | None = None,
+                generation_guard=None,
             ) -> dict:
                 nonlocal calls
-                del trace_headers
+                del trace_headers, generation_guard
                 calls += 1
                 await release.wait()
                 return {

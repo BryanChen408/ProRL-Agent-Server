@@ -47,6 +47,8 @@ class _TaskRecord:
     background_task: asyncio.Task[None] | None = None
     cancel_requested: bool = False
     cancel_reason: str | None = None
+    policy_namespace: str | None = None
+    policy_version: int | None = None
 
 
 def _harness_from_request(request: TaskRequest) -> str | None:
@@ -111,6 +113,17 @@ class RolloutManager:
         self._cancelled_before_submit: dict[str, str] = {}
         self._policy_cutoff_tasks: set[asyncio.Task[None]] = set()
         self._policy_cutoff_task_ids: set[str] = set()
+        self._policy_cutoff_reaper: asyncio.Task[None] | None = None
+        self._policy_cutoff_fence_lock = asyncio.Lock()
+        # The policy transition coordinator owns these fields.  They deliberately
+        # live under the same lock as task registration so closing admission and
+        # taking the old-policy task snapshot is one atomic local operation.
+        # ``_policy_epoch_enforced=False`` preserves the legacy/baseline contract.
+        self._policy_epoch_enforced = False
+        self._policy_admission_closed = False
+        self._active_policy_namespace: str | None = None
+        self._active_policy_epoch: int | None = None
+        self._policy_transition_id: str | None = None
         self._lock = threading.RLock()
         self._loop: asyncio.AbstractEventLoop | None = None
 
@@ -128,6 +141,26 @@ class RolloutManager:
         """Register a task and run it in the background. Returns task_id immediately."""
         self._loop = asyncio.get_running_loop()
         with self._lock:
+            request_policy_namespace = _policy_namespace_from_request(request)
+            request_policy_version = _policy_version_from_request(request)
+            policy_rejection = self._policy_rejection_reason(
+                request_policy_namespace,
+                request_policy_version,
+            )
+            if policy_rejection is not None:
+                self._tasks[request.task_id] = _TaskRecord(
+                    task_id=request.task_id,
+                    status="cancelled",
+                    total_sessions=request.num_samples,
+                    harness=_harness_from_request(request),
+                    model=_model_from_request(request),
+                    cancel_requested=True,
+                    cancel_reason=policy_rejection,
+                    policy_namespace=request_policy_namespace,
+                    policy_version=request_policy_version,
+                )
+                logger.info("Task %s rejected by policy admission: %s", request.task_id, policy_rejection)
+                return request.task_id
             pre_cancel_reason = self._cancelled_before_submit.get(request.task_id)
             if pre_cancel_reason is not None:
                 self._tasks[request.task_id] = _TaskRecord(
@@ -138,6 +171,8 @@ class RolloutManager:
                     model=_model_from_request(request),
                     cancel_requested=True,
                     cancel_reason=pre_cancel_reason,
+                    policy_namespace=request_policy_namespace,
+                    policy_version=request_policy_version,
                 )
                 logger.info(
                     "Task %s arrived after policy-cutoff cancellation; not starting",
@@ -153,6 +188,8 @@ class RolloutManager:
                 total_sessions=request.num_samples,
                 harness=_harness_from_request(request),
                 model=_model_from_request(request),
+                policy_namespace=request_policy_namespace,
+                policy_version=request_policy_version,
             )
         self._emit(
             "task.created",
@@ -171,6 +208,139 @@ class RolloutManager:
         with self._lock:
             self._tasks[request.task_id].background_task = background_task
         return request.task_id
+
+    def _policy_rejection_reason(
+        self,
+        request_namespace: str | None,
+        request_epoch: int | None,
+    ) -> str | None:
+        if not self._policy_epoch_enforced:
+            return None
+        if self._policy_admission_closed:
+            return f"policy_transition:{self._policy_transition_id or 'active'}"
+        if request_namespace is None:
+            return "policy_namespace_missing"
+        if request_namespace != self._active_policy_namespace:
+            return (
+                f"policy_namespace_mismatch:request={request_namespace}:"
+                f"active={self._active_policy_namespace}"
+            )
+        if request_epoch is None:
+            return "policy_epoch_missing"
+        if request_epoch != self._active_policy_epoch:
+            return (
+                f"policy_epoch_mismatch:request={request_epoch}:"
+                f"active={self._active_policy_epoch}"
+            )
+        return None
+
+    def initialize_policy_admission(
+        self,
+        epoch: int,
+        *,
+        policy_namespace: str = "legacy",
+        transition_id: str,
+    ) -> None:
+        """Enable epoch admission after the new coordinator is explicitly selected."""
+        with self._lock:
+            self._policy_epoch_enforced = True
+            self._active_policy_namespace = str(policy_namespace)
+            self._active_policy_epoch = int(epoch)
+            self._policy_admission_closed = False
+            self._policy_transition_id = transition_id
+
+    def close_policy_admission(
+        self,
+        *,
+        from_epoch: int,
+        policy_namespace: str = "legacy",
+        transition_id: str,
+    ) -> list[str]:
+        """Atomically close admission and snapshot running old-policy tasks."""
+        with self._lock:
+            if self._policy_epoch_enforced and self._active_policy_epoch not in {
+                None,
+                int(from_epoch),
+            }:
+                raise ValueError(
+                    "policy admission epoch mismatch: "
+                    f"active={self._active_policy_epoch} requested={from_epoch}"
+                )
+            if (
+                self._policy_epoch_enforced
+                and self._active_policy_namespace not in {None, str(policy_namespace)}
+            ):
+                raise ValueError(
+                    "policy admission namespace mismatch: "
+                    f"active={self._active_policy_namespace} requested={policy_namespace}"
+                )
+            self._policy_epoch_enforced = True
+            self._active_policy_namespace = str(policy_namespace)
+            self._active_policy_epoch = int(from_epoch)
+            self._policy_admission_closed = True
+            self._policy_transition_id = transition_id
+            return [
+                task_id
+                for task_id, record in self._tasks.items()
+                if record.status == "running"
+                and (
+                    record.policy_namespace != str(policy_namespace)
+                    or record.policy_version is None
+                    or record.policy_version <= int(from_epoch)
+                )
+            ]
+
+    def reset_policy_admission(
+        self,
+        epoch: int,
+        *,
+        policy_namespace: str = "legacy",
+        transition_id: str,
+    ) -> list[str]:
+        """Start a new trainer namespace closed and fence every prior running task."""
+        with self._lock:
+            self._policy_epoch_enforced = True
+            self._active_policy_namespace = str(policy_namespace)
+            self._active_policy_epoch = int(epoch)
+            self._policy_admission_closed = True
+            self._policy_transition_id = transition_id
+            return [
+                task_id
+                for task_id, record in self._tasks.items()
+                if record.status == "running"
+            ]
+
+    def open_policy_admission(
+        self,
+        epoch: int,
+        *,
+        policy_namespace: str = "legacy",
+        transition_id: str,
+    ) -> None:
+        with self._lock:
+            self._policy_epoch_enforced = True
+            self._active_policy_namespace = str(policy_namespace)
+            self._active_policy_epoch = int(epoch)
+            self._policy_admission_closed = False
+            self._policy_transition_id = transition_id
+
+    def restore_policy_admission(
+        self,
+        *,
+        policy_namespace: str | None = None,
+        epoch: int | None,
+        closed: bool,
+        transition_id: str | None,
+    ) -> None:
+        """Restore fail-closed coordinator state after a rollout-server restart."""
+        if epoch is None and transition_id is None:
+            return
+        with self._lock:
+            self._policy_epoch_enforced = True
+            self._active_policy_namespace = policy_namespace or "legacy"
+            self._active_policy_epoch = epoch
+            self._policy_admission_closed = bool(closed)
+            self._policy_transition_id = transition_id
 
     async def _run_task_background(self, request: TaskRequest) -> None:
         """Execute a task in the background, updating the record on completion."""
@@ -292,6 +462,7 @@ class RolloutManager:
                 self._policy_cutoff_tasks.update(tasks_to_cancel)
                 self._policy_cutoff_task_ids.update(cancelled)
             fence_pending = True
+            self._ensure_policy_cutoff_reaper()
             cancel_errors: dict[str, str] = {}
         elif tasks_to_cancel:
             await asyncio.gather(*tasks_to_cancel, return_exceptions=True)
@@ -333,6 +504,36 @@ class RolloutManager:
                 "cancelled_before_submit": cancelled_before_submit,
             },
         }
+
+    def _ensure_policy_cutoff_reaper(self) -> None:
+        """Run retryable gateway cleanup without putting it on the train boundary."""
+        current = self._policy_cutoff_reaper
+        if current is not None and not current.done():
+            return
+        self._policy_cutoff_reaper = asyncio.create_task(
+            self._reap_policy_cutoff_fences(),
+            name="polar-policy-cutoff-reaper",
+        )
+
+    async def _reap_policy_cutoff_fences(self) -> None:
+        # Give an explicit legacy resume/fence caller first chance to reconcile.
+        # Transactional training never waits for this path, so the small delay only
+        # prevents duplicate concurrent DELETE retries without extending its boundary.
+        await asyncio.sleep(0.25)
+        retry_delay = 0.25
+        while True:
+            fence = await self.wait_for_policy_cutoff_fences(timeout_seconds=5.0)
+            with self._lock:
+                remaining = bool(self._policy_cutoff_tasks or self._policy_cutoff_task_ids)
+            if fence["all_fenced"] and not remaining:
+                return
+            logger.warning(
+                "Policy-cutoff cleanup remains asynchronous: pending=%s errors=%s",
+                fence.get("pending"),
+                fence.get("errors"),
+            )
+            await asyncio.sleep(retry_delay)
+            retry_delay = min(5.0, retry_delay * 2)
 
     def _cancel_errors(self, task_ids: list[str]) -> dict[str, str]:
         """Return session-fence failures after cancelled task coroutines have stopped."""
@@ -377,6 +578,16 @@ class RolloutManager:
         self,
         *,
         timeout_seconds: float = 5.0,
+    ) -> dict[str, Any]:
+        async with self._policy_cutoff_fence_lock:
+            return await self._wait_for_policy_cutoff_fences_locked(
+                timeout_seconds=timeout_seconds,
+            )
+
+    async def _wait_for_policy_cutoff_fences_locked(
+        self,
+        *,
+        timeout_seconds: float,
     ) -> dict[str, Any]:
         """Verify all old-policy Gateway sessions are fenced before inference resumes.
 
@@ -631,6 +842,31 @@ class RolloutManager:
             }
         return {
             "tasks": task_statuses,
+            "policy_admission": {
+                "enforced": self._policy_epoch_enforced,
+                "closed": self._policy_admission_closed,
+                "active_namespace": self._active_policy_namespace,
+                "active_epoch": self._active_policy_epoch,
+                "transition_id": self._policy_transition_id,
+            },
             "pipeline": self.pipeline.status(),
             "nodes": self.scheduler.stats(),
         }
+
+
+def _policy_version_from_request(request: TaskRequest) -> int | None:
+    value = request.metadata.get("policy_version")
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _policy_namespace_from_request(request: TaskRequest) -> str | None:
+    value = request.metadata.get("policy_namespace")
+    if value is None:
+        return None
+    namespace = str(value).strip()
+    return namespace or None

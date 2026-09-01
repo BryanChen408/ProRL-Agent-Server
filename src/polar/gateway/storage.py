@@ -64,16 +64,39 @@ class SessionStore:
         # Live policy_version, bumped by the trainer at each weight sync (during the
         # engine pause, before resume) via POST /admin/policy_version.  Stamped onto
         # each completion and used for the version-span guard.  None = never set yet.
+        self._current_policy_namespace: str | None = None
         self._current_policy_version: int | None = None
+        self._policy_epoch_enforced = False
 
-    def set_policy_version(self, version: int) -> None:
+    def set_policy_version(
+        self,
+        version: int,
+        *,
+        policy_namespace: str | None = None,
+        enforce_epoch: bool | None = None,
+    ) -> None:
         """Set the live policy_version (called at each weight sync, during pause)."""
         with self._lock:
+            if policy_namespace is not None:
+                namespace = str(policy_namespace).strip()
+                if not namespace:
+                    raise ValueError("policy_namespace must be non-empty")
+                self._current_policy_namespace = namespace
             self._current_policy_version = int(version)
+            if enforce_epoch is not None:
+                self._policy_epoch_enforced = bool(enforce_epoch)
 
     def get_policy_version(self) -> int | None:
         with self._lock:
             return self._current_policy_version
+
+    def get_policy_namespace(self) -> str | None:
+        with self._lock:
+            return self._current_policy_namespace
+
+    def policy_epoch_enforced(self) -> bool:
+        with self._lock:
+            return self._policy_epoch_enforced
 
     def session_gen_version(self, session_id: str) -> int | None:
         """O(1) read of a session's first-generation version (version-span guard)."""

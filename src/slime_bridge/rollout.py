@@ -161,6 +161,8 @@ class _SessionGroupAccumulator:
 # ---------------------------------------------------------------------------
 _global_async_worker: "AsyncPolarRolloutWorker | None" = None
 _worker_lock = threading.Lock()
+_policy_transition_lock = threading.RLock()
+_process_policy_transition: tuple[str, int, int, dict[str, str]] | None = None
 
 
 def get_global_async_worker(args: Any, data_source: Any) -> "AsyncPolarRolloutWorker":
@@ -181,16 +183,45 @@ def stop_global_worker() -> None:
             _global_async_worker = None
 
 
-def update_policy_version(args: Any, policy_version: int) -> None:
+def update_policy_version(
+    args: Any,
+    policy_version: int,
+    engine_versions: dict[str, str] | None = None,
+) -> None:
     """Optional hook called by Slime after serving weights are updated."""
-    del args
+    if _policy_transition_enabled(args):
+        if _current_process_policy_transition() is not None:
+            return
+        evidence = _normalize_engine_versions(engine_versions)
+        transition_id = _policy_transition_id(args, policy_version, policy_version, initialize=True)
+        payload = _post_policy_control(
+            args,
+            "/rollout/admin/policy/initialize",
+            json_payload={
+                "transition_id": transition_id,
+                "epoch": int(policy_version),
+                "engine_versions": evidence,
+            },
+            reconcile_transition_id=transition_id,
+        )
+        if payload.get("phase") != "serving" or payload.get("active_epoch") != int(policy_version):
+            raise PolarRolloutSchedulerError(
+                f"Polar policy epoch initialization did not reach serving: {payload}"
+            )
     with _worker_lock:
         if _global_async_worker is not None:
             _global_async_worker.update_policy_version(policy_version)
 
 
-def prepare_policy_update(args: Any, policy_version: int) -> None:
+def prepare_policy_update(
+    args: Any,
+    policy_version: int,
+    engine_versions: dict[str, str] | None = None,
+) -> None:
     """Optional hook called by Slime before overlapping inference weight sync."""
+    if _policy_transition_enabled(args):
+        _prepare_policy_transition(args, policy_version, engine_versions)
+        return
     logger.info("Preparing Polar bridge for policy_version=%s weight update", policy_version)
     with _worker_lock:
         worker = _global_async_worker
@@ -221,8 +252,15 @@ def prepare_policy_update(args: Any, policy_version: int) -> None:
         raise
 
 
-def finish_policy_update(args: Any, policy_version: int) -> None:
+def finish_policy_update(
+    args: Any,
+    policy_version: int,
+    engine_versions: dict[str, str] | None = None,
+) -> None:
     """Optional hook called by Slime after overlapping inference weight sync."""
+    if _policy_transition_enabled(args):
+        _finish_policy_transition(args, policy_version, engine_versions)
+        return
     try:
         with _worker_lock:
             worker = _global_async_worker
@@ -238,6 +276,335 @@ def finish_policy_update(args: Any, policy_version: int) -> None:
                 else:
                     worker.resume_admission()
     logger.info("Finished Polar bridge policy_version=%s weight update", policy_version)
+
+
+def fail_policy_update(args: Any, policy_version: int, reason: str | None = None) -> None:
+    """Fail closed when the engine's weight epoch is no longer provable."""
+    if not _policy_transition_enabled(args):
+        logger.error(
+            "Weight update for policy_version=%s failed; legacy Polar control cannot "
+            "prove the serving epoch",
+            policy_version,
+        )
+        return
+    transition = _current_process_policy_transition()
+    if transition is None or transition[2] != int(policy_version):
+        raise PolarRolloutSchedulerError(
+            f"No active Polar policy transition for failed version {policy_version}"
+        )
+    transition_id, _from_epoch, _to_epoch, _from_engine_versions = transition
+    payload = _post_policy_control(
+        args,
+        f"/rollout/admin/policy-transitions/{transition_id}/fail",
+        json_payload={"reason": reason or "engine weight update failed; epoch is unknown"},
+        reconcile_transition_id=transition_id,
+    )
+    if payload.get("phase") == "serving" and payload.get("active_epoch") == int(policy_version):
+        # A lost commit acknowledgement can race the trainer's exception path.  The
+        # durable serving state wins; it is safe to align the local worker and continue.
+        with _worker_lock:
+            if _global_async_worker is not None:
+                _global_async_worker.update_policy_version(policy_version)
+                if _global_async_worker.config.scheduler_mode == "session_pool":
+                    _global_async_worker.finish_policy_update_drain()
+                else:
+                    _global_async_worker.resume_admission()
+        _clear_process_policy_transition(transition_id)
+        return
+    logger.error(
+        "Polar policy transition %s entered fail-closed recovery: %s",
+        transition_id,
+        payload,
+    )
+
+
+def _policy_transition_enabled(args: Any) -> bool:
+    value = getattr(args, "polar_policy_transition_enabled", False)
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, int):
+        return bool(value)
+    return str(value).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _normalize_engine_versions(engine_versions: dict[str, str] | None) -> dict[str, str]:
+    if not isinstance(engine_versions, dict) or not engine_versions:
+        raise PolarRolloutSchedulerError(
+            "Policy transition requires versions from every rollout engine"
+        )
+    normalized = {
+        str(engine_id).strip(): str(version).strip()
+        for engine_id, version in engine_versions.items()
+    }
+    if any(not key or not value for key, value in normalized.items()):
+        raise PolarRolloutSchedulerError(f"Invalid engine version evidence: {normalized}")
+    if len(set(normalized.values())) != 1:
+        raise PolarRolloutSchedulerError(f"Mixed rollout-engine versions: {normalized}")
+    return normalized
+
+
+def _policy_transition_id(
+    args: Any,
+    from_epoch: int,
+    to_epoch: int,
+    *,
+    initialize: bool = False,
+) -> str:
+    namespace = next(
+        (
+            str(value)
+            for name in (
+                "polar_policy_transition_namespace",
+                "polar_run_id",
+                "wandb_run_name",
+                "run_name",
+                "exp_name",
+            )
+            if (value := getattr(args, name, None)) not in (None, "")
+        ),
+        "polar",
+    )
+    digest = hashlib.sha256(namespace.encode("utf-8")).hexdigest()[:16]
+    prefix = "init" if initialize else "update"
+    return f"{prefix}-{digest}-{int(from_epoch)}-to-{int(to_epoch)}"
+
+
+def _set_process_policy_transition(
+    transition_id: str,
+    from_epoch: int,
+    to_epoch: int,
+    engine_versions: dict[str, str],
+) -> None:
+    global _process_policy_transition
+    with _policy_transition_lock:
+        current = _process_policy_transition
+        requested = (transition_id, int(from_epoch), int(to_epoch), dict(engine_versions))
+        if current is not None and current != requested:
+            raise PolarRolloutSchedulerError(
+                f"Polar policy transition {current[0]} is already active"
+            )
+        _process_policy_transition = requested
+
+
+def _current_process_policy_transition() -> tuple[str, int, int, dict[str, str]] | None:
+    with _policy_transition_lock:
+        return _process_policy_transition
+
+
+def _clear_process_policy_transition(transition_id: str) -> None:
+    global _process_policy_transition
+    with _policy_transition_lock:
+        if _process_policy_transition is not None and _process_policy_transition[0] == transition_id:
+            _process_policy_transition = None
+
+
+def _post_policy_control(
+    args: Any,
+    path: str,
+    *,
+    json_payload: dict[str, Any],
+    reconcile_transition_id: str,
+) -> dict[str, Any]:
+    rollout_url = _resolve_rollout_url(args)
+    if not rollout_url:
+        raise PolarRolloutSchedulerError(
+            "polar_url, polar_rollout_url, or polar_topology_path is required for policy transitions"
+        )
+    request_timeout = float(getattr(args, "polar_policy_control_timeout", 45.0) or 45.0)
+    post_error: Exception | None = None
+    try:
+        with httpx.Client(timeout=max(5.0, request_timeout)) as client:
+            response = client.post(f"{rollout_url}{path}", json=json_payload)
+            response.raise_for_status()
+            payload = response.json()
+            if isinstance(payload, dict):
+                return payload
+            raise PolarRolloutSchedulerError(f"Invalid Polar policy control response: {payload!r}")
+    except Exception as exc:
+        post_error = exc
+
+    # The mutation may have committed before the response was lost.  Reconcile by
+    # stable transition id instead of treating transport failure as operation failure.
+    try:
+        return _get_policy_transition(args, reconcile_transition_id)
+    except Exception as status_exc:
+        raise PolarRolloutSchedulerError(
+            "Polar policy control outcome is unknown: "
+            f"POST={type(post_error).__name__}: {post_error}; "
+            f"GET={type(status_exc).__name__}: {status_exc}"
+        ) from status_exc
+
+
+def _get_policy_transition(args: Any, transition_id: str) -> dict[str, Any]:
+    rollout_url = _resolve_rollout_url(args)
+    if not rollout_url:
+        raise PolarRolloutSchedulerError("Polar rollout URL is required")
+    request_timeout = float(getattr(args, "polar_policy_control_timeout", 45.0) or 45.0)
+    with httpx.Client(timeout=max(5.0, request_timeout)) as client:
+        response = client.get(
+            f"{rollout_url}/rollout/admin/policy-transitions/{transition_id}"
+        )
+        response.raise_for_status()
+        payload = response.json()
+    if not isinstance(payload, dict):
+        raise PolarRolloutSchedulerError(f"Invalid Polar policy transition status: {payload!r}")
+    return payload
+
+
+def _wait_for_policy_phase(
+    args: Any,
+    transition_id: str,
+    *,
+    phases: set[str],
+    timeout_seconds: float,
+) -> dict[str, Any]:
+    deadline = time.monotonic() + max(0.0, timeout_seconds)
+    while True:
+        payload = _get_policy_transition(args, transition_id)
+        if str(payload.get("phase")) in phases:
+            return payload
+        if time.monotonic() >= deadline:
+            return payload
+        time.sleep(min(0.2, max(0.0, deadline - time.monotonic())))
+
+
+def _prepare_policy_transition(
+    args: Any,
+    policy_version: int,
+    engine_versions: dict[str, str] | None,
+) -> None:
+    evidence = _normalize_engine_versions(engine_versions)
+    with _worker_lock:
+        worker = _global_async_worker
+        from_epoch = (
+            worker.current_policy_version()
+            if worker is not None
+            else max(0, int(policy_version) - 1)
+        )
+        if worker is not None:
+            worker.pause_admission()
+    transition_id = _policy_transition_id(args, from_epoch, int(policy_version))
+    _set_process_policy_transition(
+        transition_id,
+        from_epoch,
+        int(policy_version),
+        evidence,
+    )
+    pause_timeout = float(getattr(args, "polar_weight_update_pause_timeout", 300.0) or 300.0)
+    try:
+        payload = _post_policy_control(
+            args,
+            "/rollout/admin/policy-transitions/begin",
+            json_payload={
+                "transition_id": transition_id,
+                "from_epoch": from_epoch,
+                "to_epoch": int(policy_version),
+                "engine_versions": evidence,
+            },
+            reconcile_transition_id=transition_id,
+        )
+        if payload.get("phase") not in {"admission_closed", "ready_for_training"}:
+            payload = _wait_for_policy_phase(
+                args,
+                transition_id,
+                phases={"admission_closed", "ready_for_training"},
+                timeout_seconds=min(pause_timeout, 45.0),
+            )
+        if payload.get("phase") not in {"admission_closed", "ready_for_training"}:
+            raise PolarRolloutSchedulerError(
+                f"Polar transition did not close admission: {payload}"
+            )
+        logger.info("Polar policy transition admission closed: %s", payload)
+    except Exception:
+        # prepare runs before weight mutation, so the old engine epoch is still
+        # provable and an explicit abort may safely reopen it.  If abort cannot be
+        # proven, leave both worker and gateway fail-closed.
+        try:
+            payload = _post_policy_control(
+                args,
+                f"/rollout/admin/policy-transitions/{transition_id}/abort",
+                json_payload={
+                    "verified_policy_epoch": from_epoch,
+                    "engine_versions": evidence,
+                    "reason": "prepare_policy_update_failed",
+                },
+                reconcile_transition_id=transition_id,
+            )
+            if payload.get("phase") == "aborted" and payload.get("active_epoch") == from_epoch:
+                with _worker_lock:
+                    if _global_async_worker is not None:
+                        _global_async_worker.resume_admission()
+                _clear_process_policy_transition(transition_id)
+        except Exception:
+            logger.exception(
+                "Failed to prove old-policy recovery; Polar remains fail-closed for %s",
+                transition_id,
+            )
+        raise
+
+
+def commit_policy_update_boundary(args: Any, policy_version: int) -> dict[str, Any] | None:
+    """Confirm drain only after the trainer has aborted every serving engine."""
+    if not _policy_transition_enabled(args):
+        return None
+    transition = _current_process_policy_transition()
+    if transition is None or transition[2] != int(policy_version):
+        raise PolarRolloutSchedulerError(
+            f"No active Polar policy transition for version {policy_version}"
+        )
+    transition_id = transition[0]
+    timeout = float(getattr(args, "polar_policy_control_timeout", 45.0) or 45.0)
+    payload = _post_policy_control(
+        args,
+        f"/rollout/admin/policy-transitions/{transition_id}/confirm-drained",
+        json_payload={"wait_timeout_seconds": min(timeout, 300.0)},
+        reconcile_transition_id=transition_id,
+    )
+    if payload.get("phase") != "ready_for_training":
+        raise PolarRolloutSchedulerError(
+            f"Polar did not prove post-abort drain: {payload}"
+        )
+    return payload
+
+
+def _finish_policy_transition(
+    args: Any,
+    policy_version: int,
+    engine_versions: dict[str, str] | None,
+) -> None:
+    transition = _current_process_policy_transition()
+    if transition is None or transition[2] != int(policy_version):
+        raise PolarRolloutSchedulerError(
+            f"No active Polar policy transition for version {policy_version}"
+        )
+    transition_id, _from_epoch, to_epoch, _from_engine_versions = transition
+    evidence = _normalize_engine_versions(engine_versions)
+    payload = _post_policy_control(
+        args,
+        f"/rollout/admin/policy-transitions/{transition_id}/commit",
+        json_payload={
+            "verified_policy_epoch": to_epoch,
+            "engine_versions": evidence,
+        },
+        reconcile_transition_id=transition_id,
+    )
+    if payload.get("phase") != "serving":
+        payload = _wait_for_policy_phase(
+            args,
+            transition_id,
+            phases={"serving", "recovery_required"},
+            timeout_seconds=float(getattr(args, "polar_policy_control_timeout", 45.0) or 45.0),
+        )
+    if payload.get("phase") != "serving" or payload.get("active_epoch") != to_epoch:
+        raise PolarRolloutSchedulerError(
+            f"Polar policy transition commit did not reach serving: {payload}"
+        )
+    with _worker_lock:
+        if _global_async_worker is not None:
+            _global_async_worker.update_policy_version(to_epoch)
+            _global_async_worker.resume_admission()
+    _clear_process_policy_transition(transition_id)
+    logger.info("Committed Polar policy transition: %s", payload)
 
 
 def _resolve_gateway_url(args: Any) -> str | None:
@@ -1011,6 +1378,10 @@ class AsyncPolarRolloutWorker:
     def update_policy_version(self, policy_version: int) -> None:
         with self._state_lock:
             self._policy_version = max(self._policy_version, int(policy_version))
+
+    def current_policy_version(self) -> int:
+        with self._state_lock:
+            return self._policy_version
 
     def pause_admission(self) -> None:
         with self._state_lock:

@@ -224,6 +224,61 @@ class TaskCancelRequest(BaseModel):
         return normalized
 
 
+class PolicyTransitionBeginRequest(BaseModel):
+    transition_id: str = Field(min_length=1, max_length=256)
+    policy_namespace: str = Field(default="legacy", min_length=1, max_length=128)
+    from_epoch: int = Field(ge=0)
+    to_epoch: int = Field(ge=0)
+    engine_versions: dict[str, str] = Field(min_length=1)
+
+
+class PolicyBootstrapBeginRequest(BaseModel):
+    """Close an existing serving namespace before the first VIME weight load."""
+
+    transition_id: str = Field(min_length=1, max_length=256)
+    policy_namespace: str = Field(min_length=1, max_length=128)
+    epoch: int = Field(ge=0)
+
+
+class PolicyTransitionDrainRequest(BaseModel):
+    wait_timeout_seconds: float = Field(default=30.0, ge=0, le=300.0)
+    # Set only after VIME's /pause?mode=abort fanout has succeeded on every
+    # serving engine. This is the NPU-safety proof; gateway/session teardown is
+    # deliberately not part of the synchronous training boundary.
+    engine_abort_confirmed: bool = False
+
+
+class PolicyEpochInitializeRequest(BaseModel):
+    transition_id: str = Field(min_length=1, max_length=256)
+    policy_namespace: str = Field(default="legacy", min_length=1, max_length=128)
+    epoch: int = Field(ge=0)
+    engine_versions: dict[str, str] = Field(min_length=1)
+
+
+class PolicyTransitionCommitRequest(BaseModel):
+    verified_policy_epoch: int = Field(ge=0)
+    policy_namespace: str = Field(default="legacy", min_length=1, max_length=128)
+    engine_versions: dict[str, str] = Field(min_length=1)
+
+
+class PolicyTransitionAbortRequest(BaseModel):
+    verified_policy_epoch: int = Field(ge=0)
+    policy_namespace: str = Field(default="legacy", min_length=1, max_length=128)
+    engine_versions: dict[str, str] = Field(min_length=1)
+    reason: str = "prepare_failed"
+
+
+class PolicyTransitionFailRequest(BaseModel):
+    reason: str = Field(min_length=1, max_length=2000)
+
+
+class PolicyQuiesceRequest(BaseModel):
+    """Leave the current policy durably closed when its trainer exits."""
+
+    policy_namespace: str = Field(min_length=1, max_length=128)
+    epoch: int = Field(ge=0)
+
+
 class NodeRegistrationRequest(BaseModel):
     """Payload sent by a gateway node when registering with the rollout server."""
 

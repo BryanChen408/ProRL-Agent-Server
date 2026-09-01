@@ -9,6 +9,8 @@ import json
 import logging
 import os
 from datetime import datetime, timezone
+from pathlib import Path
+import re
 from typing import Any
 
 from fastapi import FastAPI, HTTPException, Query, Request
@@ -16,6 +18,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 
 from polar.config import GatewayNodeConfig, TopologyConfig
 from polar.gateway.completion_writer import CompletionWriter
+from polar.gateway.control import GatewayControlStore
 from polar.gateway.detection import APIType, detect, extract_model
 from polar.gateway.engine import get_engine
 from polar.gateway.inflight import InflightGenerationTracker
@@ -67,6 +70,7 @@ class GatewayState:
     node_manager: GatewayNodeManager
     completion_writer: CompletionWriter
     event_bus: EventBus
+    control: GatewayControlStore
 
 
 _state: GatewayState | None = None
@@ -83,9 +87,22 @@ def configure_server(topology_path: str = "topology.yaml", *, node_id: str | Non
 
 def _build_state(topology: TopologyConfig, node_id: str | None) -> GatewayState:
     node = topology.select_gateway_node(node_id)
-    inference = InferenceClient(node.inference_base_url, get_engine(node.engine))
     persistence_config = topology.gateway.completion_persistence
     save_dir = topology.rollout.save_dir
+    control_path = None
+    safe_node_id = re.sub(r"[^A-Za-z0-9_.-]+", "-", node.id).strip(".-") or "gateway"
+    control_dir = os.environ.get("POLAR_CONTROL_DIR")
+    if control_dir:
+        control_path = Path(control_dir) / f"gateway-{safe_node_id}.json"
+    elif save_dir:
+        control_path = Path(save_dir) / "_control" / f"gateway-{safe_node_id}.json"
+    control = GatewayControlStore(control_path)
+    control_snapshot = control.snapshot()
+    inference = InferenceClient(
+        node.inference_base_url,
+        get_engine(node.engine),
+        initially_paused=control_snapshot.paused,
+    )
     completion_writer = CompletionWriter(
         save_dir=save_dir if save_dir else None,
         max_field_bytes=persistence_config.max_field_bytes,
@@ -93,6 +110,12 @@ def _build_state(topology: TopologyConfig, node_id: str | None) -> GatewayState:
         enabled=persistence_config.enabled and bool(save_dir),
     )
     storage = SessionStore(completion_writer=completion_writer)
+    if control_snapshot.policy_epoch is not None:
+        storage.set_policy_version(
+            control_snapshot.policy_epoch,
+            policy_namespace=control_snapshot.policy_namespace,
+            enforce_epoch=control_snapshot.epoch_enforced,
+        )
     inflight = InflightGenerationTracker()
     transform_manager = TransformManager()
     session_registry = SessionRegistry()
@@ -133,6 +156,7 @@ def _build_state(topology: TopologyConfig, node_id: str | None) -> GatewayState:
         node_manager=node_manager,
         completion_writer=completion_writer,
         event_bus=event_bus,
+        control=control,
     )
 
 
@@ -442,6 +466,65 @@ def _completion_metadata(session_info: Any | None) -> dict[str, Any]:
     return metadata
 
 
+def _request_policy_epoch(metadata: dict[str, Any] | None) -> int | None:
+    value = (metadata or {}).get("policy_version")
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _request_policy_namespace(metadata: dict[str, Any] | None) -> str | None:
+    value = (metadata or {}).get("policy_namespace")
+    if value is None:
+        return None
+    namespace = str(value).strip()
+    return namespace or None
+
+
+def _policy_epoch_rejection(
+    state: GatewayState,
+    metadata: dict[str, Any] | None,
+) -> tuple[str | None, int | None, str | None, int | None] | None:
+    if not state.storage.policy_epoch_enforced():
+        return None
+    expected_namespace = _request_policy_namespace(metadata)
+    expected_epoch = _request_policy_epoch(metadata)
+    current_namespace = state.storage.get_policy_namespace()
+    current_epoch = state.storage.get_policy_version()
+    if (
+        expected_namespace is None
+        or expected_namespace != current_namespace
+        or expected_epoch is None
+        or expected_epoch != current_epoch
+    ):
+        return expected_namespace, expected_epoch, current_namespace, current_epoch
+    return None
+
+
+def _generation_epoch_guard(state: GatewayState, session_info: Any | None):
+    session_namespace = _request_policy_namespace(
+        getattr(session_info, "metadata", None)
+    )
+    session_epoch = _request_policy_epoch(getattr(session_info, "metadata", None))
+
+    def allowed() -> bool:
+        return (
+            not state.storage.policy_epoch_enforced()
+            or (
+                session_namespace is not None
+                and session_namespace == state.storage.get_policy_namespace()
+                and
+                session_epoch is not None
+                and session_epoch == state.storage.get_policy_version()
+            )
+        )
+
+    return allowed
+
+
 def format_stream_output(
     api_type: APIType,
     transformer: BaseTransformer,
@@ -496,8 +579,14 @@ async def health():
 @app.get("/admin/inference/status")
 async def inference_generation_status():
     state = get_state()
+    control = state.control.snapshot()
     return {
         **state.inference.generation_status(),
+        "policy_namespace": state.storage.get_policy_namespace(),
+        "policy_version": state.storage.get_policy_version(),
+        "epoch_enforced": state.storage.policy_epoch_enforced(),
+        "transition_id": control.transition_id,
+        "control_updated_at": control.updated_at,
         "inflight_generations": state.inflight.status(),
         "late_completions": state.storage.late_completion_summary(),
     }
@@ -512,8 +601,31 @@ async def inference_inflight_status():
 async def pause_inference_generation(
     timeout_seconds: float = 300.0,
     wait_for_drain: bool = True,
+    transition_id: str | None = None,
+    allow_paused_transition_takeover: bool = False,
 ):
     state = get_state()
+    control = state.control.snapshot()
+    if (
+        transition_id is not None
+        and control.paused
+        and control.transition_id not in {None, transition_id}
+        and not allow_paused_transition_takeover
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "message": "another policy transition already owns the paused gateway",
+                "requested": transition_id,
+                "actual": control.transition_id,
+            },
+        )
+    transactional = transition_id is not None or control.epoch_enforced
+    if transactional:
+        # Persist the safe desired state before applying it. A crash in between makes
+        # a transactional gateway stay paused. Legacy/default-off pause semantics are
+        # unchanged and do not create durable control state.
+        state.control.update(paused=True, transition_id=transition_id)
     status = await state.inference.pause_generation(
         timeout_seconds=timeout_seconds,
         wait_for_drain=wait_for_drain,
@@ -524,25 +636,137 @@ async def pause_inference_generation(
         status["drained"],
         status["inflight"],
     )
-    return status
+    return {
+        **status,
+        "policy_namespace": state.storage.get_policy_namespace(),
+        "policy_version": state.storage.get_policy_version(),
+        "epoch_enforced": state.storage.policy_epoch_enforced(),
+        "transition_id": state.control.snapshot().transition_id,
+    }
 
 
 @app.post("/admin/policy_version")
-async def set_policy_version(version: int):
+async def set_policy_version(
+    version: int,
+    policy_namespace: str | None = None,
+    transition_id: str | None = None,
+    enforce_epoch: bool | None = None,
+):
     """Trainer bumps the live policy_version at each weight sync -- called DURING the
     engine pause, BEFORE resume (see design doc hard-constraint) -- so every turn
     generated after resume is stamped with the new version and the version-span guard
     rejects any session's continuation that would cross the weight boundary."""
-    get_state().storage.set_policy_version(version)
-    logger.info("Gateway policy_version -> %s (weight-sync boundary)", version)
-    return {"policy_version": version}
+    state = get_state()
+    if (state.storage.policy_epoch_enforced() or enforce_epoch is True) and (
+        transition_id is None or not str(policy_namespace or "").strip()
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "transition_id and policy_namespace are required while policy "
+                "identity enforcement is active"
+            ),
+        )
+    control = state.control.snapshot()
+    if transition_id is not None and control.transition_id != transition_id:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "message": "gateway transition_id mismatch before epoch update",
+                "requested": transition_id,
+                "actual": control.transition_id,
+            },
+        )
+    transactional = transition_id is not None or state.storage.policy_epoch_enforced()
+    if transactional:
+        state.control.update(
+            policy_namespace=str(policy_namespace),
+            set_policy_namespace=True,
+            policy_epoch=int(version),
+            set_policy_epoch=True,
+            epoch_enforced=enforce_epoch,
+            transition_id=transition_id,
+        )
+    state.storage.set_policy_version(
+        version,
+        policy_namespace=policy_namespace,
+        enforce_epoch=enforce_epoch,
+    )
+    logger.info(
+        "Gateway policy identity -> %s/%s (weight-sync boundary)",
+        policy_namespace,
+        version,
+    )
+    return {
+        "policy_namespace": state.storage.get_policy_namespace(),
+        "policy_version": version,
+        "epoch_enforced": state.storage.policy_epoch_enforced(),
+        "transition_id": state.control.snapshot().transition_id,
+    }
 
 
 @app.post("/admin/inference/resume")
-async def resume_inference_generation():
-    status = await get_state().inference.resume_generation()
+async def resume_inference_generation(
+    transition_id: str | None = None,
+    expected_policy_namespace: str | None = None,
+    expected_policy_version: int | None = None,
+):
+    state = get_state()
+    control = state.control.snapshot()
+    if state.storage.policy_epoch_enforced() and (
+        transition_id is None or not str(expected_policy_namespace or "").strip()
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "transition_id and expected_policy_namespace are required while "
+                "policy identity enforcement is active"
+            ),
+        )
+    if transition_id is not None and control.transition_id != transition_id:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "message": "gateway transition_id mismatch",
+                "expected": transition_id,
+                "actual": control.transition_id,
+            },
+        )
+    current_version = state.storage.get_policy_version()
+    current_namespace = state.storage.get_policy_namespace()
+    if (
+        expected_policy_namespace is not None
+        and current_namespace != expected_policy_namespace
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "message": "gateway policy namespace mismatch before resume",
+                "expected": expected_policy_namespace,
+                "actual": current_namespace,
+            },
+        )
+    if expected_policy_version is not None and current_version != expected_policy_version:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "message": "gateway policy version mismatch before resume",
+                "expected": expected_policy_version,
+                "actual": current_version,
+            },
+        )
+    status = await state.inference.resume_generation()
+    # Persist open admission only after the in-process state has changed.  A crash
+    # before this write restarts paused, which is safe and recoverable.
+    if transition_id is not None or state.storage.policy_epoch_enforced():
+        state.control.update(paused=False, transition_id=transition_id)
     logger.info("Resumed inference generation proxy")
-    return status
+    return {
+        **status,
+        "policy_namespace": current_namespace,
+        "policy_version": current_version,
+        "transition_id": state.control.snapshot().transition_id,
+    }
 
 
 @app.get("/sessions")
@@ -632,6 +856,19 @@ async def create_session(request: Request):
         raise HTTPException(status_code=400, detail="Invalid JSON body") from exc
     if "agent" in body and "session_id" in body:
         dispatch_request = SessionDispatchRequest.model_validate(body)
+        epoch_rejection = _policy_epoch_rejection(state, dispatch_request.metadata)
+        if epoch_rejection is not None:
+            expected_namespace, expected, current_namespace, current = epoch_rejection
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "message": "session policy epoch is not currently serving",
+                    "session_policy_namespace": expected_namespace,
+                    "session_epoch": expected,
+                    "serving_policy_namespace": current_namespace,
+                    "serving_epoch": current,
+                },
+            )
         try:
             await state.node_manager.dispatch(dispatch_request)
         except ValueError as exc:
@@ -773,6 +1010,26 @@ async def proxy_request(request: Request, path: str):
     openai_request["model"] = state.node.model_served
     is_streaming = openai_request.get("stream", False)
 
+    epoch_rejection = _policy_epoch_rejection(
+        state,
+        getattr(session_info, "metadata", None),
+    )
+    if epoch_rejection is not None:
+        session_namespace, session_epoch, serving_namespace, serving_epoch = epoch_rejection
+        return _policy_epoch_abort(
+            api_type,
+            transformer,
+            openai_request,
+            body,
+            session_id,
+            original_model=original_model,
+            session_info=session_info,
+            session_namespace=session_namespace,
+            session_epoch=session_epoch,
+            serving_namespace=serving_namespace,
+            serving_epoch=serving_epoch,
+        )
+
     # 截断续命注入(默认关;POLAR_TRUNCATION_SALVAGE=1 开):
     # 上轮空截断时把残稿返还给模型,打破 4 连顶穿熔断的死循环。
     # 默认关闭的依据:builder 已支持「剥生成头认链 + 空截断 response 不入流」,
@@ -856,6 +1113,66 @@ def _version_span_abort(
     return JSONResponse(transformer.transform_response(abort_response, original_request))
 
 
+def _policy_epoch_abort(
+    api_type: APIType,
+    transformer: BaseTransformer,
+    openai_request: dict[str, Any],
+    original_request: dict[str, Any],
+    session_id: str,
+    *,
+    original_model: str,
+    session_info: Any | None,
+    session_namespace: str | None,
+    session_epoch: int | None,
+    serving_namespace: str | None,
+    serving_epoch: int | None,
+) -> JSONResponse:
+    """Reject a stale/missing-epoch session before it can reacquire the engine."""
+    state = get_state()
+    abort_response = {
+        "id": f"chatcmpl-epoch-{session_id[:8]}",
+        "object": "chat.completion",
+        "model": openai_request.get("model", ""),
+        "choices": [
+            {"index": 0, "message": {"role": "assistant", "content": ""}, "finish_reason": "abort"}
+        ],
+    }
+    metadata = _completion_metadata(session_info)
+    metadata.update(
+        {
+            "policy_epoch_cutoff": True,
+            "session_policy_namespace": session_namespace,
+            "session_policy_version": session_epoch,
+            "serving_policy_namespace": serving_namespace,
+            "serving_policy_version": serving_epoch,
+        }
+    )
+    state.storage.save_message(
+        session_id,
+        openai_request,
+        abort_response,
+        original_request=original_request,
+        model_requested=original_model,
+        model_used=openai_request.get("model", ""),
+        api_type=api_type.value,
+        task_id=session_info.task_id if session_info else None,
+        created_at=session_info.created_at.isoformat() if session_info else None,
+        metadata=metadata,
+        latency_ms=0.0,
+        streaming=False,
+    )
+    logger.info(
+        "policy identity cutoff: session %s identity=%s/%s serving=%s/%s; "
+        "rejected without generating",
+        session_id,
+        session_namespace,
+        session_epoch,
+        serving_namespace,
+        serving_epoch,
+    )
+    return JSONResponse(transformer.transform_response(abort_response, original_request))
+
+
 async def _handle_non_streaming(
     api_type: APIType,
     transformer: BaseTransformer,
@@ -879,7 +1196,11 @@ async def _handle_non_streaming(
         generation = await state.inflight.run(
             session_id,
             openai_request,
-            lambda: state.inference.completion(openai_request, trace_headers=_trace),
+            lambda: state.inference.completion(
+                openai_request,
+                trace_headers=_trace,
+                generation_guard=_generation_epoch_guard(state, session_info),
+            ),
         )
     except UpstreamError as exc:
         logger.warning("Non-streaming upstream error for session %s: %s", session_id, exc)
@@ -935,7 +1256,11 @@ async def _handle_streaming(
         generation = await state.inflight.run(
             session_id,
             non_stream_request,
-            lambda: state.inference.completion(non_stream_request, trace_headers=_trace),
+            lambda: state.inference.completion(
+                non_stream_request,
+                trace_headers=_trace,
+                generation_guard=_generation_epoch_guard(state, session_info),
+            ),
         )
     except UpstreamError as exc:
         logger.warning("Upstream error for streaming session %s: %s", session_id, exc)

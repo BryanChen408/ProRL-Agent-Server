@@ -11,6 +11,7 @@ import asyncio
 import json
 import logging
 import os
+from collections.abc import Callable
 from typing import Any
 
 import httpx
@@ -75,6 +76,7 @@ class InferenceClient:
         engine: InferenceEngine,
         *,
         liveness_timeout_seconds: float | None = None,
+        initially_paused: bool = False,
     ):
         self.base_url = base_url.rstrip("/")
         self.engine = engine
@@ -84,7 +86,9 @@ class InferenceClient:
             else self._read_liveness_timeout_seconds()
         )
         self._client: httpx.AsyncClient | None = None
-        self._generation_paused = False
+        # A gateway restarted in the middle of a weight transition must not briefly
+        # reopen inference before the rollout coordinator reconnects.
+        self._generation_paused = bool(initially_paused)
         self._inflight_generations = 0
         self._generation_drained = asyncio.Event()
         self._generation_drained.set()
@@ -168,7 +172,11 @@ class InferenceClient:
         return UpstreamTransportError(f"Upstream request failed: {type(exc).__name__}: {exc}")
 
     async def completion(
-        self, request: dict[str, Any], *, trace_headers: dict[str, str] | None = None
+        self,
+        request: dict[str, Any],
+        *,
+        trace_headers: dict[str, str] | None = None,
+        generation_guard: Callable[[], bool] | None = None,
     ) -> dict[str, Any]:
         """Non-streaming chat completion. Returns the full JSON response.
 
@@ -178,6 +186,11 @@ class InferenceClient:
         """
         await self._acquire_generation_slot()
         try:
+            # A request may have entered the gateway before pause and waited behind
+            # the condition while the serving epoch advanced.  Re-check at the exact
+            # engine-admission point so it cannot run with the next policy's weights.
+            if generation_guard is not None and not generation_guard():
+                raise UpstreamError("generation rejected by policy epoch fence")
             client = await self._get_client()
             from copy import deepcopy
 
