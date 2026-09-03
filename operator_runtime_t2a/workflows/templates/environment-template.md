@@ -2,16 +2,16 @@
 
 > ⚠️ **CANNBot 在 Step 1 填写本模板生成 `operators/{operator_name}/docs/environment.md`**
 >
-> 数据采集：加载 `/ascendc-env-check` skill，按 skill 指引完成 CANN 环境与 NPU 设备的检查。
+> 数据采集：使用 pipeline 注入的 `SOC_VERSION`、`ASCEND_HOME_PATH` 及 CANN 目录信息；不运行 `npu-smi`。
 >
 > **字段语义**：
 >
 > | 模板字段 | 取值来源 |
 > |---------|---------|
-> | 芯片型号 | NPU 设备检查输出的 Chip Name |
-> | SocVersion | NPU 设备检查输出（从 `npu-smi info` 推得；`aclrtGetSocName()` 仅运行期可用，env-check 阶段不调用） |
-> | 设备数 | NPU 设备检查输出的可用设备数量 |
-> | ASCEND_HOME_PATH | CANN 环境检查输出 |
+> | 芯片型号 | pipeline 与 `SOC_VERSION` 的平台映射 |
+> | SocVersion | 环境变量 `SOC_VERSION` |
+> | 设备数 | pipeline 分配的可见设备数 |
+> | ASCEND_HOME_PATH | 环境变量 `ASCEND_HOME_PATH` |
 > | CANN 版本 | CANN 环境检查输出 |
 > | CPU 架构目录 | `ls $ASCEND_HOME_PATH` 自查（aarch64-linux / x86_64-linux） |
 > | bisheng / kernel_operator.h / libs | 在 `$ASCEND_HOME_PATH/<arch>/...` 对应位置 `ls -l` / `test -x` 自查 |

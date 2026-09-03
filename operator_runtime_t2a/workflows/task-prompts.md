@@ -51,7 +51,6 @@
 - 请将质疑清单输出到 operators/{operator_name}/docs/WALKTHROUGH.md。
 
 【推荐 Skill】
-- /ascendc-blaze-best-practice — Blaze 路线时查阅组件选择、API 签名、组装代码
 - /ascendc-api-best-practices — 质疑 API 选择时查阅确认可行性
 - /ascendc-docs-search — 需要官方文档支撑质疑时使用
 
@@ -60,7 +59,7 @@
 
 | 开发路径 | 验证源 | 验证方法 |
 |---------|--------|---------|
-| Blaze 路线 | `/ascendc-blaze-best-practice` skill | 在 skill 文档和 assets/ 中验证 API 签名和模板参数 |
+| Blaze 路线 | 当前运行包不支持 | 标记为不支持，不猜测 API 签名或继续生成 |
 | 其他路线 | `$ASC_DEVKIT_DIR/docs/api/` | 禁止只读单个文件（如 `ReduceMax.md`）就下结论。必须用通配符搜索所有变体：`find "$ASC_DEVKIT_DIR/docs/api/" -name "{APIName}*.md" -type f`。同一 API 可能有多个文件（如 `ReduceMax.md` / `ReduceMax-35.md` / `ReduceMax-92.md`），功能不同。 |
 
 【验收标准】
@@ -179,7 +178,7 @@
 然后开始开发。
 
 【第一步：基于模板搭建工程骨架】
-加载 /ascendc-direct-invoke-template，基于验证过的工程模板创建项目文件（CMakeLists.txt、.asc 文件、头文件）。
+使用 prepare 已预生成的工程骨架（源模板：`.claude/workflows/templates/kernel_skeleton`）。
 禁止从零创建工程文件。搭建骨架后先编译通过（空 Kernel），再逐步添加算子逻辑。
 
 【渐进式开发策略】

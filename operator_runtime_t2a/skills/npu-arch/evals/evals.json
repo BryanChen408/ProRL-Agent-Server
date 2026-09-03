@@ -275,14 +275,13 @@
           "A2"
         ],
         "distractor_skills": [
-          "ascendc-env-check",
           "ascendc-api-best-practices",
           "ascendc-docs-search"
         ],
         "eval_mode": "text"
       },
       "prompt": "Ascend910B 和 Ascend950 的架构有什么区别？DAV_2201 和 DAV_3510 的 UB 容量分别是多少？",
-      "expected_output": "回复应正确激活 npu-arch skill，回答架构差异和 UB 容量：\n- DAV_2201（Ascend910B）：UB = 192 KB\n- DAV_3510（Ascend950）：UB = 248 KB\n- 架构差异：L0C 容量、BT 容量、数据格式支持、SIMT/SIMD 支持等\n即使在 ascendc-env-check、ascendc-api-best-practices 等相似 skill 共存的环境下，也应正确选择 npu-arch。",
+      "expected_output": "回复应正确激活 npu-arch skill，回答架构差异和 UB 容量：\n- DAV_2201（Ascend910B）：UB = 192 KB\n- DAV_3510（Ascend950）：UB = 248 KB\n- 架构差异：L0C 容量、BT 容量、数据格式支持、SIMT/SIMD 支持等\n即使在 ascendc-api-best-practices 等相似 skill 共存的环境下，也应正确选择 npu-arch。",
       "files": [],
       "expectations": [
         {
@@ -347,7 +346,7 @@
         "eval_mode": "text"
       },
       "prompt": "请介绍 npu-arch 技能的使用边界。它适合什么场景？不适合什么场景？如果要创建算子工程模板应该用什么技能？不需要执行任何操作，只需要介绍知识。",
-      "expected_output": "回复应说明 npu-arch 技能的适用边界：\n- 适合场景：架构判断与硬件能力识别（芯片映射、架构差异、硬件参数、数据格式、算力推导）\n- 不适合场景：算子目录结构、CMake 配置、文件命名约定等工程模板内容不在本技能范围内\n- 推荐替代：创建算子工程模板应使用 ascendc-direct-invoke-template（Kernel 直调工程）或 ascendc-registry-invoke-template（完整自定义算子工程）\n- 核心区别：npu-arch 提供架构知识查询，工程模板类技能提供项目脚手架",
+      "expected_output": "回复应说明 npu-arch 技能的适用边界：\n- 适合场景：架构判断与硬件能力识别（芯片映射、架构差异、硬件参数、数据格式、算力推导）\n- 不适合场景：算子目录结构、CMake 配置、文件命名约定等工程模板内容不在本技能范围内\n- 推荐替代：使用 prepare 预生成的 `.claude/workflows/templates/kernel_skeleton` 工程骨架\n- 核心区别：npu-arch 提供架构知识查询，kernel_skeleton 提供项目脚手架",
       "files": [],
       "expectations": [
         {

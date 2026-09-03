@@ -43,15 +43,13 @@
       "config": {
         "max_tokens": 120000,
         "distractor_skills": [
-          "ascendc-docs-gen",
           "ascendc-api-best-practices",
-          "ascendc-tiling-design",
-          "ascendc-env-check"
+          "ascendc-tiling-design"
         ],
         "eval_mode": "text"
       },
       "prompt": "我想查一下 Ascend C 中 Exp 和 Log API 的参数说明和使用示例，应该用什么工具搜索？",
-      "expected_output": "回复应正确激活 ascendc-docs-search skill，说明通过 `$ASC_DEVKIT_DIR/docs/zh/api/` 搜索 Exp 和 Log 的 API 文档，使用 `find` 命令查找所有变体，并在 `$ASC_DEVKIT_DIR/examples/` 中搜索使用示例。即使在 ascendc-docs-gen、ascendc-api-best-practices 等相似 skill 共存的环境下，也应正确选择 ascendc-docs-search。",
+      "expected_output": "回复应正确激活 ascendc-docs-search skill，说明通过 `$ASC_DEVKIT_DIR/docs/zh/api/` 搜索 Exp 和 Log 的 API 文档，使用 `find` 命令查找所有变体，并在 `$ASC_DEVKIT_DIR/examples/` 中搜索使用示例。即使在 ascendc-api-best-practices 等相似 skill 共存的环境下，也应正确选择 ascendc-docs-search。",
       "files": [],
       "expectations": []
     },

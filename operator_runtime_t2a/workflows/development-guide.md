@@ -22,7 +22,7 @@ s# Ascend C Kernel 直调开发指南
 
 ### 1.2 代码结构
 
-参考 `/ascendc-direct-invoke-template` 的 `add_kernel/add.asc`，标准结构包含：
+prepare 会从 `.claude/workflows/templates/kernel_skeleton` 预生成工程骨架，标准结构包含：
 
 **代码顺序**（严格遵循）：
 
@@ -34,7 +34,7 @@ s# Ascend C Kernel 直调开发指南
 5. main 函数（ACL 初始化 + Tiling 计算 + KernelCall + ACL 清理）
 ```
 
-> 实现时加载 `/ascendc-direct-invoke-template`，基于 add.asc 模板修改，不要从零编写。
+> 实现时基于 prepare 预生成的骨架修改，不要从零编写。
 
 **关键规范**：
 
@@ -208,7 +208,7 @@ make
 **自动化验证脚本**：
 ```bash
 bash workflows/scripts/init_operator_project.sh {operator_name}
-# 环境检查：加载 /ascendc-env-check skill 完成检查，按 workflows/templates/environment-template.md
+# 环境信息使用 pipeline 注入的 SOC_VERSION 和 ASCEND_HOME_PATH，不运行 npu-smi
 # 填写后生成 operators/{operator_name}/docs/environment.md
 python workflows/scripts/verify_cmake_config.py operators/{operator_name}/CMakeLists.txt
 ```
@@ -293,5 +293,5 @@ python workflows/scripts/verify_cmake_config.py operators/{operator_name}/CMakeL
 | 各类示例 | `find "$ASC_DEVKIT_DIR"/examples/ -type d -name "00_introduction"` | 加法、减法、多输入等 |
 | 调试示例 | `find "$ASC_DEVKIT_DIR"/examples/ -name "printf.asc"` | printf 调试方法 |
 | 设计模板 | `workflows/templates/design-template.md` | 设计文档模板（Architect 用） |
-| 工程模板 | `/ascendc-direct-invoke-template` skill | Kernel 直调工程模板（Developer 用） |
+| 工程模板 | `.claude/workflows/templates/kernel_skeleton` | prepare 预生成的 Kernel 直调工程骨架 |
 | 算子族方法论 | `/ascendc-tiling-design` 路由表 | 各算子族 methodology(Tiling 策略、特定 API 用法等),算子开发前必读对应族 |

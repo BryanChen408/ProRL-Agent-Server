@@ -86,13 +86,13 @@ python3 {skill_path}/scripts/msprof_perf_summary.py $GROUP_DIR ops/{operator_nam
 
 5. 同步把 `per_core_cycles.csv` 归档到同目录，方便二次分析
 
-归档完成后即结束本 Step 的职责。下游从 `summary.txt`（含逐核负载均衡段）、`op_summary_*.csv`、`per_core_cycles.csv` 读取指标后，按 **下文「主 Bound 判定」** 推导**主 bound 档位**；算子族级细化与报告专有条目见 **`/ascendc-performance-optimization`**。
+归档完成后即结束本 Step 的职责。下游从 `summary.txt`（含逐核负载均衡段）、`op_summary_*.csv`、`per_core_cycles.csv` 读取指标后，按 **下文「主 Bound 判定」** 推导**主 bound 档位**。
 
 ---
 
 ## 主 Bound 判定（msprof 归档）
 
-本节适用于 **`msprof` 经 Step 2～3 得到的归档目录**（`round_NNN/`）。判据与 `/ops-simulator` 流水图路径**同一套优先级表**，便于对接 `/ascendc-performance-optimization`。
+本节适用于 **`msprof` 经 Step 2～3 得到的归档目录**（`round_NNN/`）。
 
 > MC² 多 rank 算子同样使用本节判定规则，但需额外注意 MTE2 污染问题（见 [MC² 特有分析](#mc-特有分析)）。
 
@@ -100,13 +100,13 @@ python3 {skill_path}/scripts/msprof_perf_summary.py $GROUP_DIR ops/{operator_nam
 
 | 项目 | 说明 |
 |------|------|
-| **输入** | 从归档中的 `op_summary_*.csv`、`summary.txt` 等抽取的**单核侧**各流水线 **busy 占 case（或 task）总时长** 的百分比；口径须与 `/ops-simulator` 流水分析中的「占 case」可比 |
+| **输入** | 从归档中的 `op_summary_*.csv`、`summary.txt` 等抽取的**单核侧**各流水线 **busy 占 case（或 task）总时长** 的百分比 |
 | **不适用** | msprof 聚合指标**无**可对照流水图的气泡时间；报告中气泡列标注「不适用」，**不得**填写气泡数值 |
 | **输出** | **主 bound 档位**：`MTE2 BOUND` / `CUBE BOUND` / `VEC BOUND` / `FIXP BOUND` / `MTE3 BOUND` / `SCALAR BOUND` / **无 bound** |
 
 各流水线 busy 占比的**抽取与列映射**以本文 Step 3 产物及 [`csv_fields_reference.md`](csv_fields_reference.md) 为准；若归档 CSV 表头与文档示例不一致，**以实际表头为准**。
 
-### 判定规则（与 `/ops-simulator` 一致）
+### 判定规则
 
 在已得到各流水线 busy 占比后，**从上到下**匹配**第一条成立**：
 

@@ -144,16 +144,16 @@ log "B2  固定入口全链路(模板派生的 3_Add kernel)"
 P="$W/b2"; mkdir -p "$P/$OP/kernel" "$P/input" "$P/output/submission" "$P/judge_out"
 cp "$DATASET/$OP.py"   "$P/input/$OP.py";   cp "$DATASET/$OP.py"   "$P/$OP/model.py"
 cp "$DATASET/$OP.json" "$P/input/$OP.json"; cp "$DATASET/$OP.json" "$P/$OP/$OP.json"
-TPL="$W/canonical/skills/tilelang2ascend-operator-project-init/templates/ascend-kernel"
+TPL="$W/canonical/workflows/templates/kernel_skeleton/kernel"
 mkdir -p "$P/$OP/kernel/op_host" "$P/$OP/kernel/op_kernel" "$P/$OP/kernel/utils"
-cp "$TPL/csrc/utils/torch_kernel_helper.h" "$P/$OP/kernel/utils/"
-cp "$TPL/csrc/CMakeLists.txt"              "$P/$OP/kernel/CMakeLists.txt"
-cp "$TPL/python/ascend_kernel/setup.py"    "$P/$OP/kernel/setup.py" 2>/dev/null
+cp "$TPL/utils/torch_kernel_helper.h" "$P/$OP/kernel/utils/"
+sed 's/{op_name}/add_alpha/g' "$TPL/CMakeLists.txt" > "$P/$OP/kernel/CMakeLists.txt"
+sed 's/{op_name}/add_alpha/g' "$TPL/setup.py" > "$P/$OP/kernel/setup.py"
 
 # ---- kernel:照 helloworld 改(half→float,加 alpha) --------------------
 # 单核 + TILE=128 float(512B,32B 对齐)。数据集 5 个 case 的元素数
 # 128/256/512/32768/131072 都是 128 的整数倍,故无尾块。
-cat > "$P/$OP/kernel/op_kernel/add_alpha.cpp" <<'CPP'
+cat > "$P/$OP/kernel/op_kernel/add_alpha_kernel.cpp" <<'CPP'
 #include "kernel_operator.h"
 constexpr int32_t BUFFER_NUM = 2;
 constexpr int32_t TILE = 128;

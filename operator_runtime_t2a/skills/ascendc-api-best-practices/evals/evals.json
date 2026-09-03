@@ -43,15 +43,12 @@
       "config": {
         "max_tokens": 120000,
         "distractor_skills": [
-          "ascendc-docs-search",
-          "ascendc-docs-gen",
-          "ascendc-perf-optimize",
-          "ascendc-code-review"
+          "ascendc-docs-search"
         ],
         "eval_mode": "text"
       },
       "prompt": "Ascend C 的 Compare API 对 count 参数有什么对齐要求？不满足会怎样？",
-      "expected_output": "回复应正确激活 ascendc-api-best-practices skill，说明 Compare API 要求 count 个元素所占空间必须 256 字节对齐（float 类型下为 64 的倍数）。应说明不满足对齐会导致 API 行为异常，并给出 Padding 处理策略：计算对齐大小、用极值（如 -FLT_MAX）填充 padding 区域、API 调用使用对齐大小、CopyOut 只输出有效数据。即使在 ascendc-docs-search、ascendc-docs-gen 等相似 skill 共存的环境下，也应正确选择 ascendc-api-best-practices。",
+      "expected_output": "回复应正确激活 ascendc-api-best-practices skill，说明 Compare API 要求 count 个元素所占空间必须 256 字节对齐（float 类型下为 64 的倍数）。应说明不满足对齐会导致 API 行为异常，并给出 Padding 处理策略：计算对齐大小、用极值（如 -FLT_MAX）填充 padding 区域、API 调用使用对齐大小、CopyOut 只输出有效数据。即使在 ascendc-docs-search 等相似 skill 共存的环境下，也应正确选择 ascendc-api-best-practices。",
       "files": [],
       "expectations": []
     },

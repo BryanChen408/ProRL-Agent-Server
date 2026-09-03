@@ -120,7 +120,7 @@ def main():
         print("=" * 70)
         print()
         print("📖 请查阅 CMake 配置指南：")
-        print("   /ascendc-direct-invoke-template skill 的 add_kernel/CMakeLists.txt")
+        print("   .claude/workflows/templates/kernel_skeleton/kernel/CMakeLists.txt")
         print()
         print("💡 常见问题：")
         print("   1. 缺少 ASC 语言：project(... LANGUAGES ASC CXX)")

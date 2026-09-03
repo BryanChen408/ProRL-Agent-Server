@@ -2,7 +2,7 @@
 
 > **适用路径**：Ascend C **Matmul 高阶 API**（`MatmulImpl` + Host 侧 `MatmulApiTiling::GetTiling`）。
 > **适用平台**：Atlas A2 / A3（Ascend910B、Ascend910_93，NpuArch `DAV_2201`）。
-> **不适用**：Ascend 950（`DAV_3510`）→ 使用 `ascendc-blaze-best-practice` skill（Blaze / tensor_api 路径）。
+> **不适用**：Ascend 950（`DAV_3510`）；当前运行包不提供 Blaze / tensor_api 开发资料。
 > **扩展策略**：当新架构出现时，按新架构 NpuArch 新增 reference 文件或更新现有平台适配说明。
 >
 > 适用算子：MatMul、BatchMatMul、MatMulBias 等基于 `MatmulImpl` 的单组矩阵乘。

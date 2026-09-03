@@ -61,10 +61,8 @@ ACLNN_ERR_PARAM_INVALID (161002)
 
 **调试流程**：
 1. 根据错误码判断问题参数
-2. 使用 `ascendc-ut-generator` 技能生成参数校验测试
+2. 根据算子接口编写最小参数校验 UT
 3. 运行 UT 定位具体参数问题
-
-**详细 UT 开发与运行**：参考 `ascendc-ut-generator` 技能
 
 ##### 361xxx - Runtime错误
 
@@ -101,14 +99,12 @@ ACLNN_ERR_INNER_TILING_ERROR
 
 **调试流程**：
 1. 记录 ST 失败的输入参数（shape/dtype/属性）
-2. 使用 `ascendc-ut-generator` 技能生成 Tiling 逻辑测试
+2. 根据失败输入编写覆盖相应 TilingKey 分支的最小 UT
 3. 运行 UT 验证 Tiling 逻辑是否正确
 
 **快速诊断**：
 - UT 通过 → Tiling 逻辑正确，检查 ST 环境/Kernel
 - UT 失败 → Tiling 逻辑有问题，修复 Host 代码
-
-**详细 UT 开发与运行**：参考 `ascendc-ut-generator` 技能
 
 ##### 561003 - Kernel查找失败
 
