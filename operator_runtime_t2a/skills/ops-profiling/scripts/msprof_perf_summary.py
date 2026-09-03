@@ -1214,34 +1214,38 @@ def _run_msprof_standard(wrapper_script: str, output_dir: str, device_id: int, w
     return str(prof_dirs[-1]), None
 
 
-def _run_msprof_quick(wrapper_script: str, output_dir: str, device_id: int, warmup: int = 3):
+def _run_msprof_quick(wrapper_script: str, warmup_script: Optional[str],
+                      output_dir: str, device_id: int):
     """快速模式：只采集 1 轮（不采集 7 个 aic-metrics，只获取 kernel 时间）。
 
     直接调用 msprof 命令（不通过 msprof_profile_run.sh，避免循环调用）。
     使用 msprof --task-time=on --ascendcl=on，不设置 --aic-metrics。
 
-    warmup 在 msprof 外部执行：先单独跑 warmup 次 wrapper 预热 NPU，
+    warmup 在 msprof 外部执行：单独跑一次含全部预热轮次的 wrapper，
     msprof 只采集正式 timed run，确保 task_time.csv 不含预热数据。
     """
-    wrapper_path = os.path.join(output_dir, "_wrapper.py")
     os.makedirs(output_dir, exist_ok=True)
-    with open(wrapper_path, "w", encoding="utf-8") as f:
-        f.write(wrapper_script)
-
     env = os.environ.copy()
 
     # Warmup: 在 msprof 外部执行，不采集。wrapper 崩溃必须在此透出真实报错 ——
     # 否则建模/取数阶段的 TypeError 被吞掉,下游只剩 "no task_time or api_statistic
     # csv found",wrapper 级故障会被伪装成采集失败。
-    for _ in range(warmup):
-        wr = subprocess.run([sys.executable, wrapper_path],
+    if warmup_script is not None:
+        warmup_path = os.path.join(output_dir, "_warmup.py")
+        with open(warmup_path, "w", encoding="utf-8") as f:
+            f.write(warmup_script)
+        wr = subprocess.run([sys.executable, warmup_path],
                             capture_output=True, text=True, env=env)
+        Path(warmup_path).unlink(missing_ok=True)
         if wr.returncode != 0:
             app_log = _save_app_output(output_dir, wr.stdout, wr.stderr)
             crash = _extract_app_crash(wr.stdout, wr.stderr) or (wr.stderr or wr.stdout or "")[-400:]
             return None, f"wrapper crashed: {crash} (app log: {app_log})"
 
     # Measurement: msprof 只采集正式 timed run
+    wrapper_path = os.path.join(output_dir, "_wrapper.py")
+    with open(wrapper_path, "w", encoding="utf-8") as f:
+        f.write(wrapper_script)
     cmd = [
         "msprof",
         f"--output={output_dir}",
@@ -1659,9 +1663,15 @@ def _measure_one_impl_quick(mi: _MeasureInput):
         wrapper = _generate_wrapper_script(_WrapperConfig(
             mi.out_dir, mi.case_idx, mi.impl, mi.args.seed, mi.device_id,
             repeats - 1, mi.jsonl_case, mi.case_cache_path))
+        warmup_wrapper = None
+        if mi.args.warmup > 0:
+            warmup_wrapper = _generate_wrapper_script(_WrapperConfig(
+                mi.out_dir, mi.case_idx, mi.impl, mi.args.seed, mi.device_id,
+                mi.args.warmup - 1, mi.jsonl_case, mi.case_cache_path))
         tmpdir = f"/tmp/msprof_quick_{impl_abbr}_{mi.out_dir.name}_c{mi.case_idx}"
         _cleanup_prof_dirs(tmpdir)
-        prof_dir, err = _run_msprof_quick(wrapper, tmpdir, mi.device_id, mi.args.warmup)
+        prof_dir, err = _run_msprof_quick(
+            wrapper, warmup_wrapper, tmpdir, mi.device_id)
         if not prof_dir:
             continue
 

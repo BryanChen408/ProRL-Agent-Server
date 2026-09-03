@@ -283,6 +283,36 @@ def test_extract_app_crash_handles_msprof_zero_exit_pattern():
     assert module._extract_app_crash("", output) == "ValueError: invalid generated case"
 
 
+def test_quick_warmup_uses_one_python_process_for_all_rounds(tmp_path, monkeypatch):
+    module = load_msprof_summary()
+    calls = []
+
+    def fake_run(cmd, **_kwargs):
+        script = Path(cmd[-1])
+        calls.append((cmd[0], script.name, script.read_text(encoding="utf-8")))
+        if cmd[0] == "msprof":
+            output_dir = Path(next(x.split("=", 1)[1] for x in cmd if x.startswith("--output=")))
+            (output_dir / "PROF_GROUP_1").mkdir(parents=True)
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(module.subprocess, "run", fake_run)
+    monkeypatch.setattr(
+        module, "_parse_msprof_duration_quick", lambda _path: (8.0, "kernel", None)
+    )
+    out_dir = tmp_path / f"op_{tmp_path.name}"
+    args = SimpleNamespace(retry=0, repeats=1, warmup=3, seed=17)
+
+    duration, error, _ = module._measure_one_impl_quick(
+        module._MeasureInput(out_dir, 0, "reference", args, 0)
+    )
+
+    assert duration == 8.0 and error is None
+    assert len(calls) == 2
+    assert calls[0][1] == "_warmup.py" and "range(2)" in calls[0][2]
+    assert calls[1][0] == "msprof" and calls[1][1] == "_wrapper.py"
+    assert "range(0)" in calls[1][2]
+
+
 def test_performance_target_is_uniformly_1_1x():
     module = load_msprof_summary()
     assert module.PERF_TARGET_SPEEDUP == 1.1
