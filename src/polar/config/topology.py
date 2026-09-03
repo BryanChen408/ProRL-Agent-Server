@@ -107,6 +107,11 @@ class GatewayConfig(_StrictModel):
     completion_persistence: _CompletionPersistenceConfig = Field(
         default_factory=_CompletionPersistenceConfig
     )
+    # ── Per-session trace artifacts ──
+    session_trace_json: bool = True
+    session_trace_wandb: bool = False
+    session_trace_wandb_project: str = "polar-session-traces"
+    persist_traces_dir: str | None = None
 
     @field_validator("rollout_server_url")
     @classmethod

@@ -2,13 +2,14 @@ from __future__ import annotations
 
 import asyncio
 from types import SimpleNamespace
+from unittest.mock import MagicMock
 
+import polar.gateway.server as gateway_server
 from polar.gateway.inflight import InflightGenerationTracker, request_fingerprint
 from polar.gateway.node import GatewayNodeManager
 from polar.gateway.proxy import UpstreamError
 from polar.gateway.storage import SessionStore
 from polar.gateway.transform.openai_chat import OpenAIChatTransformer
-import polar.gateway.server as gateway_server
 
 
 def test_request_fingerprint_ignores_stream_transport_fields() -> None:
@@ -166,9 +167,19 @@ def test_non_streaming_handler_coalesces_duplicate_request_and_saves_once(monkey
         storage = SessionStore()
         release = asyncio.Event()
         calls = 0
+        node_manager = MagicMock()
+        node_manager.compute_agent_side_gap_ms.return_value = 0.0
 
         class FakeInference:
             base_url = "http://engine"
+            arrival_time = None
+            last_acquire_wait_ms = 0.0
+            last_prepare_ms = 0.0
+            last_sglang_wait_ms = 0.0
+            last_normalize_ms = 0.0
+            last_roundtrip_ms = 0.0
+            last_prompt_tokens = 0
+            last_response_tokens = 0
 
             async def completion(
                 self,
@@ -193,6 +204,7 @@ def test_non_streaming_handler_coalesces_duplicate_request_and_saves_once(monkey
                 inference=FakeInference(),
                 inflight=tracker,
                 storage=storage,
+                node_manager=node_manager,
             ),
         )
 
@@ -238,6 +250,7 @@ def test_non_streaming_handler_coalesces_duplicate_request_and_saves_once(monkey
         session = storage.load_completion_session("sess1")
         assert len(session.completions) == 1
         assert tracker.status()["coalesced_request_count"] == 1
+        assert node_manager.record_llm_call.call_count == 1
 
     asyncio.run(_run())
 

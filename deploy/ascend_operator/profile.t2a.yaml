@@ -59,6 +59,10 @@ gateway:
   max_init_workers: 8
   max_run_workers: 64
   max_postrun_workers: 16
+  # One Perfetto/Chrome Trace JSON per completed rollout session.
+  # Relative paths are resolved under this run's output directory.
+  session_trace_json: true
+  persist_traces_dir: perfetto_traces
   completion_persistence:
     enabled: true
     max_field_bytes: 67108864

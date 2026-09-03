@@ -144,6 +144,11 @@ def _build_state(topology: TopologyConfig, node_id: str | None) -> GatewayState:
         session_base_dir=os.environ.get("POLAR_SESSION_BASE_DIR") or None,
         inflight=inflight,
         session_affinity_release_url=node.session_affinity_release_url,
+        # ── Per-session trace artifacts ──
+        enable_session_trace_json=topology.gateway.session_trace_json,
+        enable_session_trace_wandb=topology.gateway.session_trace_wandb,
+        session_trace_wandb_project=topology.gateway.session_trace_wandb_project,
+        persist_traces_dir=topology.gateway.persist_traces_dir,
     )
     return GatewayState(
         topology=topology,
@@ -992,6 +997,10 @@ async def proxy_request(request: Request, path: str):
     except InvalidSessionIdError as exc:
         return JSONResponse({"error": str(exc)}, status_code=400)
 
+    # ── 12: record request arrival time ──
+    import time as _time_proxy
+    state.inference.arrival_time = _time_proxy.monotonic()
+
     original_model = extract_model(api_type, body)
     transformer = state.transform_manager.get(api_type)
     session_info = state.session_registry.get(session_id)
@@ -1183,6 +1192,8 @@ async def _handle_non_streaming(
     original_model: str,
     session_info: Any | None,
 ) -> JSONResponse:
+    import time as _time
+
     state = get_state()
     if state.storage.is_session_closed(session_id):
         return _closed_session_response(api_type, session_id)
@@ -1208,6 +1219,8 @@ async def _handle_non_streaming(
         return _upstream_error_response(api_type, exc)
     response = generation.response
 
+    # ── I: storage + format ──
+    t_post_start = _time.monotonic()
     if generation.should_save:
         metadata = _completion_metadata(session_info)
         metadata["generation_fingerprint"] = generation.fingerprint
@@ -1228,6 +1241,51 @@ async def _handle_non_streaming(
             streaming=False,
         )
     transformed = transformer.transform_response(response, original_request)
+    t_post_end = _time.monotonic()
+    post_ms = (t_post_end - t_post_start) * 1000.0
+
+    if generation.should_save:
+        # Record exactly once when duplicate requests share an in-flight generation.
+        state.node_manager.record_llm_call(
+            session_id,
+            acquire_wait_ms=state.inference.last_acquire_wait_ms,
+            prepare_ms=state.inference.last_prepare_ms,
+            sglang_wait_ms=state.inference.last_sglang_wait_ms,
+            normalize_ms=state.inference.last_normalize_ms,
+            roundtrip_ms=state.inference.last_roundtrip_ms,
+            prompt_tokens=state.inference.last_prompt_tokens,
+            response_tokens=state.inference.last_response_tokens,
+        )
+        state.node_manager.patch_last_llm_post_ms(session_id, post_ms)
+        # ── agent-side gap (Stage 18+19: tool execution + client overhead) ──
+        agent_side_gap_ms = state.node_manager.compute_agent_side_gap_ms(
+            session_id, state.inference.arrival_time or _time.monotonic()
+        )
+        state.node_manager.patch_last_llm_agent_side_gap_ms(
+            session_id,
+            agent_side_gap_ms,
+            original_request,
+        )
+        # ── 17: compute total gateway processing time ──
+        gateway_total_ms = 0.0
+        if state.inference.arrival_time is not None:
+            gateway_total_ms = (t_post_end - state.inference.arrival_time) * 1000.0
+        state.node_manager.patch_last_llm_gateway_total_ms(session_id, gateway_total_ms)
+        # Mark when the response departs back to the agent (for next call's agent gap)
+        state.node_manager.mark_llm_departure(session_id, t_post_end)
+        logger.info(
+            "llm_call session=%s acquire=%.0f prep=%.0f sglang=%.0f norm=%.0f post=%.0f gw_total=%.0f p_t=%d r_t=%d",
+            session_id,
+            state.inference.last_acquire_wait_ms,
+            state.inference.last_prepare_ms,
+            state.inference.last_sglang_wait_ms,
+            state.inference.last_normalize_ms,
+            post_ms,
+            gateway_total_ms,
+            state.inference.last_prompt_tokens,
+            state.inference.last_response_tokens,
+        )
+
     return JSONResponse(transformed)
 
 
@@ -1268,6 +1326,8 @@ async def _handle_streaming(
         return _upstream_error_response(api_type, exc)
     response = generation.response
 
+    import time as _time_stream
+    t_post_stream_start = _time_stream.monotonic()
     if generation.should_save:
         metadata = _completion_metadata(session_info)
         metadata["generation_fingerprint"] = generation.fingerprint
@@ -1287,6 +1347,39 @@ async def _handle_streaming(
             engine_url=state.inference.base_url,
             streaming=True,
         )
+    t_post_stream_end = _time_stream.monotonic()
+    state.inference.last_post_ms = (t_post_stream_end - t_post_stream_start) * 1000.0
+
+    if generation.should_save:
+        # Record LLM call timing on the active session.
+        state.node_manager.record_llm_call(
+            session_id,
+            acquire_wait_ms=state.inference.last_acquire_wait_ms,
+            prepare_ms=state.inference.last_prepare_ms,
+            sglang_wait_ms=state.inference.last_sglang_wait_ms,
+            normalize_ms=state.inference.last_normalize_ms,
+            roundtrip_ms=state.inference.last_roundtrip_ms,
+            prompt_tokens=state.inference.last_prompt_tokens,
+            response_tokens=state.inference.last_response_tokens,
+        )
+        # ── 17: compute total gateway processing time ──
+        gateway_total_ms = 0.0
+        if state.inference.arrival_time is not None:
+            gateway_total_ms = (t_post_stream_end - state.inference.arrival_time) * 1000.0
+        # Patch post_ms and gateway_total_ms onto the last recorded call.
+        state.node_manager.patch_last_llm_post_ms(session_id, state.inference.last_post_ms)
+        state.node_manager.patch_last_llm_gateway_total_ms(session_id, gateway_total_ms)
+        # ── agent-side gap (Stage 18+19: tool execution + client overhead) ──
+        agent_side_gap_ms = state.node_manager.compute_agent_side_gap_ms(
+            session_id, state.inference.arrival_time or _time_stream.monotonic()
+        )
+        state.node_manager.patch_last_llm_agent_side_gap_ms(
+            session_id,
+            agent_side_gap_ms,
+            original_request,
+        )
+        # Mark when the response departs back to the agent (for next call's agent gap).
+        state.node_manager.mark_llm_departure(session_id, t_post_stream_end)
 
     synthetic_chunk = _response_to_stream_chunk(response)
     stream_state = transformer.create_stream_state(original_request)

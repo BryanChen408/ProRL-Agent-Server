@@ -93,6 +93,18 @@ class InferenceClient:
         self._generation_drained = asyncio.Event()
         self._generation_drained.set()
         self._generation_condition = asyncio.Condition()
+        # Per-call timing (reset on each completion() call)
+        self.last_acquire_wait_ms: float = 0.0     # B: semaphore wait
+        self.last_prepare_ms: float = 0.0          # C: prepare_request
+        self.last_sglang_wait_ms: float = 0.0      # D+E+F+G: httpx→SGLang→response
+        self.last_normalize_ms: float = 0.0        # H: normalize_response
+        self.last_roundtrip_ms: float = 0.0         # t0→t2 (不含 acquire, 不含 storage)
+        self.last_prompt_tokens: int = 0            # prompt token count
+        self.last_response_tokens: int = 0          # response token count
+        self.last_post_ms: float = 0.0              # I: storage + response formatting
+        # 12 & 17: Agent↔Gateway boundary timing
+        self.arrival_time: float | None = None      # 12: request arrived at gateway
+        self.gateway_total_ms: float = 0.0          # 12→17: total gateway processing
 
     @classmethod
     def _read_liveness_timeout_seconds(cls) -> float:
@@ -178,27 +190,48 @@ class InferenceClient:
         trace_headers: dict[str, str] | None = None,
         generation_guard: Callable[[], bool] | None = None,
     ) -> dict[str, Any]:
-        """Non-streaming chat completion. Returns the full JSON response.
+        """Non-streaming chat completion with per-phase timing.
 
         ``trace_headers`` (e.g. ``x-polar-trace-id``) are forwarded to the engine so the
         engine-side per-request logger can join back to this gateway completion. Purely
         observability -- never affects generation.
+
+        Timing segments (all in milliseconds):
+          B. acquire_wait_ms  — semaphore wait before request processing
+          C. prepare_ms       — deepcopy + engine.prepare_request
+          D-G. sglang_wait_ms — httpx POST → SGLang (prefill+decode) → response
+          H. normalize_ms     — engine.normalize_response
+          I. (post_ms)        — save_message + transform_response (in server.py)
         """
+        import time as _time
+        from copy import deepcopy
+
+        # ── B: acquire slot ──
+        t_acquire_start = _time.monotonic()
         await self._acquire_generation_slot()
+        t_acquire_end = _time.monotonic()
+
         try:
             # A request may have entered the gateway before pause and waited behind
-            # the condition while the serving epoch advanced.  Re-check at the exact
+            # the condition while the serving epoch advanced. Re-check at the exact
             # engine-admission point so it cannot run with the next policy's weights.
             if generation_guard is not None and not generation_guard():
                 raise UpstreamError("generation rejected by policy epoch fence")
-            client = await self._get_client()
-            from copy import deepcopy
 
+            client = await self._get_client()
+
+            # ── C: prepare ──
+            t_prepare_start = _time.monotonic()
             request_copy = deepcopy(request)
             request_copy.pop("stream", None)
             request_copy["stream"] = False
             request_copy = self.engine.prepare_request(request_copy)
-            headers = {"Content-Type": "application/json", "x-polar-engine-url": self.base_url}
+            t_prepare_end = _time.monotonic()
+
+            headers = {
+                "Content-Type": "application/json",
+                "x-polar-engine-url": self.base_url,
+            }
             if trace_headers:
                 headers.update({str(k): str(v) for k, v in trace_headers.items()})
                 # 引擎会话亲和:vime 的 PD/LB proxy 收到 x-session-id 时,把同一 session 的每轮
@@ -207,17 +240,20 @@ class InferenceClient:
                 # gateway 自管 session id 但从不下发,这条亲和路径从上线起没被走到过。session id
                 # 已在 x-polar-trace-id 里(格式 "{session_id}:{turn_seq}"),取冒号前段补发。
                 # 无 trace-id → 不补,行为不变(PD 分离功能零影响)。
-                _trace_id = headers.get("x-polar-trace-id", "")
-                if _trace_id and "x-session-id" not in headers:
-                    _session_id = _trace_id.rsplit(":", 1)[0]
-                    if _session_id:
-                        headers["x-session-id"] = _session_id
+                trace_id = headers.get("x-polar-trace-id", "")
+                if trace_id and "x-session-id" not in headers:
+                    session_id = trace_id.rsplit(":", 1)[0]
+                    if session_id:
+                        headers["x-session-id"] = session_id
+
+            # ── D-G: SGLang inference ──
             try:
                 resp = await client.post(
                     "/v1/chat/completions",
                     json=request_copy,
                     headers=headers,
                 )
+                t_sglang_end = _time.monotonic()
             except httpx.RequestError as exc:
                 raise self._translate_transport_error(exc) from exc
         finally:
@@ -228,7 +264,26 @@ class InferenceClient:
             self._release_generation_slot()
 
         await self._raise_for_status(resp)
-        return self.engine.normalize_response(resp.json())
+
+        # ── H: normalize ──
+        t_normalize_start = _time.monotonic()
+        result = self.engine.normalize_response(resp.json())
+        t_normalize_end = _time.monotonic()
+
+        # ── Store per-phase timing ──
+        self.last_acquire_wait_ms = (t_acquire_end - t_acquire_start) * 1000.0
+        self.last_prepare_ms      = (t_prepare_end - t_prepare_start) * 1000.0
+        self.last_sglang_wait_ms  = (t_sglang_end - t_prepare_end) * 1000.0
+        self.last_normalize_ms    = (t_normalize_end - t_normalize_start) * 1000.0
+        self.last_roundtrip_ms    = (t_normalize_end - t_acquire_end) * 1000.0
+
+        # ── Extract token counts ──
+        usage = result.get("usage", {}) if isinstance(result, dict) else {}
+        self.last_prompt_tokens = int(usage.get("prompt_tokens", 0))
+        choice = (result.get("choices", [{}]) or [{}])[0] if isinstance(result, dict) else {}
+        self.last_response_tokens = len(choice.get("token_ids", []) or [])
+
+        return result
 
     async def _acquire_generation_slot(self) -> None:
         async with self._generation_condition:

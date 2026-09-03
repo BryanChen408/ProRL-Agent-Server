@@ -77,6 +77,9 @@ class ManagedSession:
     execution_deadline: float | None = None
     stage: SessionStage = SessionStage.INIT
     inflight: bool = False
+    # Timing: when the last LLM response departed back to the agent.
+    # Used to compute agent_side_gap_ms between consecutive LLM calls.
+    last_llm_departure_at: float | None = None
 
     @property
     def session_id(self) -> str:

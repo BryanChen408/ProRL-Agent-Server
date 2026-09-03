@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import os
+import time as _time_module
 from pathlib import Path
 
 from polar.runtime.ascend import (
@@ -39,6 +40,11 @@ class DockerRuntime(BaseRuntime):
         self._container_name = f"polar-{safe_name}"
         self._chmod_needed: bool | None = None
         self._npu_lock: CardLock | None = None  # held physical NPU card (Ascend), released on stop()
+        # ── Docker operation timing (ms) ──
+        self.docker_create_ms: float = 0.0
+        self.docker_start_ms: float = 0.0
+        self.docker_kill_ms: float = 0.0
+        self.docker_rm_ms: float = 0.0
 
     @property
     def runtime_id(self) -> str:
@@ -115,16 +121,20 @@ class DockerRuntime(BaseRuntime):
                 create_args.extend(ascend_mount_create_args({**ascend, "env": env}))
                 logger.info("ascend: %s -> mount-only passthrough", self._container_name)
         create_args.extend([self.spec.image, "sleep", "infinity"])
+        t0 = _time_module.monotonic()
         rc, _, stderr = await self._run_local_command(
             *create_args, capture=True, timeout=self._START_TIMEOUT,
         )
+        self.docker_create_ms = (_time_module.monotonic() - t0) * 1000.0
         if rc != 0:
             self._release_npu_lock()
             raise RuntimeError(f"docker create failed with exit code {rc}: {stderr}")
+        t1 = _time_module.monotonic()
         rc, _, stderr = await self._run_local_command(
             "docker", "start", self._container_name,
             capture=True, timeout=self._START_TIMEOUT,
         )
+        self.docker_start_ms = (_time_module.monotonic() - t1) * 1000.0
         if rc != 0:
             await self.stop()
             raise RuntimeError(f"docker start failed with exit code {rc}: {stderr}")
@@ -159,14 +169,18 @@ class DockerRuntime(BaseRuntime):
             except Exception:
                 logger.warning("chmod cleanup failed for %s", self._container_name)
         # kill first (instant SIGKILL), then rm to remove metadata.
+        t0 = _time_module.monotonic()
         await self._run_local_command(
             "docker", "kill", self._container_name,
             timeout=self._STOP_TIMEOUT,
         )
+        self.docker_kill_ms = (_time_module.monotonic() - t0) * 1000.0
+        t1 = _time_module.monotonic()
         rc, _, stderr = await self._run_local_command(
             "docker", "rm", "-f", self._container_name,
             timeout=self._STOP_TIMEOUT, capture=True,
         )
+        self.docker_rm_ms = (_time_module.monotonic() - t1) * 1000.0
         if rc != 0:
             logger.warning(
                 "docker rm -f failed for %s (rc=%s): %s",

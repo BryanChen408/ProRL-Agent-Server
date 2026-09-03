@@ -156,18 +156,53 @@ class SessionDispatchResponse(BaseModel):
 class SessionTiming(BaseModel):
     """Per-session durations in milliseconds.
 
-    Public session timing used for rollout metrics. `register_to_init_queue_ms`
-    captures gateway-side waiting before INIT starts; the other three fields
-    cover runtime startup + prepare, agent harness execution, and post-run work
-    (build/eval/teardown).
+    Top-level fields (init_ms, run_ms, postrun_ms) are kept for backward
+    compatibility and aggregate the finer breakdown fields below.  Custom
+    profilers can read the `_<stage>_ms` fields directly to get per-phase
+    durations without parsing marks; the coarse fields are computed as sums
+    of their children when the children are populated.
     """
 
     model_config = ConfigDict(extra="forbid")
 
+    # ── coarse (backward-compatible aggregates) ──
     register_to_init_queue_ms: float = 0.0
     init_ms: float = 0.0
     run_ms: float = 0.0
     postrun_ms: float = 0.0
+
+    # ── INIT breakdown ──
+    init_runtime_create_ms: float = 0.0   # create_runtime + runtime.start()
+    init_docker_create_ms: float = 0.0    # docker create (subset of runtime_create)
+    init_docker_start_ms: float = 0.0     # docker start  (subset of runtime_create)
+    init_prepare_ms: float = 0.0          # prepare actions (upload + exec)
+
+    # ── READY wait ──
+    ready_wait_ms: float = 0.0            # init finished → run started
+
+    # ── RUN breakdown ──
+    run_harness_setup_ms: float = 0.0     # harness.setup()
+    run_agent_exec_ms: float = 0.0        # agent command execution (total)
+    run_harness_postprocess_ms: float = 0.0  # harness.postprocess()
+
+    # ── LLM interaction (within run) ──
+    llm_call_count: int = 0               # total LLM calls this session
+    llm_total_ms: float = 0.0             # aggregate SGLang wait time
+    llm_request_total_ms: float = 0.0     # aggregate full round-trip (gateway→SGLang→gateway)
+    llm_agent_side_total_ms: float = 0.0  # aggregate tool + client overhead between LLM calls
+    llm_calls: list[dict] = []            # per-call timing + classified agent_actions
+    tool_execs: list[dict] = []           # per-tool-exec detail: [{"idx":0, "command":"bash ...", "duration_ms":..., "exit_code":0}, ...]
+
+    # ── POSTRUN breakdown ──
+    postrun_build_ms: float = 0.0         # trajectory building
+    postrun_eval_ms: float = 0.0          # evaluator.evaluate()
+    postrun_teardown_ms: float = 0.0      # stop runtimes + cleanup
+    postrun_docker_kill_ms: float = 0.0   # docker kill  (subset of teardown)
+    postrun_docker_rm_ms: float = 0.0     # docker rm -f (subset of teardown)
+    postrun_push_result_ms: float = 0.0   # POST callback to rollout server
+
+    # ── wall-clock total ──
+    total_ms: float = 0.0                 # dispatch_started → return_finished
 
 
 class SessionResult(BaseModel):
