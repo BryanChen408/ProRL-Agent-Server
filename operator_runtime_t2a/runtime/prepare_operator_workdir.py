@@ -13,7 +13,9 @@ import json
 import keyword
 import operator
 import re
+import shlex
 import shutil
+import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -40,8 +42,8 @@ def _assert_upstream_paths(workdir: Path) -> None:
     upstream would otherwise only surface when a rollout trips over it.
     """
     probes = [
-        # Phase 1.2 的固定动作要 cp 的文件(源已从 project-init skill 改为
-        # kernel_skeleton 模板;skill 已归档进 _archive/)
+        # Phase 1.2 的固定动作要 cp 的文件(源已从旧 project-init
+        # skill 改为 kernel_skeleton 模板)
         workdir / ".claude/workflows/templates/kernel_skeleton/kernel/utils/torch_kernel_helper.h",
     ]
     if (workdir / ".claude" / "workflows").is_dir():
@@ -915,6 +917,35 @@ def _instantiate_kernel_skeleton(canonical: Path, workdir: Path, op: str,
           f"kwonly {len(sig.kwonly)} 参/返回 {sig.ret_arity} 元{note}")
 
 
+def _record_skeleton_hash(workdir: Path, op: str) -> None:
+    """记录预生成骨架的内容哈希,供评测入口检测「骨架原封未动、但 output/submission/
+    下有源码文件」的改错目录场景(与 ascendc_eval_pipeline.sh 的 CUR_HASH 同口径)。
+    agent 删了它最多让提醒失效,不影响评测与预算。"""
+    src = workdir / op
+    if not src.is_dir():
+        return
+    find_expr = (
+        r"\( -name build -o -name dist -o -name '*.egg-info' -o -name '__pycache__' \) -prune -o"
+        r" -type f ! -name '*.so' ! -name '*.a' ! -name '*.o' ! -name '*.whl'"
+        r" ! -name '.eval_last.log' ! -name 'performance.json' ! -name 'preformance.json'"
+        " -print0"
+    )
+    cmd = (
+        f"cd {shlex.quote(str(src))} && find . {find_expr} 2>/dev/null | sort -z"
+        " | xargs -0 sha256sum 2>/dev/null | sha256sum | cut -d' ' -f1"
+    )
+    try:
+        out = subprocess.run(["bash", "-c", cmd], capture_output=True, text=True, timeout=60)
+        digest = out.stdout.strip()
+    except Exception:
+        return
+    if not digest:
+        return
+    state = workdir / "output" / ".selfcheck"
+    state.mkdir(parents=True, exist_ok=True)
+    (state / f".{op}_skeleton.hash").write_text(digest, encoding="utf-8")
+
+
 def _forward_arg_names(task_path: Path) -> list[str]:
     try:
         tree = ast.parse(task_path.read_text())
@@ -1105,7 +1136,9 @@ def _prepare_ascendc_workdir(args) -> int:
     workdir = Path(args.workdir)
     canonical = Path(args.canonical_root)
     op = args.op_name
-    for rel in ("input", "output/submission", "judge_out"):
+    # 不预创建 output/submission/:空目录会让 agent 误以为「骨架不存在、该在这里从零建工程」,
+    # 而评测只打包顶层 {op}/(写 tarball 时 pack_submission.sh 会自行 mkdir)。
+    for rel in ("input", "judge_out"):
         (workdir / rel).mkdir(parents=True, exist_ok=True)
 
     task_path = Path(args.task_path or (workdir / "input" / f"{op}.py"))
@@ -1143,6 +1176,7 @@ def _prepare_ascendc_workdir(args) -> int:
         _instantiate_kernel_skeleton(
             canonical, workdir, op, task_path,
             json_dst if json_dst.is_file() else None)
+        _record_skeleton_hash(workdir, op)
     off_names = _non_project_skills(canonical) if args.only_project_skills else []
     off_names += [
         n.strip()

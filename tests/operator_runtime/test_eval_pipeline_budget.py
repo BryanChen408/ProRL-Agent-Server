@@ -89,6 +89,33 @@ def test_status_file_lands_in_artifacts_dir(tmp_path):
     assert data["session_id"] == "sk-polar-test"
 
 
+def test_npu_lease_status_keeps_every_pipeline_attempt_in_artifacts(tmp_path):
+    helper = tmp_path / "fake_lease.py"
+    helper.write_text(
+        "import pathlib, sys\n"
+        "path = pathlib.Path(sys.argv[sys.argv.index('--status-file') + 1])\n"
+        "path.write_text('{}', encoding='utf-8')\n",
+        encoding="utf-8",
+    )
+    env = _status_env(tmp_path)
+    env.update({
+        "AST_CHECK_PYTHON": sys.executable,
+        "NPU_LEASE_EXEC": str(helper),
+        "POLAR_NPU_LEASE_POOL": "8,9",
+        "POLAR_NPU_LOCK_DIR": str(tmp_path / "locks"),
+        "OUT_DIR": str(tmp_path / "judge_out"),
+    })
+    (tmp_path / "judge_out").mkdir()
+
+    _run("run_npu_phase", "run_npu_phase verify true", env, tmp_path)
+    env["PIPELINE_ATTEMPT"] = "4"
+    _run("run_npu_phase", "run_npu_phase verify true", env, tmp_path)
+
+    artifacts = tmp_path / "artifacts"
+    assert (artifacts / "npu_lease_status.verify.generation.3.json").exists()
+    assert (artifacts / "npu_lease_status.verify.generation.4.json").exists()
+
+
 def test_status_file_absent_when_artifacts_dir_unset(tmp_path):
     """gateway 之外(本地手跑)不该炸,静默跳过即可。"""
     env = _status_env(tmp_path)

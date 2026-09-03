@@ -36,10 +36,15 @@ NPU_LEASE_EXEC="${NPU_LEASE_EXEC:-${_SCRIPT_DIR}/npu_lease_exec.py}"
 run_npu_phase() {
   local phase="$1"; shift
   if [[ -n "${POLAR_NPU_LEASE_POOL:-}" ]]; then
+    local status_file="$OUT_DIR/npu_lease_status.${phase}.json"
+    if [[ -n "${ARTIFACTS_DIR:-}" ]] && mkdir -p "$ARTIFACTS_DIR" 2>/dev/null \
+        && [[ -w "$ARTIFACTS_DIR" ]]; then
+      status_file="$ARTIFACTS_DIR/npu_lease_status.${phase}.${PIPELINE_PHASE:-unknown}.${PIPELINE_ATTEMPT:-0}.json"
+    fi
     "$AST_CHECK_PYTHON" "$NPU_LEASE_EXEC" \
       --pool "$POLAR_NPU_LEASE_POOL" \
       --lock-dir "$POLAR_NPU_LOCK_DIR" \
-      --status-file "$OUT_DIR/npu_lease_status.${phase}.json" \
+      --status-file "$status_file" \
       -- "$@"
   else
     "$@"
@@ -559,10 +564,37 @@ if [[ "$AGENT_SIDE" == "1" ]]; then
       -type f ! -name '*.so' ! -name '*.a' ! -name '*.o' ! -name '*.whl' \
       ! -name '.eval_last.log' ! -name 'performance.json' ! -name 'preformance.json' \
       -print0 2>/dev/null | sort -z | xargs -0 sha256sum 2>/dev/null | sha256sum | cut -d' ' -f1)
+  # 改错目录检测:工程仍是未修改的预生成骨架(与 prepare 落盘的骨架哈希一致),而
+  # output/submission/ 下却有源码文件 —— agent 在错误的目录里写代码,改动从未进入打包
+  # 范围,报错才会逐字节重复。在 dedup 之前先提醒,第一次提交就能发现。
+  _WRONG_DIR=0
+  _STRAY_SRC=""
+  _SKEL_HASH_FILE="$STATE_DIR/.${OP_NAME}_skeleton.hash"
+  if [[ -n "$CUR_HASH" && -f "$_SKEL_HASH_FILE" \
+        && "$CUR_HASH" == "$(cat "$_SKEL_HASH_FILE" 2>/dev/null)" ]]; then
+    _STRAY_SRC=$(find "$WORK_ROOT/output/submission" -type f \
+        \( -name '*.cpp' -o -name '*.h' -o -name '*.hpp' -o -name '*.cc' \
+           -o -name '*.py' -o -name 'CMakeLists.txt' \) 2>/dev/null | head -1)
+    [[ -n "$_STRAY_SRC" ]] && _WRONG_DIR=1
+  fi
+  if [[ "$_WRONG_DIR" == "1" ]]; then
+    echo "[ascendc-eval] ⚠⚠⚠ 你可能改错了目录 ⚠⚠⚠"
+    echo "[ascendc-eval] $OP_NAME/ 仍是未修改的预生成骨架,但 output/submission/ 下发现源码文件:"
+    echo "[ascendc-eval]   $_STRAY_SRC"
+    echo "[ascendc-eval] 评测只打包 $SRC_DIR —— 你写在 output/submission/ 下的代码从未被评测,"
+    echo "[ascendc-eval] 报错才会和上次一模一样。正确做法:把你写的文件合并进 $SRC_DIR"
+    echo "[ascendc-eval] (覆盖骨架同名文件),再重跑本命令。output/submission/ 只放 tarball 产物。"
+  fi
   _HASH_FILE="$STATE_DIR/.${OP_NAME}_last.hash"
   if [[ -n "$CUR_HASH" && -f "$_HASH_FILE" && -f "$OUT_DIR/metrics.json" \
         && "$CUR_HASH" == "$(cat "$_HASH_FILE" 2>/dev/null)" ]]; then
     echo "[ascendc-eval] {op}/ 源码与上次评测完全一致 → 复用上次结论,跳过编译/对拍/性能(不消耗预算)"
+    if [[ "$_WRONG_DIR" == "0" ]]; then
+      _STRAY_SRC=$(find "$WORK_ROOT/output/submission" -type f \
+          \( -name '*.cpp' -o -name '*.h' -o -name '*.hpp' -o -name '*.cc' \
+             -o -name '*.py' -o -name 'CMakeLists.txt' \) 2>/dev/null | head -1)
+      [[ -n "$_STRAY_SRC" ]] && echo "[ascendc-eval] ⚠ 但 output/submission/ 下有源码文件(如 $_STRAY_SRC)——评测只打包 $SRC_DIR,如果你在 submission 下写代码,改动从未被评测,请合并进工程目录再提交"
+    fi
     python3 -c "import json;d=json.load(open('$OUT_DIR/metrics.json'));p=d.get('perf_data') or {};print('[ascendc-eval] cached evaluation — operator_valid=%s task_complete=%s ast_check_ok=%s correctness_ok=%s speedup_vs_torch=%s'%(d.get('operator_valid',d.get('success')),d.get('task_complete'),d.get('ast_check_ok'),d.get('correctness_ok'),p.get('speedup_vs_torch')))" 2>/dev/null || true
     exit 0
   fi
