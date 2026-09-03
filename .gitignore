@@ -122,6 +122,7 @@ glm/
 # Generated documentation
 docs/
 /site
+graphify-out/
 
 # Dashboard frontend build artifacts
 web/node_modules/
