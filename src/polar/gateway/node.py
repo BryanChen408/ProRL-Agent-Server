@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import posixpath
@@ -27,6 +28,7 @@ from polar.agent.base import BaseHarness
 from polar.agent.factory import create_harness
 from polar.agent.models import AgentRunResult
 from polar.run_namespace import run_dir_name, run_id_from_metadata
+from polar.rollout.agent_actions import extract_completed_agent_actions
 from polar.rollout.models import (
     NodeHeartbeatRequest,
     NodeRegistrationRequest,
@@ -36,6 +38,7 @@ from polar.rollout.models import (
     SessionStatus,
 )
 from polar.rollout.timer import StageTimer
+from polar.rollout.trace_exporter import export_chrome_trace
 from polar.runtime.base import BaseRuntime
 from polar.runtime.factory import create_runtime
 from polar.runtime.models import ExecInput, RuntimeSpec
@@ -82,6 +85,11 @@ class GatewayNodeManager:
         heartbeat_interval_seconds: int = 30,
         inflight: InflightGenerationTracker | None = None,
         session_affinity_release_url: str | None = None,
+        # ── Per-session trace artifacts ──
+        enable_session_trace_wandb: bool = False,
+        enable_session_trace_json: bool = True,
+        session_trace_wandb_project: str = "polar-session-traces",
+        persist_traces_dir: str | None = None,
     ) -> None:
         self.node_id = node_id
         self.gateway_url = gateway_url.rstrip("/")
@@ -95,6 +103,11 @@ class GatewayNodeManager:
         self.evaluators = evaluators
         self.default_runtime = default_runtime
         self._session_base_dir = session_base_dir
+        # Per-session tracing
+        self._enable_session_trace_wandb = enable_session_trace_wandb
+        self._enable_session_trace_json = enable_session_trace_json
+        self._session_trace_wandb_project = session_trace_wandb_project
+        self._persist_traces_dir = Path(persist_traces_dir) if persist_traces_dir else None
         self._client = httpx.AsyncClient(timeout=30.0)
         self._dispatcher = SessionDispatcher(
             max_init_workers=max_init_workers,
@@ -292,6 +305,187 @@ class GatewayNodeManager:
         snapshot = await self._dispatcher.snapshot()
         return self._snapshot_to_metrics(snapshot)
 
+    def record_llm_call(
+        self, session_id: str, *,
+        acquire_wait_ms: float = 0.0,
+        prepare_ms: float = 0.0,
+        sglang_wait_ms: float = 0.0,
+        normalize_ms: float = 0.0,
+        roundtrip_ms: float = 0.0,
+        prompt_tokens: int = 0,
+        response_tokens: int = 0,
+    ) -> None:
+        """Record LLM inference timing on the active session's StageTimer."""
+        managed = self._dispatcher._sessions.get(session_id)
+        if managed is not None:
+            managed.timer.record_llm_call(
+                acquire_wait_ms=acquire_wait_ms,
+                prepare_ms=prepare_ms,
+                sglang_wait_ms=sglang_wait_ms,
+                normalize_ms=normalize_ms,
+                roundtrip_ms=roundtrip_ms,
+                prompt_tokens=prompt_tokens,
+                response_tokens=response_tokens,
+            )
+        # Also log for direct API sessions — visible in gateway logs
+        logger.info(
+            "llm_call session=%s acquire=%.0fms prepare=%.0fms sglang=%.0fms normalize=%.0fms p_t=%d r_t=%d",
+            session_id, acquire_wait_ms, prepare_ms, sglang_wait_ms,
+            normalize_ms, prompt_tokens, response_tokens,
+        )
+
+    def patch_last_llm_post_ms(self, session_id: str, post_ms: float) -> None:
+        """Patch the last recorded LLM call's post_ms (I: storage+format timing)."""
+        managed = self._dispatcher._sessions.get(session_id)
+        if managed is not None and managed.timer._llm_calls:
+            managed.timer._llm_calls[-1]["post_ms"] = round(post_ms, 2)
+
+    def patch_last_llm_gateway_total_ms(self, session_id: str, gateway_total_ms: float) -> None:
+        """Patch the last recorded LLM call's gateway_total_ms (12→17: arrival→departure)."""
+        managed = self._dispatcher._sessions.get(session_id)
+        if managed is not None and managed.timer._llm_calls:
+            managed.timer._llm_calls[-1]["gateway_total_ms"] = round(gateway_total_ms, 2)
+
+    # ── Agent-side gap (Stage 18+19: tool execution + client overhead) ──
+
+    def compute_agent_side_gap_ms(self, session_id: str, arrival_time: float) -> float:
+        """Compute the agent-side gap between the previous LLM response departure
+        and the current request arrival.  Returns 0.0 for the first LLM call
+        in a session.
+        """
+        managed = self._dispatcher._sessions.get(session_id)
+        if managed is None or managed.last_llm_departure_at is None:
+            return 0.0
+        return max(0.0, (arrival_time - managed.last_llm_departure_at) * 1000.0)
+
+    def mark_llm_departure(self, session_id: str, departure_time: float) -> None:
+        """Record the timestamp when the Gateway sent the LLM response back to the agent."""
+        managed = self._dispatcher._sessions.get(session_id)
+        if managed is not None:
+            managed.last_llm_departure_at = departure_time
+
+    def patch_last_llm_agent_side_gap_ms(
+        self,
+        session_id: str,
+        gap_ms: float,
+        original_request: dict | None = None,
+    ) -> None:
+        """Patch the agent gap and classify tool results from the request."""
+        managed = self._dispatcher._sessions.get(session_id)
+        if managed is None:
+            return
+        actions = extract_completed_agent_actions(original_request or {})
+        managed.timer.patch_last_llm_agent_side_gap(gap_ms=gap_ms, actions=actions)
+
+    # ── Per-session trace artifacts (W&B + Chrome Trace JSON) ──
+
+    def _dump_session_trace_artifacts(self, managed: ManagedSession) -> None:
+        """Export per-session timing traces before the session directory is removed.
+
+        Two outputs (both gated by config flags):
+
+        * **Chrome Trace JSON** — ``{session_dir}/trace.json``, also persisted to
+          ``{persist_traces_dir}/{session_id}.json`` when configured.
+        * **W&B offline run** — ``{session_dir}/wandb/``, also persisted to
+          ``{persist_traces_dir}/{session_id}.wandb/`` when configured.
+
+        **Without ``persist_traces_dir`` both outputs are deleted when the session
+        directory is cleaned up.**  Set ``persist_traces_dir`` to a durable path
+        (e.g. ``/data/polar-traces/``) to keep them for later analysis.
+        """
+        timing = managed.timer.to_session_timing()
+        request = managed.request
+        session_id = request.session_id
+
+        # ── Option C: Chrome Trace Event JSON ──
+        if self._enable_session_trace_json:
+            try:
+                events = export_chrome_trace(
+                    timing,
+                    session_id=session_id,
+                    node_id=self.node_id,
+                    task_id=request.task_id,
+                )
+                trace_json = json.dumps(events, ensure_ascii=False)
+                # Always write inside the session directory (for debugging).
+                managed.session_dir.mkdir(parents=True, exist_ok=True)
+                trace_path = managed.session_dir / "trace.json"
+                trace_path.write_text(trace_json, encoding="utf-8")
+                logger.debug("Chrome Trace JSON written: %s (%d events)",
+                             trace_path, len(events))
+                # Persist to durable directory.
+                if self._persist_traces_dir is not None:
+                    self._persist_traces_dir.mkdir(parents=True, exist_ok=True)
+                    persist_path = self._persist_traces_dir / f"{session_id}.json"
+                    persist_path.write_text(trace_json, encoding="utf-8")
+                    logger.info("Chrome Trace persisted: %s", persist_path)
+                else:
+                    logger.warning(
+                        "Chrome Trace for session %s will be deleted with "
+                        "session dir. Set persist_traces_dir to keep it.",
+                        session_id,
+                    )
+            except Exception:
+                logger.exception("Failed to export Chrome Trace for session %s",
+                                 session_id)
+
+        # ── Option A: Per-session W&B offline run ──
+        if self._enable_session_trace_wandb:
+            try:
+                import wandb
+                wandb_dir = managed.session_dir / "wandb"
+                wandb_dir.mkdir(exist_ok=True)
+                os_module = __import__("os")
+                os_module.environ["WANDB_MODE"] = "offline"
+                wandb.init(
+                    project=self._session_trace_wandb_project,
+                    name=session_id,
+                    dir=str(wandb_dir),
+                    settings=wandb.Settings(mode="offline", console="off"),
+                    config={
+                        "session_id": session_id,
+                        "task_id": request.task_id,
+                        "node_id": self.node_id,
+                    },
+                )
+                # ── Stage timing summary ──
+                _log_session_summary_wandb(timing)
+                # ── Per-call agent_side_gap line chart ──
+                for idx, call in enumerate(timing.llm_calls):
+                    wandb.log({
+                        "polar/llm/round": call.get("round", idx + 1),
+                        "polar/llm/agent_side_gap_ms": call.get("agent_side_gap_ms", 0.0),
+                        "polar/llm/sglang_wait_ms": call.get("sglang_wait_ms", 0.0),
+                        "polar/llm/roundtrip_ms": call.get("roundtrip_ms", 0.0),
+                        "polar/llm/gateway_total_ms": call.get("gateway_total_ms", 0.0),
+                    })
+                # ── Per-tool-exec data points ──
+                for te in timing.tool_execs:
+                    wandb.log({
+                        "polar/tool/idx": te.get("idx", 0),
+                        "polar/tool/duration_ms": te.get("duration_ms", 0.0),
+                        "polar/tool/exit_code": te.get("exit_code", 0),
+                    })
+                wandb.finish(exit_code=0, quiet=True)
+                logger.info("Per-session W&B run written: %s", wandb_dir)
+                # Persist to durable directory.
+                if self._persist_traces_dir is not None:
+                    persist_wandb = self._persist_traces_dir / f"{session_id}.wandb"
+                    # Remove stale copy if it exists, then copy fresh.
+                    if persist_wandb.exists():
+                        shutil.rmtree(persist_wandb, ignore_errors=True)
+                    shutil.copytree(str(wandb_dir), str(persist_wandb))
+                    logger.info("Per-session W&B persisted: %s", persist_wandb)
+                else:
+                    logger.warning(
+                        "W&B run for session %s will be deleted with "
+                        "session dir. Set persist_traces_dir to keep it.",
+                        session_id,
+                    )
+            except Exception:
+                logger.exception("Failed to write per-session W&B for session %s",
+                                 session_id)
+
     def _handle_dispatcher_stage_change(self, managed: ManagedSession) -> None:
         status = {
             SessionStage.INIT: SessionStatus.INITIALIZING,
@@ -314,17 +508,25 @@ class GatewayNodeManager:
             if managed.cancel_requested:
                 return
             runtime_spec = self._resolve_runtime_spec(request)
+            managed.timer.mark("runtime_create", "started")
             runtime = create_runtime(runtime_spec, request.session_id, managed.session_dir)
             managed.runtime = runtime
             if managed.cancel_requested:
                 await runtime.cancel()
                 return
             await self._await_with_budget(runtime.start(), managed)
+            managed.timer.mark("runtime_create", "finished")
+            # ── Record docker sub-operation timing (read from runtime) ──
+            if hasattr(runtime, "docker_create_ms"):
+                self._mark_docker_op(managed, "docker_create", getattr(runtime, "docker_create_ms", 0.0))
+                self._mark_docker_op(managed, "docker_start", getattr(runtime, "docker_start_ms", 0.0))
             if managed.cancel_requested:
                 await runtime.cancel()
                 return
             # Run ordered prepare actions
+            managed.timer.mark("prepare", "started")
             await self._run_runtime_prepare(runtime, runtime_spec, request, managed)
+            managed.timer.mark("prepare", "finished")
         except GatewayExecutionTimeout as exc:
             managed.final_result = self._timeout_result(request, managed.timer, str(exc))
         except Exception as exc:
@@ -339,6 +541,21 @@ class GatewayNodeManager:
                 )
         finally:
             managed.timer.mark("init", "finished")
+
+    @staticmethod
+    def _mark_docker_op(managed: ManagedSession, op: str, duration_ms: float) -> None:
+        """Record a docker sub-operation duration as a timer mark pair.
+
+        The timer computes durations from ``op_started`` → ``op_finished``
+        mark pairs.  This helper injects a synthetic pair with a known
+        duration so the timing flows into SessionTiming without changing
+        the public mark interface.
+        """
+        if duration_ms <= 0:
+            return
+        now = managed.timer._marks.get("dispatch_started", 0.0) or 0.0
+        managed.timer._marks[f"{op}_started"] = now
+        managed.timer._marks[f"{op}_finished"] = now + duration_ms / 1000.0
 
     def _resolve_runtime_spec(self, request: SessionDispatchRequest) -> RuntimeSpec:
         spec = request.runtime or self.default_runtime
@@ -422,16 +639,22 @@ class GatewayNodeManager:
             harness = self._resolve_agent_harness(request)
 
             # Setup
+            managed.timer.mark("harness_setup", "started")
             await self._await_with_budget(harness.setup(runtime), managed)
+            managed.timer.mark("harness_setup", "finished")
 
             # Run
+            managed.timer.mark("agent_exec", "started")
             steps = harness.run_steps(request.instruction)
             env = self._runtime_env(request, managed, include_agent_env=True)
             agent_result = await self._run_exec_inputs(runtime, steps, env, managed)
+            managed.timer.mark("agent_exec", "finished")
 
             # Postprocess always runs so harnesses can collect artifacts from
             # failed or timed-out agent runs before post-run evaluation.
+            managed.timer.mark("harness_postprocess", "started")
             await self._await_with_budget(harness.postprocess(runtime, agent_result), managed)
+            managed.timer.mark("harness_postprocess", "finished")
             managed.agent_result = agent_result
 
         except GatewayExecutionTimeout as exc:
@@ -475,11 +698,18 @@ class GatewayNodeManager:
                     status="failed", return_code=-1, error="cancelled"
                 )
             merged_env = {**env, **(step.env or {})}
+            t_step_start = asyncio.get_event_loop().time()
             result = await runtime.exec(
                 step.command,
                 cwd=step.cwd,
                 env=merged_env,
                 timeout_sec=self._remaining_budget(managed),
+            )
+            step_duration_ms = (asyncio.get_event_loop().time() - t_step_start) * 1000.0
+            managed.timer.record_tool_exec(
+                command=step.command,
+                duration_ms=step_duration_ms,
+                exit_code=result.return_code,
             )
             self._write_exec_log(
                 log_dir, f"step.{i:02d}", result.stdout, result.stderr
@@ -746,6 +976,10 @@ class GatewayNodeManager:
                 )
             if stop_tasks:
                 await asyncio.gather(*stop_tasks, return_exceptions=True)
+            # ── Record docker kill / rm timing ──
+            if managed.runtime is not None and hasattr(managed.runtime, "docker_kill_ms"):
+                self._mark_docker_op(managed, "docker_kill", getattr(managed.runtime, "docker_kill_ms", 0.0))
+                self._mark_docker_op(managed, "docker_rm", getattr(managed.runtime, "docker_rm_ms", 0.0))
             managed.timer.mark("teardown", "finished")
             managed.timer.mark("return", "finished")
 
@@ -768,10 +1002,14 @@ class GatewayNodeManager:
             self.storage.mark_session_closed(request.session_id, reason="postrun_result")
             self.storage.delete_session(request.session_id)
             await self.release_session_affinity_best_effort(request.session_id)
+            managed.timer.mark("push_result", "started")
             if await self._push_result(request.callback_url, normalized):
                 # Rollout server has acked; free the heavy payload but keep
                 # status/task_id visible for debugging via the polling endpoint.
                 self.session_registry.clear_result_payload(request.session_id)
+            managed.timer.mark("push_result", "finished")
+            # Export only after all measured stages are complete, but before cleanup.
+            self._dump_session_trace_artifacts(managed)
         finally:
             await self._remove_session_dir_best_effort(
                 managed.session_dir, request.session_id
@@ -1590,3 +1828,44 @@ class GatewayNodeManager:
                 session_id,
                 exc_info=True,
             )
+
+
+# ---------------------------------------------------------------------------
+# Standalone helpers
+# ---------------------------------------------------------------------------
+
+def _log_session_summary_wandb(timing) -> None:
+    """Log session-level stage timing to the current (per-session) W&B run."""
+    import wandb
+    summary: dict[str, float] = {}
+
+    def _set(key: str, value: float) -> None:
+        if value > 0:
+            summary[f"polar/session_ms/{key}"] = value
+
+    # coarse
+    _set("register_to_init_queue", timing.register_to_init_queue_ms)
+    _set("init", timing.init_ms)
+    _set("run", timing.run_ms)
+    _set("postrun", timing.postrun_ms)
+    _set("total", timing.total_ms)
+    # init breakdown
+    _set("init_runtime_create", timing.init_runtime_create_ms)
+    _set("init_prepare", timing.init_prepare_ms)
+    _set("ready_wait", timing.ready_wait_ms)
+    # run breakdown
+    _set("run_harness_setup", timing.run_harness_setup_ms)
+    _set("run_agent_exec", timing.run_agent_exec_ms)
+    _set("run_harness_postprocess", timing.run_harness_postprocess_ms)
+    # postrun breakdown
+    _set("postrun_build", timing.postrun_build_ms)
+    _set("postrun_eval", timing.postrun_eval_ms)
+    _set("postrun_teardown", timing.postrun_teardown_ms)
+    _set("postrun_push_result", timing.postrun_push_result_ms)
+    # LLM aggregates
+    summary["polar/llm_call_count"] = float(timing.llm_call_count)
+    _set("llm_sglang_wait", timing.llm_total_ms)
+    _set("llm_request_roundtrip", timing.llm_request_total_ms)
+    _set("llm_agent_side_total", timing.llm_agent_side_total_ms)
+
+    wandb.log(summary)

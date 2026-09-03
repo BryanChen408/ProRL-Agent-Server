@@ -208,7 +208,27 @@ def main() -> int:
     session_base_dir = path(paths.get("session_base_dir", output_dir / "polar_sessions"))
     run_artifact_dir = path(paths.get("run_artifact_dir", output_dir / "run_artifacts"))
     topology_path = path(paths.get("effective_topology", run_artifact_dir / "effective_topology.yaml"))
-    for directory in (output_root, run_root_dir, output_dir, log_dir, op_assets_dir, rollout_results_dir, session_base_dir, run_artifact_dir):
+    session_trace_json = bool(gateway.get("session_trace_json", True))
+    session_trace_wandb = bool(gateway.get("session_trace_wandb", False))
+    configured_trace_dir = str(gateway.get("persist_traces_dir") or "").strip()
+    persist_traces_dir = (
+        Path(configured_trace_dir)
+        if Path(configured_trace_dir).is_absolute()
+        else (output_dir / configured_trace_dir).resolve()
+    ) if configured_trace_dir else None
+    directories = [
+        output_root,
+        run_root_dir,
+        output_dir,
+        log_dir,
+        op_assets_dir,
+        rollout_results_dir,
+        session_base_dir,
+        run_artifact_dir,
+    ]
+    if persist_traces_dir is not None:
+        directories.append(persist_traces_dir)
+    for directory in directories:
         directory.mkdir(parents=True, exist_ok=True)
 
     rollout_url = str(service.get("rollout_url", "http://127.0.0.1:8080")).rstrip("/")
@@ -397,6 +417,14 @@ def main() -> int:
         "gateway": {
             "heartbeat_interval_seconds": 30,
             "rollout_server_url": rollout_url,
+            "session_trace_json": session_trace_json,
+            "session_trace_wandb": session_trace_wandb,
+            "session_trace_wandb_project": str(
+                gateway.get("session_trace_wandb_project", "polar-session-traces")
+            ),
+            "persist_traces_dir": (
+                str(persist_traces_dir) if persist_traces_dir is not None else None
+            ),
             "completion_persistence": {
                 "enabled": bool(completion_persistence.get("enabled", True)),
                 "max_field_bytes": int(completion_persistence.get("max_field_bytes", 64 * 1024 * 1024)),
@@ -428,6 +456,8 @@ def main() -> int:
         "POLAR_ANTHROPIC_DEFAULT_MAX_TOKENS": max_tokens,
         "POLAR_INFERENCE_REQUEST_TIMEOUT_SECONDS": str(int(timeout_ms) // 1000),
     }
+    if persist_traces_dir is not None:
+        env["POLAR_PERFETTO_TRACE_DIR"] = persist_traces_dir
     for key, value in env.items():
         print(f"export {key}={shlex.quote(str(value))}")
     return 0

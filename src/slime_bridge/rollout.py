@@ -2807,10 +2807,28 @@ def _polar_extra_metrics(
     """Compact user-facing Polar metrics for W&B."""
     out: dict[str, float] = {}
     seen: set[str] = set()
+    # ── existing coarse fields ──
     register_to_init_queue_ms: list[float] = []
     init_ms: list[float] = []
     run_ms: list[float] = []
     postrun_ms: list[float] = []
+    # ── new fine-grained fields ──
+    init_runtime_create_ms: list[float] = []
+    init_prepare_ms: list[float] = []
+    ready_wait_ms: list[float] = []
+    run_harness_setup_ms: list[float] = []
+    run_agent_exec_ms: list[float] = []
+    run_harness_postprocess_ms: list[float] = []
+    postrun_build_ms: list[float] = []
+    postrun_eval_ms: list[float] = []
+    postrun_teardown_ms: list[float] = []
+    postrun_push_result_ms: list[float] = []
+    total_ms: list[float] = []
+    # ── LLM interaction ──
+    llm_call_counts: list[int] = []
+    llm_total_vals: list[float] = []
+    llm_request_total_vals: list[float] = []
+    llm_agent_side_total_vals: list[float] = []
     session_is_placeholder: dict[str, bool] = {}
     session_report: dict[str, dict[str, Any]] = {}
     completed_session_rewards: list[float] = []
@@ -2827,12 +2845,32 @@ def _polar_extra_metrics(
             seen.add(session_id)
             timing = polar_meta.get("timing") or {}
             if timing:
-                register_to_init_queue_ms.append(
-                    float(timing.get("register_to_init_queue_ms", 0.0))
-                )
+                # coarse
+                register_to_init_queue_ms.append(float(timing.get("register_to_init_queue_ms", 0.0)))
                 init_ms.append(float(timing.get("init_ms", 0.0)))
                 run_ms.append(float(timing.get("run_ms", 0.0)))
                 postrun_ms.append(float(timing.get("postrun_ms", 0.0)))
+                # init breakdown
+                init_runtime_create_ms.append(float(timing.get("init_runtime_create_ms", 0.0)))
+                init_prepare_ms.append(float(timing.get("init_prepare_ms", 0.0)))
+                # ready
+                ready_wait_ms.append(float(timing.get("ready_wait_ms", 0.0)))
+                # run breakdown
+                run_harness_setup_ms.append(float(timing.get("run_harness_setup_ms", 0.0)))
+                run_agent_exec_ms.append(float(timing.get("run_agent_exec_ms", 0.0)))
+                run_harness_postprocess_ms.append(float(timing.get("run_harness_postprocess_ms", 0.0)))
+                # postrun breakdown
+                postrun_build_ms.append(float(timing.get("postrun_build_ms", 0.0)))
+                postrun_eval_ms.append(float(timing.get("postrun_eval_ms", 0.0)))
+                postrun_teardown_ms.append(float(timing.get("postrun_teardown_ms", 0.0)))
+                postrun_push_result_ms.append(float(timing.get("postrun_push_result_ms", 0.0)))
+                # total
+                total_ms.append(float(timing.get("total_ms", 0.0)))
+                # LLM
+                llm_call_counts.append(int(timing.get("llm_call_count", 0)))
+                llm_total_vals.append(float(timing.get("llm_total_ms", 0.0)))
+                llm_request_total_vals.append(float(timing.get("llm_request_total_ms", 0.0)))
+                llm_agent_side_total_vals.append(float(timing.get("llm_agent_side_total_ms", 0.0)))
             session_is_placeholder[session_id] = is_placeholder
             evaluation = (polar_meta.get("trajectory_metadata") or {}).get("evaluation") or {}
             report = evaluation.get("report") or {}
@@ -2843,13 +2881,67 @@ def _polar_extra_metrics(
                     _extract_sample_reward(sample, reward_key)
                 )
 
+    # ── emit W&B metrics ──
+    def _mean(vals):
+        return sum(vals) / len(vals) if vals else 0.0
+    def _sum_int(vals):
+        return float(sum(vals)) if vals else 0.0
+
     if init_ms:
-        out["polar/session_ms/register_to_init_queue_mean"] = (
-            sum(register_to_init_queue_ms) / len(register_to_init_queue_ms)
-        )
-        out["polar/session_ms/init_mean"] = sum(init_ms) / len(init_ms)
-        out["polar/session_ms/run_mean"] = sum(run_ms) / len(run_ms)
-        out["polar/session_ms/postrun_mean"] = sum(postrun_ms) / len(postrun_ms)
+        # coarse
+        out["polar/session_ms/register_to_init_queue_mean"] = _mean(register_to_init_queue_ms)
+        out["polar/session_ms/init_mean"] = _mean(init_ms)
+        out["polar/session_ms/run_mean"] = _mean(run_ms)
+        out["polar/session_ms/postrun_mean"] = _mean(postrun_ms)
+        # total
+        out["polar/session_ms/total_mean"] = _mean(total_ms)
+        # init breakdown
+        out["polar/session_ms/init_runtime_create_mean"] = _mean(init_runtime_create_ms)
+        out["polar/session_ms/init_prepare_mean"] = _mean(init_prepare_ms)
+        # ready
+        out["polar/session_ms/ready_wait_mean"] = _mean(ready_wait_ms)
+        # run breakdown
+        out["polar/session_ms/run_harness_setup_mean"] = _mean(run_harness_setup_ms)
+        out["polar/session_ms/run_agent_exec_mean"] = _mean(run_agent_exec_ms)
+        out["polar/session_ms/run_harness_postprocess_mean"] = _mean(run_harness_postprocess_ms)
+        # postrun breakdown
+        out["polar/session_ms/postrun_build_mean"] = _mean(postrun_build_ms)
+        out["polar/session_ms/postrun_eval_mean"] = _mean(postrun_eval_ms)
+        out["polar/session_ms/postrun_teardown_mean"] = _mean(postrun_teardown_ms)
+        out["polar/session_ms/postrun_push_result_mean"] = _mean(postrun_push_result_ms)
+        # LLM
+        out["polar/llm_call_count_total"] = _sum_int(llm_call_counts)
+        out["polar/llm_sglang_wait_mean_ms"] = _mean(llm_total_vals)
+        out["polar/llm_request_roundtrip_mean_ms"] = _mean(llm_request_total_vals)
+        # Agent-side gap (Stage 18+19: tool execution + thinking between LLM calls)
+        out["polar/llm_agent_side_total_ms_mean"] = _mean(llm_agent_side_total_vals)
+        if llm_call_counts:
+            # Average per-LLM-call agent gap across sessions
+            out["polar/llm_agent_side_per_call_mean_ms"] = (
+                sum(llm_agent_side_total_vals) / sum(llm_call_counts)
+                if sum(llm_call_counts) > 0 else 0.0
+            )
+
+        # ── per-call detail: wandb.Table ──
+        first_sample_with_calls = None
+        for sample in flat_samples:
+            polar_meta = sample.metadata.get("polar", {})
+            timing = polar_meta.get("timing") or {}
+            calls = timing.get("llm_calls")
+            if calls:
+                first_sample_with_calls = calls
+                break
+        if first_sample_with_calls:
+            try:
+                import wandb
+                columns = list(first_sample_with_calls[0].keys())
+                table = wandb.Table(columns=columns)
+                for call in first_sample_with_calls:
+                    table.add_data(*[call.get(c, 0) for c in columns])
+                # Use a fixed key so W&B doesn't version the table per step
+                out["polar/llm_calls_detail"] = table
+            except Exception:  # noqa: BLE001 - optional W&B metrics are best-effort
+                logger.debug("Failed to build the Polar LLM call detail table", exc_info=True)
     if rewards:
         out["polar/reward_mean"] = sum(rewards) / len(rewards)
     if len(rewards) > 1:
