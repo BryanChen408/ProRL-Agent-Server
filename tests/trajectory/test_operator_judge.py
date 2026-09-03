@@ -196,17 +196,17 @@ def test_process_info_forged_zeroes_component_not_outcome():
         _process_env_restore(saved)
 
 
-def test_process_v2_budget_count_mismatch():
-    # 预算计数器(gen=5)比事件数(1)多 = 删过事件 -> 分量 0
+def test_process_reward_ignores_unfinished_budget_attempts():
+    # 预算计数在入口递增；超限或中断调用没有 event，不能连坐已完成的过程记录。
     saved = _process_env_saved()
     try:
         info = _mk_process_info([("done", "pass", None, 1.0)])
         res, *_ = _run({"success": True, "perf_data": {"speedup_vs_torch": 1.0}},
                        process_info=info,
                        budget_status={"gen_count": 5, "opt_count": 0})
-        assert res.metadata["process_validation"] == "budget_count_mismatch"
-        assert res.metadata["process_reward"] == 0.0
-        assert res.outcome_reward == 0.75
+        assert res.metadata["process_validation"] == "ok"
+        assert abs(res.metadata["process_reward"] - 0.06) < 1e-9
+        assert abs(res.outcome_reward - 0.81) < 1e-9
     finally:
         _process_env_restore(saved)
 

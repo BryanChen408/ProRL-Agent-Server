@@ -571,7 +571,7 @@ class OperatorJudgeEvaluator(BaseTrajectoryEvaluator):
         self, artifacts_dir: Path, metrics: dict
     ) -> tuple[list[dict] | None, str]:
         """读 process_info.json(agent 侧固定入口经 $ARTIFACTS_DIR bind mount 直落宿主机,
-        与 metrics.json 同目录),跑 V1-V5 校验;任一不过 -> (None, 原因),process 分量记 0,
+        与 metrics.json 同目录),校验失败 -> (None, 原因),process 分量记 0,
         不影响 outcome、不产生 infra retry。详见 operator_reward.validate_process_info。
         """
         raw_path = artifacts_dir / "process_info.json"
@@ -584,18 +584,6 @@ class OperatorJudgeEvaluator(BaseTrajectoryEvaluator):
         events, why = validate_process_info(data, metrics)
         if events is None:
             return None, why
-        # V2:与 pipeline_budget_status.json 交叉比对(同一 artifacts_dir)。只查「计数器
-        # 比事件多 = 删过事件」一个方向:计数器在脚本尾才 +1,最后一次评测中途崩溃会少 1,
-        # 不能用 != 冤枉正常轨迹。文件缺席(老 run/cannbot)跳过此校验。
-        budget_path = artifacts_dir / "pipeline_budget_status.json"
-        if budget_path.is_file():
-            try:
-                budget = json.loads(budget_path.read_text(encoding="utf-8"))
-                counted = int(budget.get("gen_count") or 0) + int(budget.get("opt_count") or 0)
-                if counted > len(events):
-                    return None, "budget_count_mismatch"
-            except Exception:  # noqa: BLE001 —— 预算文件损坏不株连 process 分
-                pass
         return events, "ok"
 
     def _scored(
