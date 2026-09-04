@@ -20,6 +20,13 @@ ratio, session p95 latency, and inference p95 latency. The latency and backlog
 thresholds are operational defaults; tune them for the workload before routing
 notifications.
 
+`prometheus/polar_engine_recording_rules.yaml` normalizes native vLLM queue,
+TTFT, prefill, decode, and prefix-cache metrics into the `polar_inference_*`
+namespace. Polar registers the configured inference endpoint under the
+`polar-inference-engine` job. A Mooncake PD proxy must expose its backend metrics
+at `/metrics`; the VIME PD proxy integration fans in all prefill and decode
+engines and adds `pd_role` and `pd_backend` labels.
+
 RL-Insight renders its runtime Prometheus configuration from the file configured
 by `prometheus.config_file`. Add the rule file to that source configuration using
 an absolute path, for example:
@@ -27,6 +34,7 @@ an absolute path, for example:
 ```yaml
 rule_files:
   - /home/docker/polar_can/ProRL-Agent-Server/deploy/observability/prometheus/polar_alerts.yaml
+  - /home/docker/polar_can/ProRL-Agent-Server/deploy/observability/prometheus/polar_engine_recording_rules.yaml
 ```
 
 Then restart the RL-Insight services so the generated runtime configuration is

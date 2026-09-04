@@ -1,0 +1,60 @@
+groups:
+  - name: polar-inference-engine-normalization
+    interval: 15s
+    rules:
+      - record: polar_inference_queue_seconds_bucket
+        expr: sum by (node_id, pd_role, pd_backend, le) (vllm:request_queue_time_seconds_bucket{job="polar-inference-engine"})
+        labels:
+          engine: vllm-native
+      - record: polar_inference_queue_seconds_sum
+        expr: sum by (node_id, pd_role, pd_backend) (vllm:request_queue_time_seconds_sum{job="polar-inference-engine"})
+        labels:
+          engine: vllm-native
+      - record: polar_inference_queue_seconds_count
+        expr: sum by (node_id, pd_role, pd_backend) (vllm:request_queue_time_seconds_count{job="polar-inference-engine"})
+        labels:
+          engine: vllm-native
+
+      - record: polar_inference_ttft_seconds_bucket
+        expr: sum by (node_id, pd_role, pd_backend, le) (vllm:time_to_first_token_seconds_bucket{job="polar-inference-engine"})
+        labels:
+          engine: vllm-native
+      - record: polar_inference_ttft_seconds_sum
+        expr: sum by (node_id, pd_role, pd_backend) (vllm:time_to_first_token_seconds_sum{job="polar-inference-engine"})
+        labels:
+          engine: vllm-native
+      - record: polar_inference_ttft_seconds_count
+        expr: sum by (node_id, pd_role, pd_backend) (vllm:time_to_first_token_seconds_count{job="polar-inference-engine"})
+        labels:
+          engine: vllm-native
+
+      - record: polar_inference_prefill_seconds_bucket
+        expr: sum by (node_id, pd_role, pd_backend, le) (vllm:request_prefill_time_seconds_bucket{job="polar-inference-engine"})
+        labels:
+          engine: vllm-native
+      - record: polar_inference_prefill_seconds_sum
+        expr: sum by (node_id, pd_role, pd_backend) (vllm:request_prefill_time_seconds_sum{job="polar-inference-engine"})
+        labels:
+          engine: vllm-native
+      - record: polar_inference_prefill_seconds_count
+        expr: sum by (node_id, pd_role, pd_backend) (vllm:request_prefill_time_seconds_count{job="polar-inference-engine"})
+        labels:
+          engine: vllm-native
+
+      - record: polar_inference_decode_seconds_bucket
+        expr: sum by (node_id, pd_role, pd_backend, le) (vllm:request_decode_time_seconds_bucket{job="polar-inference-engine"})
+        labels:
+          engine: vllm-native
+      - record: polar_inference_decode_seconds_sum
+        expr: sum by (node_id, pd_role, pd_backend) (vllm:request_decode_time_seconds_sum{job="polar-inference-engine"})
+        labels:
+          engine: vllm-native
+      - record: polar_inference_decode_seconds_count
+        expr: sum by (node_id, pd_role, pd_backend) (vllm:request_decode_time_seconds_count{job="polar-inference-engine"})
+        labels:
+          engine: vllm-native
+
+      - record: polar_inference_prefix_cache_hit_ratio
+        expr: sum by (node_id, pd_role, pd_backend) (rate(vllm:prefix_cache_hits{job="polar-inference-engine"}[5m])) / clamp_min(sum by (node_id, pd_role, pd_backend) (rate(vllm:prefix_cache_queries{job="polar-inference-engine"}[5m])), 0.001)
+        labels:
+          engine: vllm-native
