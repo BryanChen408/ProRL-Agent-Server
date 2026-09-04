@@ -31,6 +31,18 @@ def _timing() -> SessionTiming:
             "trace_id": "session-1:1",
             "engine_name": "vllm",
             "engine_url": "http://engine:8000",
+            "agent_side_gap_started_at_ns": start + 1_000_000_000,
+            "agent_side_gap_finished_at_ns": start + 1_200_000_000,
+            "agent_actions": [{
+                "kind": "edit",
+                "tool_name": "Edit",
+                "tool_use_id": "tool-1",
+                "summary": "edit kernel.cpp",
+                "target": "kernel.cpp",
+                "duration_ms": 200,
+                "duration_estimated": True,
+                "is_error": False,
+            }],
             "engine_metrics": {
                 "queue_ms": 10.0,
                 "prefill_ms": 90.0,
@@ -145,6 +157,7 @@ def test_otlp_export_has_one_trace_and_parent_child_spans() -> None:
     prefill = next(
         span for span in spans if span["name"] == "gateway_generation.engine.prefill"
     )
+    action = next(span for span in spans if span["name"] == "agent.tool.edit")
     assert {span["traceId"] for span in spans} == {root["traceId"]}
     assert generation["parentSpanId"] == root["spanId"]
     assert engine["parentSpanId"] == generation["spanId"]
@@ -155,6 +168,13 @@ def test_otlp_export_has_one_trace_and_parent_child_spans() -> None:
     assert engine_attributes["engine"] == "vllm"
     assert engine_attributes["engine_url"] == "http://engine:8000"
     assert prefill["parentSpanId"] == generation["spanId"]
+    assert action["parentSpanId"] == root["spanId"]
+    action_attributes = {
+        item["key"]: next(iter(item["value"].values()))
+        for item in action["attributes"]
+    }
+    assert action_attributes["tool.name"] == "Edit"
+    assert "tool.target" not in action_attributes
     assert int(prefill["endTimeUnixNano"]) - int(prefill["startTimeUnixNano"]) == 90_000_000
     attributes = {
         item["key"]: next(iter(item["value"].values()))
@@ -163,6 +183,41 @@ def test_otlp_export_has_one_trace_and_parent_child_spans() -> None:
     assert attributes["project"] == "polar"
     assert attributes["sample"] == "7"
     assert attributes["global_steps"] == "11"
+
+
+def test_otlp_action_content_is_opt_in_and_bounded() -> None:
+    captured: list[dict] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        captured.append(json.loads(request.content))
+        return httpx.Response(200)
+
+    async def _run() -> None:
+        exporter = SessionObservability(
+            node_id="node-a",
+            gateway_url="http://node-a:8081",
+            otlp_endpoint="http://tempo:4318/v1/traces",
+            otlp_include_action_content=True,
+        )
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            await exporter.record_session(
+                client,
+                timing=_timing(),
+                session_id="session-1",
+                task_id="task-1",
+                status=SessionStatus.COMPLETED,
+                metadata={},
+            )
+
+    asyncio.run(_run())
+    spans = captured[0]["resourceSpans"][0]["scopeSpans"][0]["spans"]
+    action = next(span for span in spans if span["name"] == "agent.tool.edit")
+    attributes = {
+        item["key"]: next(iter(item["value"].values()))
+        for item in action["attributes"]
+    }
+    assert attributes["action.summary"] == "edit kernel.cpp"
+    assert attributes["tool.target"] == "kernel.cpp"
 
 
 def test_rl_insight_target_registration_uses_gateway_authority() -> None:

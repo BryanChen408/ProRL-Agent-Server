@@ -100,6 +100,7 @@ class GatewayNodeManager:
         rl_insight_url: str | None = None,
         otlp_endpoint: str | None = None,
         otlp_headers: dict[str, str] | None = None,
+        otlp_include_action_content: bool = False,
         observability_export_timeout_seconds: float = 3.0,
         observability_service_name: str = "polar-gateway",
     ) -> None:
@@ -130,6 +131,7 @@ class GatewayNodeManager:
             rl_insight_url=rl_insight_url,
             otlp_endpoint=otlp_endpoint,
             otlp_headers=otlp_headers,
+            otlp_include_action_content=otlp_include_action_content,
             export_timeout_seconds=observability_export_timeout_seconds,
             service_name=observability_service_name,
         )

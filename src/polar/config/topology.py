@@ -101,6 +101,7 @@ class _ObservabilityConfig(_StrictModel):
     rl_insight_url: str | None = None
     otlp_endpoint: str | None = None
     otlp_headers: dict[str, str] = Field(default_factory=dict)
+    otlp_include_action_content: bool = False
     export_timeout_seconds: float = Field(default=3.0, gt=0)
     service_name: str = "polar-gateway"
 

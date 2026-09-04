@@ -157,6 +157,9 @@ def _build_state(topology: TopologyConfig, node_id: str | None) -> GatewayState:
         rl_insight_url=topology.gateway.observability.rl_insight_url,
         otlp_endpoint=topology.gateway.observability.otlp_endpoint,
         otlp_headers=topology.gateway.observability.otlp_headers,
+        otlp_include_action_content=(
+            topology.gateway.observability.otlp_include_action_content
+        ),
         observability_export_timeout_seconds=(
             topology.gateway.observability.export_timeout_seconds
         ),
