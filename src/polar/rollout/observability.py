@@ -17,6 +17,15 @@ from polar.run_namespace import run_id_from_metadata
 logger = logging.getLogger(__name__)
 
 _DURATION_BUCKETS = (1.0, 5.0, 15.0, 30.0, 60.0, 120.0, 300.0, 900.0, 3600.0)
+_INFERENCE_BUCKETS = (0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30, 60, 120, 300)
+_RATIO_BUCKETS = (0.0, 0.25, 0.5, 0.75, 0.9, 1.0)
+_ENGINE_LATENCIES = {
+    "request": "roundtrip_ms",
+    "queue": "queue_ms",
+    "ttft": "ttft_ms",
+    "prefill": "prefill_ms",
+    "decode": "decode_ms",
+}
 
 
 class SessionObservability:
@@ -45,10 +54,57 @@ class SessionObservability:
         self._sessions: dict[str, int] = defaultdict(int)
         self._llm_calls = 0
         self._tokens: dict[str, int] = defaultdict(int)
+        self._inference_requests: dict[str, int] = defaultdict(int)
+        self._inference_tokens: dict[tuple[str, str], int] = defaultdict(int)
+        self._inference_histograms: dict[tuple[str, str], dict[str, Any]] = {}
+        self._cached_prompt_tokens: dict[str, int] = defaultdict(int)
         self._duration_count = 0
         self._duration_sum = 0.0
         self._duration_buckets: dict[float, int] = defaultdict(int)
         self._export_failures = 0
+
+    def record_inference(
+        self,
+        *,
+        engine_name: str | None,
+        prompt_tokens: int,
+        response_tokens: int,
+        roundtrip_ms: float,
+        engine_metrics: dict[str, float | int] | None = None,
+    ) -> None:
+        """Update scrape-visible counters as soon as one inference call completes."""
+        engine = _safe_label((engine_name or "unknown").lower())
+        prompt = max(0, int(prompt_tokens))
+        response = max(0, int(response_tokens))
+        self._llm_calls += 1
+        self._tokens["prompt"] += prompt
+        self._tokens["response"] += response
+        self._inference_requests[engine] += 1
+        self._inference_tokens[(engine, "prompt")] += prompt
+        self._inference_tokens[(engine, "response")] += response
+
+        metrics = dict(engine_metrics or {})
+        metrics["roundtrip_ms"] = roundtrip_ms
+        for metric, field in _ENGINE_LATENCIES.items():
+            value = metrics.get(field)
+            if isinstance(value, (int, float)) and not isinstance(value, bool):
+                _observe_histogram(
+                    self._inference_histograms,
+                    (engine, metric),
+                    max(0.0, float(value) / 1000.0),
+                    _INFERENCE_BUCKETS,
+                )
+        cached = metrics.get("num_cached_tokens")
+        if isinstance(cached, (int, float)) and not isinstance(cached, bool):
+            self._cached_prompt_tokens[engine] += max(0, int(cached))
+        cache_hit = metrics.get("prefix_cache_hit_pct")
+        if isinstance(cache_hit, (int, float)) and not isinstance(cache_hit, bool):
+            _observe_histogram(
+                self._inference_histograms,
+                (engine, "prefix_cache_hit_ratio"),
+                min(1.0, max(0.0, float(cache_hit) / 100.0)),
+                _RATIO_BUCKETS,
+            )
 
     async def register_prometheus_target(self, client: httpx.AsyncClient) -> None:
         """Register this gateway's `/metrics` target with RL-Insight when configured."""
@@ -83,11 +139,6 @@ class SessionObservability:
         """Update local metrics and export one correlated OTLP trace, best effort."""
         status_label = _safe_label(status.lower())
         self._sessions[status_label] += 1
-        self._llm_calls += timing.llm_call_count
-        self._tokens["prompt"] += sum(int(call.get("prompt_tokens", 0)) for call in timing.llm_calls)
-        self._tokens["response"] += sum(
-            int(call.get("response_tokens", 0)) for call in timing.llm_calls
-        )
         duration_seconds = max(0.0, timing.total_ms / 1000.0)
         self._duration_count += 1
         self._duration_sum += duration_seconds
@@ -145,6 +196,50 @@ class SessionObservability:
                 f'{self._tokens[direction]}'
             )
         lines.extend([
+            "# HELP polar_inference_requests_total Completed inference requests by engine.",
+            "# TYPE polar_inference_requests_total counter",
+        ])
+        for engine, value in sorted(self._inference_requests.items()):
+            lines.append(
+                f'polar_inference_requests_total{{{label},engine="{engine}"}} {value}'
+            )
+        lines.extend([
+            "# HELP polar_inference_tokens_total Inference tokens by engine and direction.",
+            "# TYPE polar_inference_tokens_total counter",
+        ])
+        for (engine, direction), value in sorted(self._inference_tokens.items()):
+            lines.append(
+                f'polar_inference_tokens_total{{{label},engine="{engine}",direction="{direction}"}} {value}'
+            )
+        lines.extend([
+            "# HELP polar_inference_cached_prompt_tokens_total Cached prompt tokens reported by inference engines.",
+            "# TYPE polar_inference_cached_prompt_tokens_total counter",
+        ])
+        for engine, value in sorted(self._cached_prompt_tokens.items()):
+            lines.append(
+                f'polar_inference_cached_prompt_tokens_total{{{label},engine="{engine}"}} {value}'
+            )
+        for metric, help_text in (
+            ("request", "End-to-end inference request duration."),
+            ("queue", "Inference engine queue duration."),
+            ("ttft", "Inference time to first token."),
+            ("prefill", "Inference prefill duration."),
+            ("decode", "Inference decode duration."),
+            ("prefix_cache_hit_ratio", "Inference prefix-cache hit ratio."),
+        ):
+            metric_name = f"polar_inference_{metric}_seconds"
+            buckets = _INFERENCE_BUCKETS
+            if metric == "request":
+                metric_name = "polar_inference_request_duration_seconds"
+            elif metric == "prefix_cache_hit_ratio":
+                metric_name = "polar_inference_prefix_cache_hit_ratio"
+                buckets = _RATIO_BUCKETS
+            lines.extend([f"# HELP {metric_name} {help_text}", f"# TYPE {metric_name} histogram"])
+            for engine in sorted(self._inference_requests):
+                state = self._inference_histograms.get((engine, metric))
+                if state is not None:
+                    _render_histogram(lines, metric_name, label, engine, state, buckets)
+        lines.extend([
             "# HELP polar_session_duration_seconds End-to-end rollout session duration.",
             "# TYPE polar_session_duration_seconds histogram",
         ])
@@ -166,6 +261,40 @@ class SessionObservability:
         for stage, value in stages.model_dump().items():
             lines.append(f'polar_gateway_sessions{{{label},stage="{stage}"}} {value}')
         return "\n".join(lines) + "\n"
+
+
+def _observe_histogram(
+    states: dict[tuple[str, str], dict[str, Any]],
+    key: tuple[str, str],
+    value: float,
+    buckets: tuple[float, ...],
+) -> None:
+    state = states.setdefault(key, {"count": 0, "sum": 0.0, "buckets": defaultdict(int)})
+    state["count"] += 1
+    state["sum"] += value
+    for bucket in buckets:
+        if value <= bucket:
+            state["buckets"][bucket] += 1
+
+
+def _render_histogram(
+    lines: list[str],
+    metric_name: str,
+    node_label: str,
+    engine: str,
+    state: dict[str, Any],
+    buckets: tuple[float, ...],
+) -> None:
+    labels = f'{node_label},engine="{engine}"'
+    for bucket in buckets:
+        lines.append(
+            f'{metric_name}_bucket{{{labels},le="{bucket:g}"}} {state["buckets"][bucket]}'
+        )
+    lines.extend([
+        f'{metric_name}_bucket{{{labels},le="+Inf"}} {state["count"]}',
+        f'{metric_name}_sum{{{labels}}} {state["sum"]:g}',
+        f'{metric_name}_count{{{labels}}} {state["count"]}',
+    ])
 
 
 def _build_otlp_payload(
