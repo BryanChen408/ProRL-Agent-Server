@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import type { CompletionRecord } from "../api/types";
 import { JsonView } from "./JsonView";
 import { CopyBtn } from "./CopyBtn";
@@ -6,6 +6,8 @@ import { formatMs } from "../utils";
 
 interface Props {
   completion: CompletionRecord;
+  focused?: boolean;
+  turn?: number;
 }
 
 function Panel({ title, value }: { title: string; value: any }) {
@@ -17,8 +19,11 @@ function Panel({ title, value }: { title: string; value: any }) {
   );
 }
 
-export function CompletionDiff({ completion }: Props) {
+export function CompletionDiff({ completion, focused = false, turn }: Props) {
   const [open, setOpen] = useState(false);
+  useEffect(() => {
+    if (focused) setOpen(true);
+  }, [focused]);
 
   const originalRequest = completion.original_request ?? {};
   const transformedRequest = completion.transformed_request ?? completion.request ?? {};
@@ -37,7 +42,7 @@ export function CompletionDiff({ completion }: Props) {
   ].filter(([, key]) => engineMetrics[key] != null);
 
   return (
-    <div className="rounded-lg border border-slate-200 bg-white">
+    <div className={`rounded-lg border bg-white ${focused ? "border-blue-500 ring-2 ring-blue-100" : "border-slate-200"}`}>
       <button
         type="button"
         className="flex w-full items-center justify-between px-3 py-2 text-left text-sm hover:bg-slate-50"
@@ -45,6 +50,7 @@ export function CompletionDiff({ completion }: Props) {
       >
         <div className="flex items-center gap-3">
           <span className="font-mono text-xs">{completion.completion_id}</span>
+          {turn != null && <span className="text-xs font-medium text-blue-700">turn {turn}</span>}
           <span className="text-xs text-slate-500">{completion.api_type ?? "?"}</span>
           <span className="text-xs text-slate-500">
             {completion.model_requested ?? "?"} → {completion.model_used ?? "?"}

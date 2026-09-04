@@ -25,6 +25,7 @@ type TabId = "timeline" | "trace" | "artifacts" | "completions" | "trajectory" |
 export function SessionDetail() {
   const { sessionId } = useParams<{ sessionId: string }>();
   const [tab, setTab] = useState<TabId>("timeline");
+  const [selectedTurn, setSelectedTurn] = useState<number | null>(null);
   const session = useSession(sessionId, 2000);
   const trajectory = useSessionTrajectory(sessionId);
   const completions = useSessionCompletions(sessionId, 2500);
@@ -132,6 +133,14 @@ export function SessionDetail() {
               trace={trace.data}
               loading={trace.isLoading}
               unavailable={trace.isError}
+              onOpenCompletion={(turn) => {
+                setSelectedTurn(turn);
+                setTab("completions");
+              }}
+              onOpenTrajectory={(turn) => {
+                setSelectedTurn(turn);
+                setTab("trajectory");
+              }}
             />
           )}
 
@@ -143,9 +152,15 @@ export function SessionDetail() {
             <div className="space-y-2">
               <div className="text-xs text-slate-500">
                 source: {completions.data?.source ?? "—"}
+                {selectedTurn != null && ` · selected turn ${selectedTurn}`}
               </div>
-              {(completions.data?.completions ?? []).map((c) => (
-                <CompletionDiff key={c.completion_id} completion={c} />
+              {(completions.data?.completions ?? []).map((c, index) => (
+                <CompletionDiff
+                  key={c.completion_id}
+                  completion={c}
+                  turn={index + 1}
+                  focused={selectedTurn === index + 1}
+                />
               ))}
               {!completions.data?.completions?.length && (
                 <div className="text-sm text-slate-500">
@@ -156,7 +171,14 @@ export function SessionDetail() {
           )}
 
           {tab === "trajectory" && (
-            <TraceList traces={trajectory.data?.traces ?? []} />
+            <div className="space-y-2">
+              {selectedTurn != null && (
+                <div className="rounded border border-blue-200 bg-blue-50 px-3 py-2 text-xs text-blue-800">
+                  Trace event selected turn {selectedTurn}. Search the messages below for its tool-use ID, command, or target from the event details.
+                </div>
+              )}
+              <TraceList traces={trajectory.data?.traces ?? []} />
+            </div>
           )}
 
           {tab === "evaluation" && (
