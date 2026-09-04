@@ -18,6 +18,8 @@ def test_polar_alert_rules_are_valid_and_cover_core_failure_modes() -> None:
     assert alerts == {
         "PolarGatewayTargetMissing",
         "PolarGatewayDown",
+        "PolarInferenceMetricsTargetDown",
+        "PolarPdBackendMetricsDown",
         "PolarTraceExportFailing",
         "PolarSessionBacklogHigh",
         "PolarSessionFailureRatioHigh",
