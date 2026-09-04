@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import type { ChromeTraceEvent, SessionTracePayload } from "../api/types";
 import { JsonView } from "./JsonView";
 
@@ -33,25 +33,50 @@ export function TraceWaterfall({
   const [query, setQuery] = useState("");
   const [processId, setProcessId] = useState("all");
   const [selected, setSelected] = useState<ChromeTraceEvent | null>(null);
+  const [zoomRange, setZoomRange] = useState<[number, number] | null>(null);
   const spans = useMemo(() => spanEvents(trace?.trace_events ?? []), [trace]);
+  const fullStart = spans.length ? Number(spans[0].ts) : 0;
+  const fullEnd = Math.max(
+    ...spans.map((span) => Number(span.ts) + Number(span.dur)),
+    fullStart + 1,
+  );
+  const start = zoomRange?.[0] ?? fullStart;
+  const end = zoomRange?.[1] ?? fullEnd;
+  const extent = Math.max(1, end - start);
+
+  useEffect(() => {
+    setSelected(null);
+    setZoomRange(null);
+  }, [trace?.session_id]);
+
   const filtered = useMemo(() => {
     const needle = query.trim().toLowerCase();
     return spans.filter((span) => {
       const processMatches = processId === "all" || String(span.pid) === processId;
       const textMatches = !needle || `${span.name ?? ""} ${span.cat ?? ""}`.toLowerCase().includes(needle);
-      return processMatches && textMatches;
+      const spanStart = Number(span.ts);
+      const spanEnd = spanStart + Number(span.dur);
+      const windowMatches = spanEnd >= start && spanStart <= end;
+      return processMatches && textMatches && windowMatches;
     });
-  }, [spans, processId, query]);
+  }, [spans, processId, query, start, end]);
 
   if (loading) return <div className="text-sm text-slate-500">Loading trace…</div>;
   if (unavailable || !trace) {
     return <div className="text-sm text-slate-500">No persisted trace is available for this session.</div>;
   }
 
-  const start = spans.length ? Number(spans[0].ts) : 0;
-  const end = Math.max(...spans.map((span) => Number(span.ts) + Number(span.dur)), start + 1);
-  const extent = Math.max(1, end - start);
   const selectedTurn = eventTurn(selected);
+  const zoomToSelected = () => {
+    if (!selected) return;
+    const selectedStart = Number(selected.ts);
+    const selectedDuration = Math.max(1, Number(selected.dur));
+    const padding = Math.max(selectedDuration * 2, (fullEnd - fullStart) * 0.0025);
+    setZoomRange([
+      Math.max(fullStart, selectedStart - padding),
+      Math.min(fullEnd, selectedStart + selectedDuration + padding),
+    ]);
+  };
 
   return (
     <div className="space-y-3">
@@ -71,13 +96,20 @@ export function TraceWaterfall({
           {[1, 2, 3].map((pid) => <option key={pid} value={pid}>{PROCESS_NAMES[pid]}</option>)}
         </select>
         <span className="text-slate-500">schema v{trace.schema_version} · {filtered.length}/{spans.length} spans</span>
+        {zoomRange && (
+          <button type="button" className="rounded border border-slate-300 px-2 py-1" onClick={() => setZoomRange(null)}>
+            Reset zoom
+          </button>
+        )}
         <a className="ml-auto text-blue-600 hover:underline" href={trace.download_url}>Download Perfetto JSON</a>
       </div>
       <div className="max-h-[560px] overflow-auto rounded border border-slate-200">
         {filtered.map((span, index) => {
-          const left = ((Number(span.ts) - start) / extent) * 100;
-          const width = Math.max(0.25, (Number(span.dur) / extent) * 100);
-          const offsetMs = (Number(span.ts) - start) / 1000;
+          const visibleStart = Math.max(start, Number(span.ts));
+          const visibleEnd = Math.min(end, Number(span.ts) + Number(span.dur));
+          const left = ((visibleStart - start) / extent) * 100;
+          const width = Math.max(0.25, ((visibleEnd - visibleStart) / extent) * 100);
+          const offsetMs = (Number(span.ts) - fullStart) / 1000;
           const durationMs = Number(span.dur) / 1000;
           return (
             <button
@@ -104,8 +136,11 @@ export function TraceWaterfall({
           <div className="mb-2 flex flex-wrap items-center gap-3">
             <span className="font-mono font-medium">{selected.name ?? "unnamed"}</span>
             <span>process: {PROCESS_NAMES[Number(selected.pid)] ?? selected.pid}</span>
-            <span>offset: {((Number(selected.ts) - start) / 1000).toFixed(2)} ms</span>
+            <span>offset: {((Number(selected.ts) - fullStart) / 1000).toFixed(2)} ms</span>
             <span>duration: {(Number(selected.dur) / 1000).toFixed(2)} ms</span>
+            <button type="button" className="rounded border border-blue-500 px-2 py-1 text-blue-700" onClick={zoomToSelected}>
+              Zoom to event
+            </button>
             {selectedTurn != null && (
               <>
                 <button type="button" className="ml-auto rounded bg-blue-600 px-2 py-1 text-white" onClick={() => onOpenCompletion?.(selectedTurn)}>
