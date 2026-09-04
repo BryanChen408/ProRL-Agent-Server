@@ -1,4 +1,4 @@
-import { formatMs } from "../lib/utils";
+import { formatMs } from "../utils";
 import type { SessionTiming } from "../api/types";
 
 interface Props {

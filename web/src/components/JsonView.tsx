@@ -1,5 +1,5 @@
 import { useMemo, useState } from "react";
-import { copyToClipboard } from "../lib/utils";
+import { copyToClipboard } from "../utils";
 
 interface Props {
   value: any;

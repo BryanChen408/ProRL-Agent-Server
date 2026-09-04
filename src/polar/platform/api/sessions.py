@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Request
+from fastapi.responses import FileResponse
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api")
@@ -23,6 +24,39 @@ def _load_session_file(state, session_id: str) -> tuple[dict[str, Any] | None, P
     except (OSError, ValueError) as exc:
         logger.warning("Failed to load %s: %s", path, exc)
         return None, path
+
+
+def _session_trace_file(state, session_id: str) -> Path | None:
+    """Resolve an exact trace filename under configured, bounded trace roots."""
+    if not session_id or Path(session_id).name != session_id:
+        return None
+    configured = state.config.topology.gateway.persist_traces_dir
+    if not configured:
+        return None
+    root = Path(configured)
+    if not root.is_absolute():
+        root = state.config.save_dir / root
+    root = root.resolve()
+    candidate = (root / f"{session_id}.json").resolve()
+    if candidate.parent != root or not candidate.is_file():
+        return None
+    return candidate
+
+
+def _load_trace_document(path: Path) -> tuple[int, dict[str, Any], list[dict[str, Any]]]:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise HTTPException(status_code=500, detail=f"Failed to read trace: {exc}") from exc
+    if isinstance(payload, list):
+        return 1, {}, [event for event in payload if isinstance(event, dict)]
+    if not isinstance(payload, dict) or not isinstance(payload.get("traceEvents"), list):
+        raise HTTPException(status_code=500, detail="Invalid trace document")
+    return (
+        int(payload.get("schemaVersion", 1)),
+        payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {},
+        [event for event in payload["traceEvents"] if isinstance(event, dict)],
+    )
 
 
 async def _find_gateway_for_session(state, session_id: str) -> tuple[str | None, dict[str, Any] | None]:
@@ -174,6 +208,36 @@ async def get_session_raw(request: Request, session_id: str) -> dict[str, Any]:
     if data is None:
         raise HTTPException(status_code=404, detail="Session file not found")
     return {"session_id": session_id, "file_path": str(path), "data": data}
+
+
+@router.get("/sessions/{session_id}/trace")
+async def get_session_trace(request: Request, session_id: str) -> dict[str, Any]:
+    state = request.app.state.platform
+    path = _session_trace_file(state, session_id)
+    if path is None:
+        raise HTTPException(status_code=404, detail="Session trace not found")
+    schema_version, metadata, events = _load_trace_document(path)
+    return {
+        "session_id": session_id,
+        "schema_version": schema_version,
+        "metadata": metadata,
+        "trace_events": events,
+        "event_count": len(events),
+        "download_url": f"/api/sessions/{session_id}/trace/download",
+    }
+
+
+@router.get("/sessions/{session_id}/trace/download")
+async def download_session_trace(request: Request, session_id: str) -> FileResponse:
+    state = request.app.state.platform
+    path = _session_trace_file(state, session_id)
+    if path is None:
+        raise HTTPException(status_code=404, detail="Session trace not found")
+    return FileResponse(
+        path,
+        media_type="application/json",
+        filename=f"{session_id}.trace.json",
+    )
 
 
 @router.delete("/sessions/{session_id}")

@@ -3,7 +3,7 @@ import { Link, useNavigate } from "react-router-dom";
 import { useTasks } from "../api/queries";
 import { StatusPill } from "../components/StatusPill";
 import { RewardChart } from "../components/RewardChart";
-import { relativeTime, shortId, formatReward } from "../lib/utils";
+import { relativeTime, shortId, formatReward } from "../utils";
 
 const STATUS_OPTIONS = ["all", "running", "completed", "failed"];
 

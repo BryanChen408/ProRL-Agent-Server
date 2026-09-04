@@ -2,7 +2,7 @@ import { useSearchParams, Link } from "react-router-dom";
 import { useTask } from "../api/queries";
 import { RewardChart } from "../components/RewardChart";
 import { StatusPill } from "../components/StatusPill";
-import { formatMs, formatReward } from "../lib/utils";
+import { formatMs, formatReward } from "../utils";
 
 function summarize(data: any) {
   const sessions: any[] = data?.sessions ?? [];

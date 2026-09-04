@@ -6,6 +6,7 @@ import {
   useSessionCompletions,
   useSessionEvaluation,
   useSessionRaw,
+  useSessionTrace,
 } from "../api/queries";
 import { api } from "../api/client";
 import { StageTimeline } from "../components/StageTimeline";
@@ -14,9 +15,10 @@ import { TraceList } from "../components/TraceList";
 import { JsonView } from "../components/JsonView";
 import { CopyBtn } from "../components/CopyBtn";
 import { StatusPill } from "../components/StatusPill";
-import { shortId } from "../lib/utils";
+import { TraceWaterfall } from "../components/TraceWaterfall";
+import { shortId } from "../utils";
 
-type TabId = "timeline" | "completions" | "trajectory" | "evaluation" | "raw";
+type TabId = "timeline" | "trace" | "completions" | "trajectory" | "evaluation" | "raw";
 
 export function SessionDetail() {
   const { sessionId } = useParams<{ sessionId: string }>();
@@ -26,6 +28,7 @@ export function SessionDetail() {
   const completions = useSessionCompletions(sessionId, 2500);
   const evaluation = useSessionEvaluation(sessionId);
   const raw = useSessionRaw(sessionId);
+  const trace = useSessionTrace(sessionId);
 
   const [cancelMsg, setCancelMsg] = useState<string | null>(null);
   const cancel = async () => {
@@ -95,6 +98,7 @@ export function SessionDetail() {
           {(
             [
               ["timeline", "Timeline"],
+              ["trace", `Trace (${trace.data?.event_count ?? 0})`],
               ["completions", `Completions (${completions.data?.completions?.length ?? 0})`],
               ["trajectory", `Trajectory (${trajectory.data?.traces?.length ?? 0})`],
               ["evaluation", "Evaluation"],
@@ -118,6 +122,14 @@ export function SessionDetail() {
 
         <div className="p-4">
           {tab === "timeline" && <StageTimeline timing={data?.timing} />}
+
+          {tab === "trace" && (
+            <TraceWaterfall
+              trace={trace.data}
+              loading={trace.isLoading}
+              unavailable={trace.isError}
+            />
+          )}
 
           {tab === "completions" && (
             <div className="space-y-2">

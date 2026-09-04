@@ -2,7 +2,7 @@ import { Link } from "react-router-dom";
 import { useTasks, useTopology } from "../api/queries";
 import { TopologyGraph } from "../components/TopologyGraph";
 import { StatusPill } from "../components/StatusPill";
-import { relativeTime, shortId, formatReward } from "../lib/utils";
+import { relativeTime, shortId, formatReward } from "../utils";
 
 export function Dashboard() {
   const topology = useTopology(2000);

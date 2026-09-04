@@ -3,6 +3,7 @@ import { api } from "./client";
 import type {
   CompletionRecord,
   EvaluationResult,
+  SessionTracePayload,
   TaskSummary,
   TopologyPayload,
   TrajectoryPayload,
@@ -75,5 +76,14 @@ export function useSessionRaw(sessionId: string | undefined) {
     enabled: !!sessionId,
     queryKey: ["session-raw", sessionId],
     queryFn: () => api.get<any>(`/api/sessions/${sessionId}/raw`),
+  });
+}
+
+export function useSessionTrace(sessionId: string | undefined) {
+  return useQuery({
+    enabled: !!sessionId,
+    queryKey: ["session-trace", sessionId],
+    queryFn: () => api.get<SessionTracePayload>(`/api/sessions/${sessionId}/trace`),
+    retry: false,
   });
 }
