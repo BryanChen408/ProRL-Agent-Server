@@ -50,6 +50,9 @@ class StageTimer:
         prompt_tokens: int = 0,
         response_tokens: int = 0,
         trace_timing: dict[str, int] | None = None,
+        trace_id: str | None = None,
+        engine_url: str | None = None,
+        engine_metrics: dict[str, float | int] | None = None,
     ) -> None:
         """Record one LLM inference call's timing (called by gateway proxy).
 
@@ -79,6 +82,16 @@ class StageTimer:
                 str(key): int(value)
                 for key, value in trace_timing.items()
                 if isinstance(value, int) and value >= 0
+            }
+        if trace_id:
+            call["trace_id"] = trace_id
+        if engine_url:
+            call["engine_url"] = engine_url
+        if engine_metrics:
+            call["engine_metrics"] = {
+                str(key): value
+                for key, value in engine_metrics.items()
+                if isinstance(value, (int, float)) and not isinstance(value, bool) and value >= 0
             }
         self._llm_calls.append(call)
 

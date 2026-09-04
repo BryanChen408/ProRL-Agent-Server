@@ -245,6 +245,9 @@ def _build_otlp_payload(
                     "turn": int(call.get("round", index + 1)),
                     "prompt_tokens": int(call.get("prompt_tokens", 0)),
                     "response_tokens": int(call.get("response_tokens", 0)),
+                    "polar.trace_id": call.get("trace_id", ""),
+                    "engine_url": call.get("engine_url", ""),
+                    **(call.get("engine_metrics") or {}),
                 },
             )
         )
@@ -264,6 +267,23 @@ def _build_otlp_payload(
                     attributes={**identity, "turn": int(call.get("round", index + 1))},
                 )
             )
+        for detail, detail_start, detail_end in _engine_metric_intervals(call):
+            spans.append(
+                _otlp_span(
+                    trace_id,
+                    _span_id(session_id, f"llm:{index}:engine:{detail}"),
+                    f"gateway_generation.engine.{detail}",
+                    detail_start,
+                    detail_end,
+                    parent_span_id=call_span_id,
+                    attributes={
+                        **identity,
+                        "turn": int(call.get("round", index + 1)),
+                        "position_derived": True,
+                        "duration_measured": True,
+                    },
+                )
+            )
     return {
         "resourceSpans": [{
             "resource": {"attributes": [_attribute("service.name", service_name)]},
@@ -273,6 +293,36 @@ def _build_otlp_payload(
             }],
         }]
     }
+
+
+def _engine_metric_intervals(call: dict[str, Any]) -> list[tuple[str, int, int]]:
+    """Anchor engine durations within the measured upstream request interval."""
+    metrics = call.get("engine_metrics") or {}
+    trace = call.get("trace_timing") or {}
+    start = trace.get("sglang_started_at_ns")
+    end = trace.get("sglang_finished_at_ns")
+    if not isinstance(start, int) or not isinstance(end, int):
+        return []
+    intervals: list[tuple[str, int, int]] = []
+    cursor = start
+    prefill_seen = False
+    for key, name in (("queue_ms", "queue"), ("prefill_ms", "prefill")):
+        value = metrics.get(key)
+        if not isinstance(value, (int, float)) or isinstance(value, bool):
+            continue
+        interval_end = min(end, cursor + int(max(0.0, float(value)) * 1_000_000))
+        intervals.append((name, cursor, interval_end))
+        cursor = interval_end
+        prefill_seen = prefill_seen or key == "prefill_ms"
+    if not prefill_seen and isinstance(metrics.get("ttft_ms"), (int, float)):
+        ttft_end = min(end, start + int(max(0.0, float(metrics["ttft_ms"])) * 1_000_000))
+        intervals.append(("time_to_first_token", start, ttft_end))
+        cursor = max(cursor, ttft_end)
+    decode = metrics.get("decode_ms")
+    if isinstance(decode, (int, float)) and not isinstance(decode, bool):
+        decode_end = min(end, cursor + int(max(0.0, float(decode)) * 1_000_000))
+        intervals.append(("decode", cursor, decode_end))
+    return intervals
 
 
 def _trace_identity(task_id: str, session_id: str, metadata: dict[str, Any]) -> dict[str, Any]:
