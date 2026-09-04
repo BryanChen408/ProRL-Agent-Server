@@ -1,0 +1,74 @@
+groups:
+  - name: polar-gateway-availability
+    rules:
+      - alert: PolarGatewayTargetMissing
+        expr: absent(up{job="polar-gateway"})
+        for: 5m
+        labels:
+          severity: critical
+          component: polar-gateway
+        annotations:
+          summary: Polar Gateway is absent from Prometheus service discovery
+          description: No polar-gateway target has been visible for at least five minutes.
+
+      - alert: PolarGatewayDown
+        expr: up{job="polar-gateway"} == 0
+        for: 2m
+        labels:
+          severity: critical
+          component: polar-gateway
+        annotations:
+          summary: Polar Gateway metrics endpoint is unreachable
+          description: Gateway {{ $labels.node_id }} has failed Prometheus scrapes for two minutes.
+
+      - alert: PolarTraceExportFailing
+        expr: increase(polar_observability_export_failures_total[5m]) > 0
+        for: 1m
+        labels:
+          severity: warning
+          component: polar-observability
+        annotations:
+          summary: Polar OTLP trace export is failing
+          description: Gateway {{ $labels.node_id }} reported at least one failed trace export in five minutes.
+
+  - name: polar-gateway-performance
+    rules:
+      - alert: PolarSessionBacklogHigh
+        expr: sum by (node_id) (polar_gateway_sessions{stage=~"init_queue_depth|ready_depth|postrun_queue_depth"}) >= 50
+        for: 15m
+        labels:
+          severity: warning
+          component: polar-scheduler
+        annotations:
+          summary: Polar session backlog remains high
+          description: Gateway {{ $labels.node_id }} has retained at least 50 queued sessions for 15 minutes.
+
+      - alert: PolarSessionFailureRatioHigh
+        expr: (sum by (node_id) (rate(polar_sessions_total{status=~"error|failed|timeout"}[10m])) / clamp_min(sum by (node_id) (rate(polar_sessions_total[10m])), 0.001)) > 0.1
+        for: 10m
+        labels:
+          severity: warning
+          component: polar-rollout
+        annotations:
+          summary: Polar session failure ratio exceeds 10 percent
+          description: More than 10 percent of completed sessions on {{ $labels.node_id }} have failed over the last ten minutes.
+
+      - alert: PolarSessionLatencyP95High
+        expr: histogram_quantile(0.95, sum by (node_id, le) (rate(polar_session_duration_seconds_bucket[10m]))) > 900
+        for: 10m
+        labels:
+          severity: warning
+          component: polar-rollout
+        annotations:
+          summary: Polar session p95 latency exceeds 15 minutes
+          description: End-to-end session p95 on {{ $labels.node_id }} has exceeded 900 seconds for ten minutes.
+
+      - alert: PolarInferenceLatencyP95High
+        expr: histogram_quantile(0.95, sum by (node_id, engine, le) (rate(polar_inference_request_duration_seconds_bucket[10m]))) > 120
+        for: 10m
+        labels:
+          severity: warning
+          component: inference-engine
+        annotations:
+          summary: Polar inference p95 latency exceeds two minutes
+          description: Inference p95 for {{ $labels.engine }} on {{ $labels.node_id }} has exceeded 120 seconds for ten minutes.
