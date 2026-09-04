@@ -50,6 +50,20 @@ def _timing() -> SessionTiming:
 def test_prometheus_metrics_are_low_cardinality() -> None:
     async def _run() -> str:
         exporter = SessionObservability(node_id="node-a", gateway_url="http://node-a:8081")
+        exporter.record_inference(
+            engine_name="vllm",
+            prompt_tokens=10,
+            response_tokens=4,
+            roundtrip_ms=700,
+            engine_metrics={
+                "queue_ms": 10,
+                "ttft_ms": 100,
+                "prefill_ms": 90,
+                "decode_ms": 500,
+                "num_cached_tokens": 8,
+                "prefix_cache_hit_pct": 80,
+            },
+        )
         async with httpx.AsyncClient() as client:
             await exporter.record_session(
                 client,
@@ -65,8 +79,38 @@ def test_prometheus_metrics_are_low_cardinality() -> None:
 
     assert 'polar_sessions_total{node_id="node-a",status="completed"} 1' in metrics
     assert 'polar_llm_tokens_total{node_id="node-a",direction="prompt"} 10' in metrics
+    assert 'polar_llm_tokens_total{node_id="node-a",direction="response"} 4' in metrics
+    assert 'polar_inference_requests_total{node_id="node-a",engine="vllm"} 1' in metrics
+    assert (
+        'polar_inference_decode_seconds_count{node_id="node-a",engine="vllm"} 1'
+        in metrics
+    )
+    assert (
+        'polar_inference_cached_prompt_tokens_total{node_id="node-a",engine="vllm"} 8'
+        in metrics
+    )
+    assert (
+        'polar_inference_prefix_cache_hit_ratio_sum{node_id="node-a",engine="vllm"} 0.8'
+        in metrics
+    )
     assert 'polar_gateway_sessions{node_id="node-a",stage="run_inflight"} 2' in metrics
     assert "secret-session-id" not in metrics
+
+
+def test_inference_metrics_are_visible_before_session_completion() -> None:
+    exporter = SessionObservability(node_id="node-a", gateway_url="http://node-a:8081")
+
+    exporter.record_inference(
+        engine_name="sglang",
+        prompt_tokens=20,
+        response_tokens=5,
+        roundtrip_ms=250,
+    )
+
+    metrics = exporter.render_prometheus(NodeStageMetrics(run_inflight=1))
+    assert 'polar_llm_calls_total{node_id="node-a"} 1' in metrics
+    assert 'polar_inference_tokens_total{node_id="node-a",engine="sglang",direction="response"} 5' in metrics
+    assert 'polar_sessions_total' in metrics
 
 
 def test_otlp_export_has_one_trace_and_parent_child_spans() -> None:

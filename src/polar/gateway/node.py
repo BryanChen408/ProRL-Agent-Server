@@ -363,6 +363,13 @@ class GatewayNodeManager:
                 engine_url=engine_url,
                 engine_metrics=engine_metrics,
             )
+        self.observability.record_inference(
+            engine_name=engine_name,
+            prompt_tokens=prompt_tokens,
+            response_tokens=response_tokens,
+            roundtrip_ms=roundtrip_ms,
+            engine_metrics=engine_metrics,
+        )
         # Also log for direct API sessions — visible in gateway logs
         logger.info(
             "llm_call session=%s engine=%s acquire=%.0fms prepare=%.0fms inference=%.0fms normalize=%.0fms p_t=%d r_t=%d",
