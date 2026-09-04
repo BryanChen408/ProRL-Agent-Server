@@ -63,6 +63,12 @@ gateway:
   # Relative paths are resolved under this run's output directory.
   session_trace_json: true
   persist_traces_dir: perfetto_traces
+  # RL-Insight integration. /metrics is always local; setting the two URLs also
+  # registers this gateway as a scrape target and sends correlated spans to Tempo.
+  observability:
+    prometheus_enabled: true
+    # rl_insight_url: http://127.0.0.1:18080
+    # otlp_endpoint: http://127.0.0.1:4318/v1/traces
   completion_persistence:
     enabled: true
     max_field_bytes: 67108864

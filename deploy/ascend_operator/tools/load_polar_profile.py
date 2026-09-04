@@ -425,6 +425,7 @@ def main() -> int:
             "persist_traces_dir": (
                 str(persist_traces_dir) if persist_traces_dir is not None else None
             ),
+            "observability": dict(gateway.get("observability") or {}),
             "completion_persistence": {
                 "enabled": bool(completion_persistence.get("enabled", True)),
                 "max_field_bytes": int(completion_persistence.get("max_field_bytes", 64 * 1024 * 1024)),

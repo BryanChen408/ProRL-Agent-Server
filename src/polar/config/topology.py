@@ -94,6 +94,32 @@ class _CompletionPersistenceConfig(_StrictModel):
     queue_size: int = Field(default=1024, gt=0)
 
 
+class _ObservabilityConfig(_StrictModel):
+    """Optional RL-Insight-compatible centralized observability outputs."""
+
+    prometheus_enabled: bool = True
+    rl_insight_url: str | None = None
+    otlp_endpoint: str | None = None
+    otlp_headers: dict[str, str] = Field(default_factory=dict)
+    export_timeout_seconds: float = Field(default=3.0, gt=0)
+    service_name: str = "polar-gateway"
+
+    @field_validator("rl_insight_url", "otlp_endpoint")
+    @classmethod
+    def _validate_optional_url(cls, value: str | None, info) -> str | None:
+        if value is None:
+            return None
+        return _normalize_http_url(value, f"gateway.observability.{info.field_name}")
+
+    @field_validator("service_name")
+    @classmethod
+    def _validate_service_name(cls, value: str) -> str:
+        text = value.strip()
+        if not text:
+            raise ValueError("gateway.observability.service_name must be non-empty")
+        return text
+
+
 class OperatorProfileConfig(BaseModel):
     """Polar-owned profile used to expand thin operator sample requests."""
 
@@ -107,6 +133,7 @@ class GatewayConfig(_StrictModel):
     completion_persistence: _CompletionPersistenceConfig = Field(
         default_factory=_CompletionPersistenceConfig
     )
+    observability: _ObservabilityConfig = Field(default_factory=_ObservabilityConfig)
     # ── Per-session trace artifacts ──
     session_trace_json: bool = True
     session_trace_wandb: bool = False
