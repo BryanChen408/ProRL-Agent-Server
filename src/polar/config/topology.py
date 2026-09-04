@@ -139,6 +139,9 @@ class GatewayConfig(_StrictModel):
     session_trace_wandb: bool = False
     session_trace_wandb_project: str = "polar-session-traces"
     persist_traces_dir: str | None = None
+    persist_session_artifacts: bool = True
+    session_artifacts_max_bytes: int = Field(default=2 * 1024 * 1024 * 1024, gt=0)
+    session_artifacts_max_files: int = Field(default=1000, gt=0)
 
     @field_validator("rollout_server_url")
     @classmethod

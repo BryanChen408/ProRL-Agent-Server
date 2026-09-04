@@ -21,8 +21,10 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import shlex
 import subprocess
 import sys
+import tarfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -411,3 +413,49 @@ def test_over_limit_exit_does_not_attach_stale_metrics_to_current_source(tmp_pat
     assert proc.returncode == 0, proc.stderr
     assert not capture.exists(), "超限退出仍然用旧 metrics 提升了 candidate"
     assert "LIMIT_EXHAUSTED" in proc.stdout
+
+
+def test_optional_msprof_archive_is_explicit_and_keeps_default_lightweight():
+    script = PIPELINE.read_text(encoding="utf-8")
+
+    assert 'POLAR_PERSIST_MSPROF_RAW:-0' in script
+    assert 'PERF_EXTRA_ARGS+=(--keep-prof)' in script
+    assert 'msprof_artifacts.tar.gz' in script
+    assert '"${PERF_EXTRA_ARGS[@]}"' in script
+
+
+def test_msprof_archive_includes_grouped_and_per_case_outputs(tmp_path):
+    task_name = "task with spaces"
+    expected = {
+        f"msprof_quick_grouped_{task_name}",
+        f"msprof_quick_ref_{task_name}_c0",
+        f"msprof_quick_asc_{task_name}_c0",
+    }
+    for name in expected | {"msprof_quick_grouped_unrelated"}:
+        directory = tmp_path / name
+        directory.mkdir()
+        (directory / "capture.bin").write_bytes(b"profile data")
+
+    script = PIPELINE.read_text(encoding="utf-8")
+    archive_start = script.index('if [[ "${POLAR_PERSIST_MSPROF_RAW:-0}"', script.index('[[ -f "$PERF_JSON" ]]'))
+    archive_end = script.index('\nSP=', archive_start)
+    archive_script = script[archive_start:archive_end].replace(
+        "/tmp/msprof_quick_", f"{shlex.quote(str(tmp_path))}/msprof_quick_"
+    )
+    proc = subprocess.run(
+        ["bash", "-c", "set -eu\n" + archive_script],
+        env=_status_env(
+            tmp_path,
+            TASK_DIR=str(tmp_path / task_name),
+            OUT_DIR=str(tmp_path),
+            POLAR_PERSIST_MSPROF_RAW="1",
+        ),
+        capture_output=True,
+        text=True,
+    )
+    assert proc.returncode == 0, proc.stderr
+    with tarfile.open(tmp_path / "msprof_artifacts.tar.gz") as archive:
+        captures = [member for member in archive.getmembers() if member.isfile()]
+        assert {Path(member.name).parent.name for member in captures} == expected
+        for member in captures:
+            assert archive.extractfile(member).read() == b"profile data"

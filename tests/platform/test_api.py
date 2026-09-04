@@ -11,6 +11,7 @@ from fastapi.testclient import TestClient
 
 from polar.platform.config import PlatformConfig
 from polar.platform.server import create_app
+from polar.rollout.artifacts import persist_profiling_artifacts
 
 
 @pytest.fixture()
@@ -32,6 +33,15 @@ def topology_with_results(tmp_path: Path) -> Path:
             }],
             "metadata": {"sessionId": "abc"},
         })
+    )
+    artifact_source = tmp_path / "session_artifacts"
+    artifact_source.mkdir()
+    (artifact_source / "msprof_summary.json").write_text('{"kernel": "Add"}')
+    persist_profiling_artifacts(
+        artifact_source,
+        trace_dir,
+        session_id="abc",
+        max_total_bytes=1024,
     )
     task_dir = save_dir / "task_demo-claude_code-001"
     task_dir.mkdir()
@@ -163,6 +173,24 @@ def test_session_trace_view_and_download(topology_with_results: Path) -> None:
         assert download.status_code == 200
         assert download.headers["content-type"] == "application/json"
         assert "abc.trace.json" in download.headers["content-disposition"]
+
+
+def test_session_artifact_manifest_and_download(topology_with_results: Path) -> None:
+    with _client(topology_with_results) as client:
+        response = client.get("/api/sessions/abc/artifacts")
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["artifact_count"] == 1
+        artifact = payload["artifacts"][0]
+        assert artifact["kind"] == "profiler"
+        assert artifact["relative_path"] == "msprof_summary.json"
+
+        download = client.get(artifact["download_url"])
+        assert download.status_code == 200
+        assert download.json() == {"kernel": "Add"}
+
+        missing = client.get("/api/sessions/abc/artifacts/not-in-manifest")
+        assert missing.status_code == 404
 
 
 def test_dashboard_has_no_submit_or_templates(topology_with_results: Path) -> None:

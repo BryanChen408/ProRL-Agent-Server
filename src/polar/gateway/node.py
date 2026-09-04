@@ -30,6 +30,7 @@ from polar.agent.factory import create_harness
 from polar.agent.models import AgentRunResult
 from polar.run_namespace import run_dir_name, run_id_from_metadata
 from polar.rollout.agent_actions import extract_completed_agent_actions
+from polar.rollout.artifacts import persist_profiling_artifacts
 from polar.rollout.models import (
     NodeHeartbeatRequest,
     NodeRegistrationRequest,
@@ -92,6 +93,9 @@ class GatewayNodeManager:
         enable_session_trace_json: bool = True,
         session_trace_wandb_project: str = "polar-session-traces",
         persist_traces_dir: str | None = None,
+        persist_session_artifacts: bool = True,
+        session_artifacts_max_bytes: int = 2 * 1024 * 1024 * 1024,
+        session_artifacts_max_files: int = 1000,
         prometheus_enabled: bool = True,
         rl_insight_url: str | None = None,
         otlp_endpoint: str | None = None,
@@ -116,6 +120,9 @@ class GatewayNodeManager:
         self._enable_session_trace_json = enable_session_trace_json
         self._session_trace_wandb_project = session_trace_wandb_project
         self._persist_traces_dir = Path(persist_traces_dir) if persist_traces_dir else None
+        self._persist_session_artifacts = persist_session_artifacts
+        self._session_artifacts_max_bytes = session_artifacts_max_bytes
+        self._session_artifacts_max_files = session_artifacts_max_files
         self.observability = SessionObservability(
             node_id=node_id,
             gateway_url=self.gateway_url,
@@ -447,7 +454,12 @@ class GatewayNodeManager:
             session_id=session_id,
             task_id=request.task_id,
             status=result.status,
-            metadata=dict(request.metadata),
+            metadata={
+                **request.metadata,
+                "profiling_artifact_count": (
+                    (result.metadata.get("profiling_artifacts") or {}).get("artifact_count", 0)
+                ),
+            },
         )
 
         # ── Option C: Chrome Trace Event JSON ──
@@ -458,6 +470,9 @@ class GatewayNodeManager:
                     session_id=session_id,
                     node_id=self.node_id,
                     task_id=request.task_id,
+                )
+                trace_document["metadata"]["profilingArtifacts"] = result.metadata.get(
+                    "profiling_artifacts", {}
                 )
                 trace_json = json.dumps(trace_document, ensure_ascii=False)
                 # Always write inside the session directory (for debugging).
@@ -1046,6 +1061,19 @@ class GatewayNodeManager:
                 managed.timer,
                 "post-run finished without producing a session result",
             )
+        profiling_artifacts = await asyncio.to_thread(
+            self._persist_profiling_artifacts_manifest,
+            managed,
+        )
+        if profiling_artifacts:
+            result = result.model_copy(
+                update={
+                    "metadata": {
+                        **result.metadata,
+                        "profiling_artifacts": profiling_artifacts,
+                    }
+                }
+            )
         try:
             normalized = result.model_copy(
                 update={
@@ -1071,6 +1099,21 @@ class GatewayNodeManager:
             await self._remove_session_dir_best_effort(
                 managed.session_dir, request.session_id
             )
+
+    def _persist_profiling_artifacts_manifest(self, managed: ManagedSession) -> dict[str, Any]:
+        if not self._persist_session_artifacts or self._persist_traces_dir is None:
+            return {}
+        try:
+            return persist_profiling_artifacts(
+                managed.artifacts_dir,
+                self._persist_traces_dir,
+                session_id=managed.session_id,
+                max_total_bytes=self._session_artifacts_max_bytes,
+                max_files=self._session_artifacts_max_files,
+            )
+        except Exception:
+            logger.exception("Failed to persist profiling artifacts for %s", managed.session_id)
+            return {}
 
     async def _close_inflight_generations(
         self,

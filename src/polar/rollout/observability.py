@@ -337,6 +337,7 @@ def _trace_identity(task_id: str, session_id: str, metadata: dict[str, Any]) -> 
         "session_id": session_id,
         "task_id": task_id,
         "policy_version": metadata.get("policy_version", ""),
+        "profiling_artifact_count": metadata.get("profiling_artifact_count", 0),
     }
 
 

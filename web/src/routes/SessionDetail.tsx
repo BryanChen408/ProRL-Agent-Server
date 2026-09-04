@@ -7,6 +7,7 @@ import {
   useSessionEvaluation,
   useSessionRaw,
   useSessionTrace,
+  useSessionArtifacts,
 } from "../api/queries";
 import { api } from "../api/client";
 import { StageTimeline } from "../components/StageTimeline";
@@ -16,9 +17,10 @@ import { JsonView } from "../components/JsonView";
 import { CopyBtn } from "../components/CopyBtn";
 import { StatusPill } from "../components/StatusPill";
 import { TraceWaterfall } from "../components/TraceWaterfall";
+import { ArtifactList } from "../components/ArtifactList";
 import { shortId } from "../utils";
 
-type TabId = "timeline" | "trace" | "completions" | "trajectory" | "evaluation" | "raw";
+type TabId = "timeline" | "trace" | "artifacts" | "completions" | "trajectory" | "evaluation" | "raw";
 
 export function SessionDetail() {
   const { sessionId } = useParams<{ sessionId: string }>();
@@ -29,6 +31,7 @@ export function SessionDetail() {
   const evaluation = useSessionEvaluation(sessionId);
   const raw = useSessionRaw(sessionId);
   const trace = useSessionTrace(sessionId);
+  const artifacts = useSessionArtifacts(sessionId);
 
   const [cancelMsg, setCancelMsg] = useState<string | null>(null);
   const cancel = async () => {
@@ -99,6 +102,7 @@ export function SessionDetail() {
             [
               ["timeline", "Timeline"],
               ["trace", `Trace (${trace.data?.event_count ?? 0})`],
+              ["artifacts", `Artifacts (${artifacts.data?.artifact_count ?? 0})`],
               ["completions", `Completions (${completions.data?.completions?.length ?? 0})`],
               ["trajectory", `Trajectory (${trajectory.data?.traces?.length ?? 0})`],
               ["evaluation", "Evaluation"],
@@ -129,6 +133,10 @@ export function SessionDetail() {
               loading={trace.isLoading}
               unavailable={trace.isError}
             />
+          )}
+
+          {tab === "artifacts" && (
+            <ArtifactList payload={artifacts.data} loading={artifacts.isLoading} />
           )}
 
           {tab === "completions" && (

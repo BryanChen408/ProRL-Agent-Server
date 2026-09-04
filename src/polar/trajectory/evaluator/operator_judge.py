@@ -27,6 +27,8 @@ change freely. Config (``EvaluatorSpec.config``):
                   path against the container ROOT — without this they'd never meet -> a deterministic
                   false-negative ``submission_missing``). Absolute paths pass through unchanged.
   judge_timeout   (float, default 1800)
+  artifact_paths  (list[str], optional) — additional judge outputs downloaded into
+                  the session artifact directory after metrics are collected
 
 Set ``evaluator.refresh_runtime: true`` in the request so final scoring uses a fresh judge runtime.
 """
@@ -87,6 +89,7 @@ class OperatorJudgeEvaluator(BaseTrajectoryEvaluator):
         task_path: str | None = None,
         verify_dir: str = "judge_out/cannbot_verify",
         triton_impl_name: str = "triton_ascend_impl",
+        artifact_paths: list[str] | None = None,
         **_: Any,
     ) -> None:
         if not str(op_name).strip():
@@ -109,6 +112,7 @@ class OperatorJudgeEvaluator(BaseTrajectoryEvaluator):
         self.task_path = task_path or f"input/{op_name}.py"
         self.verify_dir = verify_dir
         self.triton_impl_name = triton_impl_name
+        self.artifact_paths = [str(path) for path in (artifact_paths or []) if str(path).strip()]
 
     def _default_submission_path(self) -> str:
         if self.judge_mode == self.CANNBOT_MODE:
@@ -332,6 +336,8 @@ class OperatorJudgeEvaluator(BaseTrajectoryEvaluator):
                 process_path.unlink(missing_ok=True)
                 logger.warning("operator_judge t3a: process reward unavailable", exc_info=True)
 
+        await self._download_optional_artifacts(judge_rt, artifacts_dir)
+
         return self._scored(
             metrics,
             artifacts_dir,
@@ -365,6 +371,28 @@ class OperatorJudgeEvaluator(BaseTrajectoryEvaluator):
         manifest = artifacts_dir / "t3a_judge_index.json"
         manifest.write_text(json.dumps(relocated, ensure_ascii=False))
         await judge_rt.upload_file(str(manifest), self._abs("judge/t3a_candidates/index.json"))
+
+    async def _download_optional_artifacts(
+        self,
+        judge_rt: BaseRuntime,
+        artifacts_dir: Path,
+    ) -> None:
+        """Download configured profiler outputs without affecting authoritative scoring."""
+        for configured_path in self.artifact_paths:
+            filename = posixpath.basename(configured_path.rstrip("/"))
+            if not filename or filename in {".", ".."}:
+                continue
+            try:
+                await judge_rt.download_file(
+                    self._abs(configured_path),
+                    str(artifacts_dir / filename),
+                )
+            except Exception:
+                logger.info(
+                    "Optional judge artifact unavailable: %s",
+                    configured_path,
+                    exc_info=True,
+                )
 
     async def _evaluate_cannbot(
         self,

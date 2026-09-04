@@ -26,21 +26,45 @@ def _load_session_file(state, session_id: str) -> tuple[dict[str, Any] | None, P
         return None, path
 
 
-def _session_trace_file(state, session_id: str) -> Path | None:
-    """Resolve an exact trace filename under configured, bounded trace roots."""
-    if not session_id or Path(session_id).name != session_id:
-        return None
+def _session_trace_root(state) -> Path | None:
     configured = state.config.topology.gateway.persist_traces_dir
     if not configured:
         return None
     root = Path(configured)
     if not root.is_absolute():
         root = state.config.save_dir / root
-    root = root.resolve()
+    return root.resolve()
+
+
+def _session_trace_file(state, session_id: str) -> Path | None:
+    """Resolve an exact trace filename under the configured, bounded trace root."""
+    if not session_id or Path(session_id).name != session_id:
+        return None
+    root = _session_trace_root(state)
+    if root is None:
+        return None
     candidate = (root / f"{session_id}.json").resolve()
     if candidate.parent != root or not candidate.is_file():
         return None
     return candidate
+
+
+def _load_artifact_manifest(state, session_id: str) -> tuple[dict[str, Any], Path] | None:
+    if not session_id or Path(session_id).name != session_id:
+        return None
+    root = _session_trace_root(state)
+    if root is None:
+        return None
+    path = (root / f"{session_id}.artifacts.json").resolve()
+    if path.parent != root or not path.is_file():
+        return None
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(payload, dict) or not isinstance(payload.get("artifacts"), list):
+        return None
+    return payload, root
 
 
 def _load_trace_document(path: Path) -> tuple[int, dict[str, Any], list[dict[str, Any]]]:
@@ -237,6 +261,60 @@ async def download_session_trace(request: Request, session_id: str) -> FileRespo
         path,
         media_type="application/json",
         filename=f"{session_id}.trace.json",
+    )
+
+
+@router.get("/sessions/{session_id}/artifacts")
+async def get_session_artifacts(request: Request, session_id: str) -> dict[str, Any]:
+    loaded = _load_artifact_manifest(request.app.state.platform, session_id)
+    if loaded is None:
+        return {
+            "session_id": session_id,
+            "artifact_count": 0,
+            "total_bytes": 0,
+            "skipped_bytes": 0,
+            "artifacts": [],
+        }
+    manifest, _root = loaded
+    artifacts = []
+    for item in manifest["artifacts"]:
+        if not isinstance(item, dict) or not item.get("id"):
+            continue
+        artifacts.append({
+            **item,
+            "download_url": f"/api/sessions/{session_id}/artifacts/{item['id']}",
+        })
+    return {**manifest, "artifacts": artifacts}
+
+
+@router.get("/sessions/{session_id}/artifacts/{artifact_id}")
+async def download_session_artifact(
+    request: Request,
+    session_id: str,
+    artifact_id: str,
+) -> FileResponse:
+    loaded = _load_artifact_manifest(request.app.state.platform, session_id)
+    if loaded is None:
+        raise HTTPException(status_code=404, detail="Session artifact not found")
+    manifest, root = loaded
+    entry = next(
+        (
+            item
+            for item in manifest["artifacts"]
+            if isinstance(item, dict) and str(item.get("id")) == artifact_id
+        ),
+        None,
+    )
+    if entry is None:
+        raise HTTPException(status_code=404, detail="Session artifact not found")
+    artifact_root = (root / f"{session_id}.artifacts").resolve()
+    path = (artifact_root / str(entry.get("relative_path", ""))).resolve()
+    if not path.is_relative_to(artifact_root) or not path.is_file():
+        raise HTTPException(status_code=404, detail="Session artifact not found")
+    return FileResponse(
+        path,
+        media_type=str(entry.get("media_type") or "application/octet-stream"),
+        filename=str(entry.get("name") or path.name),
     )
 
 
