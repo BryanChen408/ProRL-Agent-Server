@@ -231,6 +231,8 @@ def test_v2_trace_preserves_measured_clock_positions() -> None:
             "response_finished_at_ns": 1_700_000_000_800_000_000,
         },
         trace_id="session-1:1",
+        engine_name="vllm",
+        engine_url="http://engine:8000",
         engine_metrics={
             "queue_ms": 10,
             "prefill_ms": 40,
@@ -249,10 +251,12 @@ def test_v2_trace_preserves_measured_clock_positions() -> None:
     queue = next(event for event in spans if event["name"] == "register_to_init_queue")
     assert queue["ts"] == 1_700_000_000_000_000
     assert queue["dur"] == 125_000
-    sglang = next(event for event in spans if event["name"] == "llm_call_1/sglang")
-    assert sglang["ts"] == 1_700_000_000_650_000
-    assert sglang["dur"] == 100_000
-    assert sglang["args"]["measured"] is True
+    inference = next(event for event in spans if event["name"] == "llm_call_1/inference")
+    assert inference["ts"] == 1_700_000_000_650_000
+    assert inference["dur"] == 100_000
+    assert inference["args"]["measured"] is True
+    assert inference["args"]["engine"] == "vllm"
+    assert inference["args"]["engine_url"] == "http://engine:8000"
     prefill = next(event for event in spans if event["name"] == "llm_call_1/engine/prefill")
     decode = next(event for event in spans if event["name"] == "llm_call_1/engine/decode")
     assert prefill["dur"] == 40_000

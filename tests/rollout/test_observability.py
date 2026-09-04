@@ -29,6 +29,8 @@ def _timing() -> SessionTiming:
             "prompt_tokens": 10,
             "response_tokens": 4,
             "trace_id": "session-1:1",
+            "engine_name": "vllm",
+            "engine_url": "http://engine:8000",
             "engine_metrics": {
                 "queue_ms": 10.0,
                 "prefill_ms": 90.0,
@@ -95,13 +97,19 @@ def test_otlp_export_has_one_trace_and_parent_child_spans() -> None:
     spans = captured[0]["resourceSpans"][0]["scopeSpans"][0]["spans"]
     root = next(span for span in spans if span["name"] == "agent_session")
     generation = next(span for span in spans if span["name"] == "gateway_generation")
-    engine = next(span for span in spans if span["name"] == "gateway_generation.sglang")
+    engine = next(span for span in spans if span["name"] == "gateway_generation.inference")
     prefill = next(
         span for span in spans if span["name"] == "gateway_generation.engine.prefill"
     )
     assert {span["traceId"] for span in spans} == {root["traceId"]}
     assert generation["parentSpanId"] == root["spanId"]
     assert engine["parentSpanId"] == generation["spanId"]
+    engine_attributes = {
+        item["key"]: next(iter(item["value"].values()))
+        for item in engine["attributes"]
+    }
+    assert engine_attributes["engine"] == "vllm"
+    assert engine_attributes["engine_url"] == "http://engine:8000"
     assert prefill["parentSpanId"] == generation["spanId"]
     assert int(prefill["endTimeUnixNano"]) - int(prefill["startTimeUnixNano"]) == 90_000_000
     attributes = {

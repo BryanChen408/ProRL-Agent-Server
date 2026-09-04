@@ -51,6 +51,7 @@ class StageTimer:
         response_tokens: int = 0,
         trace_timing: dict[str, int] | None = None,
         trace_id: str | None = None,
+        engine_name: str | None = None,
         engine_url: str | None = None,
         engine_metrics: dict[str, float | int] | None = None,
     ) -> None:
@@ -85,6 +86,8 @@ class StageTimer:
             }
         if trace_id:
             call["trace_id"] = trace_id
+        if engine_name:
+            call["engine_name"] = engine_name
         if engine_url:
             call["engine_url"] = engine_url
         if engine_metrics:
