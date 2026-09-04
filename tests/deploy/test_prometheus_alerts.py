@@ -5,6 +5,9 @@ from pathlib import Path
 import yaml
 
 RULES = Path("deploy/observability/prometheus/polar_alerts.yaml")
+RECORDING_RULES = Path(
+    "deploy/observability/prometheus/polar_engine_recording_rules.yaml"
+)
 
 
 def test_polar_alert_rules_are_valid_and_cover_core_failure_modes() -> None:
@@ -33,3 +36,16 @@ def test_polar_alert_rules_do_not_introduce_high_cardinality_labels() -> None:
 
     assert all("session_id" not in expression for expression in expressions)
     assert all("task_id" not in expression for expression in expressions)
+
+
+def test_engine_recording_rules_normalize_native_vllm_histograms() -> None:
+    payload = yaml.safe_load(RECORDING_RULES.read_text(encoding="utf-8"))
+    rules = [rule for group in payload["groups"] for rule in group["rules"]]
+    records = {rule["record"] for rule in rules}
+
+    for phase in ("queue", "ttft", "prefill", "decode"):
+        for suffix in ("bucket", "sum", "count"):
+            assert f"polar_inference_{phase}_seconds_{suffix}" in records
+    assert "polar_inference_prefix_cache_hit_ratio" in records
+    assert all(rule["labels"]["engine"] == "vllm-native" for rule in rules)
+    assert all('job="polar-inference-engine"' in rule["expr"] for rule in rules)
