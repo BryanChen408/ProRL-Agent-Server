@@ -1,7 +1,12 @@
-"""Filesystem index over `<save_dir>/task_*/`.
+"""Filesystem index over rollout result task directories.
 
 Scans rollout result directories so the platform service can list and detail
 historical tasks even when the rollout server has been restarted.
+
+Both layouts emitted by Polar are supported::
+
+    <save_dir>/task_*/
+    <save_dir>/run_*/task_*/
 """
 
 from __future__ import annotations
@@ -263,7 +268,7 @@ def _scan_task_dir(task_dir: Path) -> TaskSummary | None:
 
 
 class FsIndex:
-    """Maintains an in-memory summary of `<save_dir>/task_*/` directories."""
+    """Maintains an in-memory summary of task directories below ``save_dir``."""
 
     def __init__(self, save_dir: Path) -> None:
         self.save_dir = Path(save_dir)
@@ -280,16 +285,29 @@ class FsIndex:
         """Register a `callback(task_summary)` invoked on every detected change."""
         self._on_change_callbacks.append(callback)
 
+    def _task_dirs(self) -> list[Path]:
+        """Return direct tasks plus tasks nested under one Polar ``run_*`` layer."""
+        task_dirs: list[Path] = []
+        for entry in sorted(self.save_dir.iterdir()):
+            if not entry.is_dir():
+                continue
+            if entry.name.startswith("task_"):
+                task_dirs.append(entry)
+                continue
+            if entry.name.startswith("run_"):
+                task_dirs.extend(
+                    child
+                    for child in sorted(entry.iterdir())
+                    if child.is_dir() and child.name.startswith("task_")
+                )
+        return task_dirs
+
     def scan(self) -> None:
         """Rebuild the index by walking save_dir. Safe to call from any thread."""
         if not self.save_dir.exists():
             return
         new_tasks: dict[str, TaskSummary] = {}
-        for entry in sorted(self.save_dir.iterdir()):
-            if not entry.is_dir():
-                continue
-            if not entry.name.startswith("task_"):
-                continue
+        for entry in self._task_dirs():
             summary = _scan_task_dir(entry)
             if summary is None:
                 continue
@@ -351,10 +369,11 @@ class FsIndex:
         return None
 
     def task_dir_for(self, task_id: str) -> Path | None:
-        candidate = self.save_dir / f"task_{task_id}"
-        if candidate.exists():
-            return candidate
-        return None
+        summary = self.get_task(task_id)
+        if summary is None:
+            return None
+        candidate = Path(summary.save_dir_path)
+        return candidate if candidate.is_dir() else None
 
     async def start_polling(self) -> None:
         if self._poll_task is not None:

@@ -71,3 +71,40 @@ def test_fs_index_status_filter(tmp_path: Path) -> None:
     assert len(completed) == 1
     running = idx.list_tasks(status="running")
     assert running == []
+
+
+def test_fs_index_discovers_tasks_nested_under_run_directory(tmp_path: Path) -> None:
+    run_dir = tmp_path / "run_experiment-20260904"
+    session_path = _write_session(
+        run_dir,
+        task_id="nested-claude_code-AAA",
+        session_id="nested-session",
+        status="COMPLETED",
+    )
+    idx = FsIndex(tmp_path)
+
+    idx.scan()
+
+    tasks = idx.list_tasks()
+    assert [task.task_id for task in tasks] == ["nested-claude_code-AAA"]
+    assert idx.session_file_for("nested-session") == session_path
+    assert idx.task_dir_for("nested-claude_code-AAA") == session_path.parent
+
+
+def test_fs_index_supports_direct_and_run_nested_tasks_together(tmp_path: Path) -> None:
+    _write_session(tmp_path, task_id="direct-codex-AAA", session_id="direct", status="ERROR")
+    _write_session(
+        tmp_path / "run_second",
+        task_id="nested-codex-BBB",
+        session_id="nested",
+        status="COMPLETED",
+    )
+    (tmp_path / "unrelated" / "task_ignored").mkdir(parents=True)
+    idx = FsIndex(tmp_path)
+
+    idx.scan()
+
+    assert {task.task_id for task in idx.list_tasks()} == {
+        "direct-codex-AAA",
+        "nested-codex-BBB",
+    }
