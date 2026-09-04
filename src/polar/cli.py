@@ -18,6 +18,7 @@ from polar.gateway.server import serve as serve_gateway
 from polar.platform.cli import add_subcommand as add_platform_subcommand
 from polar.platform.cli import handle as handle_platform
 from polar.rollout.server import serve as serve_rollout
+from polar.rollout.trace_backfill import backfill_trace_files
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -104,6 +105,17 @@ def build_parser() -> argparse.ArgumentParser:
         help="Print the raw response JSON.",
     )
 
+    backfill_parser = subparsers.add_parser(
+        "backfill_traces",
+        help="Export persisted Perfetto session traces to an OTLP/HTTP endpoint.",
+    )
+    backfill_parser.add_argument("trace_dir", help="Directory containing trace JSON files")
+    backfill_parser.add_argument("--otlp-endpoint", required=True)
+    backfill_parser.add_argument("--service-name", default="polar-gateway")
+    backfill_parser.add_argument("--include-content", action="store_true")
+    backfill_parser.add_argument("--limit", type=int, default=None)
+    backfill_parser.add_argument("--dry-run", action="store_true")
+
     return parser
 
 
@@ -124,6 +136,8 @@ def main(argv: list[str] | None = None) -> int:
             return _handle_submit(args)
         if args.command == "status":
             return _handle_status(args)
+        if args.command == "backfill_traces":
+            return _handle_backfill_traces(args)
     except httpx.HTTPStatusError as exc:
         body = exc.response.text.strip()
         if body:
@@ -146,6 +160,24 @@ def main(argv: list[str] | None = None) -> int:
 
     parser.error(f"Unknown command: {args.command}")
     return 2
+
+
+def _handle_backfill_traces(args: argparse.Namespace) -> int:
+    root = Path(args.trace_dir).resolve()
+    if not root.is_dir():
+        raise ValueError(f"trace directory does not exist: {root}")
+    if args.limit is not None and args.limit <= 0:
+        raise ValueError("--limit must be greater than zero")
+    counts = backfill_trace_files(
+        root,
+        otlp_endpoint=args.otlp_endpoint,
+        service_name=args.service_name,
+        include_content=args.include_content,
+        limit=args.limit,
+        dry_run=args.dry_run,
+    )
+    print(json.dumps(counts, sort_keys=True))
+    return 1 if counts["failed"] else 0
 
 
 def _handle_submit(args: argparse.Namespace) -> int:
