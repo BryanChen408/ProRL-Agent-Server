@@ -928,10 +928,22 @@ export PATH="$(dirname "$MSPROF_BIN"):$PATH"
 MSPROF_WARMUP="${MSPROF_WARMUP:-3}"
 PERF_JSON="$TASK_DIR/performance.json"
 rm -f "$PERF_JSON"
+PERF_EXTRA_ARGS=()
+if [[ "${POLAR_PERSIST_MSPROF_RAW:-0}" == "1" ]]; then
+  PERF_EXTRA_ARGS+=(--keep-prof)
+fi
 ( export PYTHONPATH="$SK/$PERF_SKILL/scripts:${PYTHONPATH:-}" \
   && run_npu_phase benchmark "$PY_BIN" "$PERF" --quick --output-dir "$TASK_DIR" \
-       --warmup "$MSPROF_WARMUP" --repeats 1 ) >"$OUT_DIR/perf.log" 2>&1
+       --warmup "$MSPROF_WARMUP" --repeats 1 "${PERF_EXTRA_ARGS[@]}" ) >"$OUT_DIR/perf.log" 2>&1
 [[ -f "$PERF_JSON" ]] && cp -f "$PERF_JSON" "$OUT_DIR/performance.json"
+if [[ "${POLAR_PERSIST_MSPROF_RAW:-0}" == "1" ]]; then
+  shopt -s nullglob
+  MSPROF_DIRS=(/tmp/msprof_quick_*_"$(basename "$TASK_DIR")"_c*)
+  shopt -u nullglob
+  if (( ${#MSPROF_DIRS[@]} > 0 )); then
+    tar -czf "$OUT_DIR/msprof_artifacts.tar.gz" "${MSPROF_DIRS[@]}" 2>>"$OUT_DIR/perf.log" || true
+  fi
+fi
 SP=$(python3 -c "import json;d=json.load(open('$PERF_JSON'));print(d.get('geomean_speedup') or d.get('mean_speedup') or '')" 2>/dev/null || echo "")
 FW=$(python3 -c "import json;d=json.load(open('$PERF_JSON'));v=d.get('geomean_ref_us') or d.get('mean_ref_us');print(round(v/1000.0,6) if v else '')" 2>/dev/null || echo "")
 IMPL=$(python3 -c "import json;d=json.load(open('$PERF_JSON'));v=d.get('geomean_asc_us') or d.get('mean_asc_us');print(round(v/1000.0,6) if v else '')" 2>/dev/null || echo "")

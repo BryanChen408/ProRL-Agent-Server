@@ -155,6 +155,13 @@ def _evaluator_config(*, workflow: str, evaluator: dict, workdir: str) -> dict:
     candidates = [str(c).strip() for c in (evaluator.get("submission_candidates") or []) if str(c).strip()]
     if candidates:
         config["submission_candidates"] = candidates
+    artifact_paths = [
+        str(path).strip()
+        for path in (evaluator.get("artifact_paths") or [])
+        if str(path).strip()
+    ]
+    if artifact_paths:
+        config["artifact_paths"] = artifact_paths
     return config
 
 
@@ -384,6 +391,10 @@ def main() -> int:
                     "strategy": "operator_judge",
                     "refresh_runtime": True,
                     "runtime": evaluator_runtime,
+                    "env": {
+                        str(key): str(value)
+                        for key, value in _mapping(evaluator.get("env")).items()
+                    },
                     "config": _evaluator_config(
                         workflow=workflow,
                         evaluator=evaluator,
@@ -424,6 +435,15 @@ def main() -> int:
             ),
             "persist_traces_dir": (
                 str(persist_traces_dir) if persist_traces_dir is not None else None
+            ),
+            "persist_session_artifacts": bool(
+                gateway.get("persist_session_artifacts", True)
+            ),
+            "session_artifacts_max_bytes": int(
+                gateway.get("session_artifacts_max_bytes", 2 * 1024 * 1024 * 1024)
+            ),
+            "session_artifacts_max_files": int(
+                gateway.get("session_artifacts_max_files", 1000)
             ),
             "observability": dict(gateway.get("observability") or {}),
             "completion_persistence": {

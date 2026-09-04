@@ -63,6 +63,9 @@ gateway:
   # Relative paths are resolved under this run's output directory.
   session_trace_json: true
   persist_traces_dir: perfetto_traces
+  persist_session_artifacts: true
+  session_artifacts_max_bytes: 2147483648
+  session_artifacts_max_files: 1000
   # RL-Insight integration. /metrics is always local; setting the two URLs also
   # registers this gateway as a scrape target and sends correlated spans to Tempo.
   observability:
@@ -159,3 +162,8 @@ operator:
       - output/submission/{op_name}_impl.best.tar.gz
       - output/submission/{op_name}_impl.tar.gz
     metrics_path: judge_out/metrics.json
+    artifact_paths:
+      - judge_out/msprof_artifacts.tar.gz
+    env:
+      # Preserve raw task_time/api_statistic CSVs for offline RL-Insight analysis.
+      POLAR_PERSIST_MSPROF_RAW: "1"

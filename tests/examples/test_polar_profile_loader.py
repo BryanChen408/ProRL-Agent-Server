@@ -58,6 +58,9 @@ def test_profile_loader_derives_topology_and_sidecar_env(tmp_path: Path) -> None
                     "max_init_workers": 2,
                     "max_run_workers": 4,
                     "max_postrun_workers": 6,
+                    "persist_session_artifacts": True,
+                    "session_artifacts_max_bytes": 123456,
+                    "session_artifacts_max_files": 42,
                     "completion_persistence": {
                         "enabled": True,
                         "max_field_bytes": 67108864,
@@ -76,6 +79,8 @@ def test_profile_loader_derives_topology_and_sidecar_env(tmp_path: Path) -> None
                         "judge_command": "bash tools/triton_eval_pipeline.sh --op_name {op_name}",
                         "submission_path": "output/submission/{op_name}_impl.py",
                         "metrics_path": "judge_out/metrics.json",
+                        "artifact_paths": ["judge_out/msprof_artifacts.tar.gz"],
+                        "env": {"POLAR_PERSIST_MSPROF_RAW": "1"},
                     },
                 },
             },
@@ -115,8 +120,15 @@ def test_profile_loader_derives_topology_and_sidecar_env(tmp_path: Path) -> None
         "max_field_bytes": 67108864,
         "queue_size": 4096,
     }
+    assert topology["gateway"]["persist_session_artifacts"] is True
+    assert topology["gateway"]["session_artifacts_max_bytes"] == 123456
+    assert topology["gateway"]["session_artifacts_max_files"] == 42
     assert op_profile["runtime"]["env"]["POLAR_GEN_PIPELINE_MAX"] == "5"
     assert "POLAR_OPT_PIPELINE_MAX" not in op_profile["evaluator"]["runtime"]["env"]
+    assert op_profile["evaluator"]["config"]["artifact_paths"] == [
+        "judge_out/msprof_artifacts.tar.gz"
+    ]
+    assert op_profile["evaluator"]["env"] == {"POLAR_PERSIST_MSPROF_RAW": "1"}
     assert op_profile["runtime"]["kwargs"]["ascend"]["pool"] == "4,5"
     assert op_profile["runtime"]["kwargs"]["volumes"][0] == f"{runtime.resolve()}:/opt/canonical:ro"
     assert op_profile["agent"]["settings"]["allowed_tools"] == (

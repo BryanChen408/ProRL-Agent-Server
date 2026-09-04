@@ -4,6 +4,7 @@ import type {
   CompletionRecord,
   EvaluationResult,
   SessionTracePayload,
+  SessionArtifactsPayload,
   TaskSummary,
   TopologyPayload,
   TrajectoryPayload,
@@ -85,5 +86,14 @@ export function useSessionTrace(sessionId: string | undefined) {
     queryKey: ["session-trace", sessionId],
     queryFn: () => api.get<SessionTracePayload>(`/api/sessions/${sessionId}/trace`),
     retry: false,
+  });
+}
+
+export function useSessionArtifacts(sessionId: string | undefined) {
+  return useQuery({
+    enabled: !!sessionId,
+    queryKey: ["session-artifacts", sessionId],
+    queryFn: () =>
+      api.get<SessionArtifactsPayload>(`/api/sessions/${sessionId}/artifacts`),
   });
 }

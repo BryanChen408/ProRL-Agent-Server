@@ -104,6 +104,34 @@ def test_success_speedup_reward():
     assert res.metadata["process_validation"] == "missing"
 
 
+def test_optional_profiler_artifact_is_downloaded_without_affecting_score():
+    evaluator = OperatorJudgeEvaluator(
+        op_name=OP,
+        judge_command="bash pipeline.sh",
+        metrics_path=METRICS,
+        artifact_paths=["judge_out/msprof_artifacts.tar.gz"],
+    )
+    agent = FakeRuntime(files={SUB: "# kernel"})
+    judge = FakeRuntime(files={
+        METRICS: json.dumps({"success": True, "perf_data": {"speedup_vs_torch": 1.0}}),
+        "judge_out/msprof_artifacts.tar.gz": "profile archive",
+    })
+    with tempfile.TemporaryDirectory() as directory:
+        result = asyncio.run(evaluator.evaluate(
+            Trajectory(status="COMPLETED", traces=[]),
+            runtime=agent,
+            fresh_eval_runtime=judge,
+            refresh_runtime=True,
+            artifacts_dir=directory,
+            env={},
+            timeout_seconds=None,
+            session_id="s",
+            task_id="t",
+        ))
+        assert Path(directory, "msprof_artifacts.tar.gz").read_text() == "profile archive"
+    assert result.outcome_reward == 0.75
+
+
 # ------------------------- process reward(dev_04/dev_05)-------------------------
 
 _PROCESS_ENVS = ("POLAR_PROCESS_REWARD", "POLAR_PROCESS_REWARD_CAP")

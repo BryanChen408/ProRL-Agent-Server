@@ -48,6 +48,26 @@ export interface SessionTracePayload {
   download_url: string;
 }
 
+export interface ProfilingArtifact {
+  id: string;
+  name: string;
+  relative_path: string;
+  kind: string;
+  size_bytes: number;
+  sha256: string;
+  media_type: string;
+  download_url: string;
+}
+
+export interface SessionArtifactsPayload {
+  session_id: string;
+  artifact_count: number;
+  total_bytes: number;
+  skipped_bytes: number;
+  skipped_files?: number;
+  artifacts: ProfilingArtifact[];
+}
+
 export interface SessionSummary {
   session_id: string;
   task_id?: string;

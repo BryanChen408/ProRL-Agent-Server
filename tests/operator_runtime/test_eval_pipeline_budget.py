@@ -411,3 +411,12 @@ def test_over_limit_exit_does_not_attach_stale_metrics_to_current_source(tmp_pat
     assert proc.returncode == 0, proc.stderr
     assert not capture.exists(), "超限退出仍然用旧 metrics 提升了 candidate"
     assert "LIMIT_EXHAUSTED" in proc.stdout
+
+
+def test_optional_msprof_archive_is_explicit_and_keeps_default_lightweight():
+    script = PIPELINE.read_text(encoding="utf-8")
+
+    assert 'POLAR_PERSIST_MSPROF_RAW:-0' in script
+    assert 'PERF_EXTRA_ARGS+=(--keep-prof)' in script
+    assert 'msprof_artifacts.tar.gz' in script
+    assert '"${PERF_EXTRA_ARGS[@]}"' in script
