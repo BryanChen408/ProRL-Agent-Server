@@ -14,7 +14,7 @@ import re
 from typing import Any
 
 from fastapi import FastAPI, HTTPException, Query, Request
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import JSONResponse, PlainTextResponse, StreamingResponse
 
 from polar.config import GatewayNodeConfig, TopologyConfig
 from polar.gateway.completion_writer import CompletionWriter
@@ -149,6 +149,14 @@ def _build_state(topology: TopologyConfig, node_id: str | None) -> GatewayState:
         enable_session_trace_wandb=topology.gateway.session_trace_wandb,
         session_trace_wandb_project=topology.gateway.session_trace_wandb_project,
         persist_traces_dir=topology.gateway.persist_traces_dir,
+        prometheus_enabled=topology.gateway.observability.prometheus_enabled,
+        rl_insight_url=topology.gateway.observability.rl_insight_url,
+        otlp_endpoint=topology.gateway.observability.otlp_endpoint,
+        otlp_headers=topology.gateway.observability.otlp_headers,
+        observability_export_timeout_seconds=(
+            topology.gateway.observability.export_timeout_seconds
+        ),
+        observability_service_name=topology.gateway.observability.service_name,
     )
     return GatewayState(
         topology=topology,
@@ -239,6 +247,17 @@ app = FastAPI(title="Polar Gateway", version="0.1.0", lifespan=_lifespan)
 @app.api_route("/", methods=["GET", "HEAD"])
 async def root() -> dict[str, str]:
     return {"status": "ok", "service": "polar-gateway"}
+
+
+@app.get("/metrics", response_class=PlainTextResponse, include_in_schema=False)
+async def prometheus_metrics() -> PlainTextResponse:
+    """Expose low-cardinality rollout metrics for Prometheus/RL-Insight."""
+    state = get_state()
+    stages = await state.node_manager.stage_metrics()
+    return PlainTextResponse(
+        state.node_manager.observability.render_prometheus(stages),
+        media_type="text/plain; version=0.0.4; charset=utf-8",
+    )
 
 
 def _format_anthropic_events(events: list[dict[str, Any]]) -> str:

@@ -38,6 +38,7 @@ from polar.rollout.models import (
     SessionResult,
     SessionStatus,
 )
+from polar.rollout.observability import SessionObservability
 from polar.rollout.timer import StageTimer
 from polar.rollout.trace_exporter import build_chrome_trace_document
 from polar.runtime.base import BaseRuntime
@@ -91,6 +92,12 @@ class GatewayNodeManager:
         enable_session_trace_json: bool = True,
         session_trace_wandb_project: str = "polar-session-traces",
         persist_traces_dir: str | None = None,
+        prometheus_enabled: bool = True,
+        rl_insight_url: str | None = None,
+        otlp_endpoint: str | None = None,
+        otlp_headers: dict[str, str] | None = None,
+        observability_export_timeout_seconds: float = 3.0,
+        observability_service_name: str = "polar-gateway",
     ) -> None:
         self.node_id = node_id
         self.gateway_url = gateway_url.rstrip("/")
@@ -109,6 +116,16 @@ class GatewayNodeManager:
         self._enable_session_trace_json = enable_session_trace_json
         self._session_trace_wandb_project = session_trace_wandb_project
         self._persist_traces_dir = Path(persist_traces_dir) if persist_traces_dir else None
+        self.observability = SessionObservability(
+            node_id=node_id,
+            gateway_url=self.gateway_url,
+            prometheus_enabled=prometheus_enabled,
+            rl_insight_url=rl_insight_url,
+            otlp_endpoint=otlp_endpoint,
+            otlp_headers=otlp_headers,
+            export_timeout_seconds=observability_export_timeout_seconds,
+            service_name=observability_service_name,
+        )
         self._client = httpx.AsyncClient(timeout=30.0)
         self._dispatcher = SessionDispatcher(
             max_init_workers=max_init_workers,
@@ -133,6 +150,7 @@ class GatewayNodeManager:
 
     async def start(self) -> None:
         await self._dispatcher.start()
+        await self.observability.register_prometheus_target(self._client)
         if self._rollout_server_url is not None:
             self._control_client = httpx.AsyncClient(
                 base_url=self._rollout_server_url, timeout=15.0
@@ -394,15 +412,20 @@ class GatewayNodeManager:
 
     # ── Per-session trace artifacts (W&B + Chrome Trace JSON) ──
 
-    def _dump_session_trace_artifacts(self, managed: ManagedSession) -> None:
-        """Export per-session timing traces before the session directory is removed.
+    async def _dump_session_trace_artifacts(
+        self,
+        managed: ManagedSession,
+        result: SessionResult,
+    ) -> None:
+        """Export per-session observability before the session directory is removed.
 
-        Two outputs (both gated by config flags):
+        Outputs are independently gated by configuration:
 
         * **Chrome Trace JSON** — ``{session_dir}/trace.json``, also persisted to
           ``{persist_traces_dir}/{session_id}.json`` when configured.
         * **W&B offline run** — ``{session_dir}/wandb/``, also persisted to
           ``{persist_traces_dir}/{session_id}.wandb/`` when configured.
+        * **OTLP/HTTP** — correlated parent/child spans for RL-Insight Tempo.
 
         **Without ``persist_traces_dir`` both outputs are deleted when the session
         directory is cleaned up.**  Set ``persist_traces_dir`` to a durable path
@@ -411,6 +434,15 @@ class GatewayNodeManager:
         timing = managed.timer.to_session_timing()
         request = managed.request
         session_id = request.session_id
+
+        await self.observability.record_session(
+            self._client,
+            timing=timing,
+            session_id=session_id,
+            task_id=request.task_id,
+            status=result.status,
+            metadata=dict(request.metadata),
+        )
 
         # ── Option C: Chrome Trace Event JSON ──
         if self._enable_session_trace_json:
@@ -1028,7 +1060,7 @@ class GatewayNodeManager:
                 self.session_registry.clear_result_payload(request.session_id)
             managed.timer.mark("push_result", "finished")
             # Export only after all measured stages are complete, but before cleanup.
-            self._dump_session_trace_artifacts(managed)
+            await self._dump_session_trace_artifacts(managed, normalized)
         finally:
             await self._remove_session_dir_best_effort(
                 managed.session_dir, request.session_id

@@ -136,6 +136,27 @@ def test_inference_defaults_when_block_omitted(tmp_path: Path) -> None:
     assert node.inference_base_url == "http://127.0.0.1:8000"
 
 
+def test_gateway_observability_defaults_and_urls(tmp_path: Path) -> None:
+    path = _write_yaml(
+        tmp_path / "topology.yaml",
+        {
+            "gateway": {
+                "observability": {
+                    "rl_insight_url": "http://insight:18080/",
+                    "otlp_endpoint": "http://tempo:4318/v1/traces",
+                },
+                "nodes": [{"id": "node-a", "public_url": "http://127.0.0.1:8100"}],
+            }
+        },
+    )
+
+    observability = TopologyConfig.load(path).gateway.observability
+
+    assert observability.prometheus_enabled is True
+    assert observability.rl_insight_url == "http://insight:18080"
+    assert observability.otlp_endpoint == "http://tempo:4318/v1/traces"
+
+
 def test_invalid_inference_engine_is_rejected(tmp_path: Path) -> None:
     path = _write_yaml(
         tmp_path / "topology.yaml",
