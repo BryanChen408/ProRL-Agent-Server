@@ -163,6 +163,9 @@ def _build_state(topology: TopologyConfig, node_id: str | None) -> GatewayState:
         observability_export_timeout_seconds=(
             topology.gateway.observability.export_timeout_seconds
         ),
+        observability_registration_refresh_seconds=(
+            topology.gateway.observability.registration_refresh_seconds
+        ),
         observability_service_name=topology.gateway.observability.service_name,
     )
     return GatewayState(
