@@ -96,6 +96,8 @@ class GatewayNodeManager:
         persist_session_artifacts: bool = True,
         session_artifacts_max_bytes: int = 2 * 1024 * 1024 * 1024,
         session_artifacts_max_files: int = 1000,
+        inference_metrics_url: str | None = None,
+        inference_engine_name: str | None = None,
         prometheus_enabled: bool = True,
         rl_insight_url: str | None = None,
         otlp_endpoint: str | None = None,
@@ -128,6 +130,8 @@ class GatewayNodeManager:
         self.observability = SessionObservability(
             node_id=node_id,
             gateway_url=self.gateway_url,
+            inference_url=inference_metrics_url,
+            inference_engine=inference_engine_name,
             prometheus_enabled=prometheus_enabled,
             rl_insight_url=rl_insight_url,
             otlp_endpoint=otlp_endpoint,

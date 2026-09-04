@@ -29,6 +29,11 @@ _ENGINE_LATENCIES = {
 }
 
 
+def _target_authority(url: str) -> str:
+    parsed = urlparse(url)
+    return parsed.netloc or parsed.path
+
+
 class SessionObservability:
     """Own gateway metrics and best-effort export into an RL-Insight stack."""
 
@@ -37,6 +42,8 @@ class SessionObservability:
         *,
         node_id: str,
         gateway_url: str,
+        inference_url: str | None = None,
+        inference_engine: str | None = None,
         prometheus_enabled: bool = True,
         rl_insight_url: str | None = None,
         otlp_endpoint: str | None = None,
@@ -48,6 +55,8 @@ class SessionObservability:
     ) -> None:
         self.node_id = node_id
         self.gateway_url = gateway_url
+        self.inference_url = inference_url
+        self.inference_engine = (inference_engine or "unknown").lower()
         self.prometheus_enabled = prometheus_enabled
         self.rl_insight_url = rl_insight_url.rstrip("/") if rl_insight_url else None
         self.otlp_endpoint = otlp_endpoint
@@ -117,32 +126,55 @@ class SessionObservability:
         return self.prometheus_enabled and self.rl_insight_url is not None
 
     async def register_prometheus_target(self, client: httpx.AsyncClient) -> bool:
-        """Register this gateway's `/metrics` target with RL-Insight when configured."""
+        """Register Gateway and inference-engine metrics targets with RL-Insight."""
         if not self.registration_enabled:
             return True
-        parsed = urlparse(self.gateway_url)
-        target = parsed.netloc or parsed.path
-        try:
-            response = await client.post(
-                f"{self.rl_insight_url}/api/v1/prometheus/targets",
-                json={
-                    "job_name": "polar-gateway",
-                    "targets": [{"target": target, "labels": {"node_id": self.node_id}}],
-                },
-                timeout=self.export_timeout_seconds,
+        registrations = [
+            (
+                "polar-gateway",
+                _target_authority(self.gateway_url),
+                {"node_id": self.node_id},
             )
-            response.raise_for_status()
-            if self._registration_healthy is not True:
-                logger.info("Registered Polar metrics target %s with RL-Insight", target)
-            self._registration_healthy = True
-            return True
-        except Exception:
-            if self._registration_healthy is not False:
-                logger.warning("Failed to register metrics target with RL-Insight", exc_info=True)
-            else:
-                logger.debug("RL-Insight metrics target registration is still unavailable")
-            self._registration_healthy = False
-            return False
+        ]
+        if self.inference_url:
+            registrations.append(
+                (
+                    "polar-inference-engine",
+                    _target_authority(self.inference_url),
+                    {
+                        "node_id": self.node_id,
+                        "engine_type": _safe_label(self.inference_engine),
+                    },
+                )
+            )
+
+        healthy = True
+        for job_name, target, labels in registrations:
+            try:
+                response = await client.post(
+                    f"{self.rl_insight_url}/api/v1/prometheus/targets",
+                    json={
+                        "job_name": job_name,
+                        "targets": [{"target": target, "labels": labels}],
+                    },
+                    timeout=self.export_timeout_seconds,
+                )
+                response.raise_for_status()
+            except Exception:
+                healthy = False
+                logger.warning(
+                    "Failed to register %s metrics target %s with RL-Insight",
+                    job_name,
+                    target,
+                    exc_info=True,
+                )
+
+        if healthy and self._registration_healthy is not True:
+            logger.info("Registered Polar Gateway and inference metrics with RL-Insight")
+        elif not healthy and self._registration_healthy is False:
+            logger.debug("RL-Insight metrics target registration is still unavailable")
+        self._registration_healthy = healthy
+        return healthy
 
     async def refresh_prometheus_registration(self, client: httpx.AsyncClient) -> None:
         """Periodically refresh the idempotent target registration until cancelled."""

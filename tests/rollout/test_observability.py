@@ -231,6 +231,8 @@ def test_rl_insight_target_registration_uses_gateway_authority() -> None:
         exporter = SessionObservability(
             node_id="node-a",
             gateway_url="http://10.0.0.8:8081",
+            inference_url="http://10.0.0.9:8000/v1",
+            inference_engine="vllm",
             rl_insight_url="http://insight:18080",
         )
         async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
@@ -238,10 +240,19 @@ def test_rl_insight_target_registration_uses_gateway_authority() -> None:
 
     asyncio.run(_run())
 
-    assert requests == [{
-        "job_name": "polar-gateway",
-        "targets": [{"target": "10.0.0.8:8081", "labels": {"node_id": "node-a"}}],
-    }]
+    assert requests == [
+        {
+            "job_name": "polar-gateway",
+            "targets": [{"target": "10.0.0.8:8081", "labels": {"node_id": "node-a"}}],
+        },
+        {
+            "job_name": "polar-inference-engine",
+            "targets": [{
+                "target": "10.0.0.9:8000",
+                "labels": {"node_id": "node-a", "engine_type": "vllm"},
+            }],
+        },
+    ]
 
 
 def test_prometheus_registration_refresh_recovers_after_rl_insight_starts() -> None:
