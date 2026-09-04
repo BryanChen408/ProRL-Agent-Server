@@ -12,8 +12,12 @@
       "fieldConfig": {"defaults": {"thresholds": {"mode": "absolute", "steps": [{"color": "red"}, {"color": "green", "value": 1}]}}, "overrides": []},
       "gridPos": {"h": 4, "w": 4, "x": 0, "y": 0}, "id": 1,
       "options": {"colorMode": "background", "graphMode": "none", "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}},
-      "targets": [{"editorMode": "code", "expr": "min(up{job=\"polar-gateway\",node_id=~\"$node_id\"})", "legendFormat": "Gateway up", "range": true, "refId": "A"}],
-      "title": "Gateway Up", "type": "stat"
+      "targets": [
+        {"editorMode": "code", "expr": "min(up{job=\"polar-gateway\",node_id=~\"$node_id\"})", "legendFormat": "Gateway up", "range": true, "refId": "A"},
+        {"editorMode": "code", "expr": "min(up{job=\"polar-inference-engine\",node_id=~\"$node_id\"})", "legendFormat": "Inference target up", "range": true, "refId": "B"},
+        {"editorMode": "code", "expr": "min by (pd_role, pd_backend) (polar_pd_backend_up{node_id=~\"$node_id\"})", "legendFormat": "{{pd_role}} {{pd_backend}}", "range": true, "refId": "C"}
+      ],
+      "title": "Gateway and Engine Targets", "type": "stat"
     },
     {
       "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
@@ -62,7 +66,7 @@
       "options": {"legend": {"calcs": ["lastNotNull", "max"], "displayMode": "table", "placement": "right"}, "tooltip": {"mode": "multi"}},
       "targets": [
         {"editorMode": "code", "expr": "histogram_quantile(0.95, sum by (le, engine) (rate(polar_inference_request_duration_seconds_bucket{node_id=~\"$node_id\"}[$__rate_interval])))", "legendFormat": "{{engine}} request", "range": true, "refId": "A"},
-        {"editorMode": "code", "expr": "histogram_quantile(0.95, sum by (le, engine) (rate(polar_inference_ttft_seconds_bucket{node_id=~\"$node_id\"}[$__rate_interval])))", "legendFormat": "{{engine}} TTFT", "range": true, "refId": "B"}
+        {"editorMode": "code", "expr": "histogram_quantile(0.95, sum by (le, engine, pd_role, pd_backend) (rate(polar_inference_ttft_seconds_bucket{node_id=~\"$node_id\"}[$__rate_interval])))", "legendFormat": "{{engine}} {{pd_role}} {{pd_backend}} TTFT", "range": true, "refId": "B"}
       ],
       "title": "Inference Request and TTFT P95", "type": "timeseries"
     },
@@ -72,9 +76,9 @@
       "gridPos": {"h": 8, "w": 12, "x": 12, "y": 16}, "id": 8,
       "options": {"legend": {"calcs": ["lastNotNull", "max"], "displayMode": "table", "placement": "right"}, "tooltip": {"mode": "multi"}},
       "targets": [
-        {"editorMode": "code", "expr": "histogram_quantile(0.95, sum by (le, engine) (rate(polar_inference_queue_seconds_bucket{node_id=~\"$node_id\"}[$__rate_interval])))", "legendFormat": "{{engine}} queue", "range": true, "refId": "A"},
-        {"editorMode": "code", "expr": "histogram_quantile(0.95, sum by (le, engine) (rate(polar_inference_prefill_seconds_bucket{node_id=~\"$node_id\"}[$__rate_interval])))", "legendFormat": "{{engine}} prefill", "range": true, "refId": "B"},
-        {"editorMode": "code", "expr": "histogram_quantile(0.95, sum by (le, engine) (rate(polar_inference_decode_seconds_bucket{node_id=~\"$node_id\"}[$__rate_interval])))", "legendFormat": "{{engine}} decode", "range": true, "refId": "C"}
+        {"editorMode": "code", "expr": "histogram_quantile(0.95, sum by (le, engine, pd_role, pd_backend) (rate(polar_inference_queue_seconds_bucket{node_id=~\"$node_id\"}[$__rate_interval])))", "legendFormat": "{{engine}} {{pd_role}} {{pd_backend}} queue", "range": true, "refId": "A"},
+        {"editorMode": "code", "expr": "histogram_quantile(0.95, sum by (le, engine, pd_role, pd_backend) (rate(polar_inference_prefill_seconds_bucket{node_id=~\"$node_id\"}[$__rate_interval])))", "legendFormat": "{{engine}} {{pd_role}} {{pd_backend}} prefill", "range": true, "refId": "B"},
+        {"editorMode": "code", "expr": "histogram_quantile(0.95, sum by (le, engine, pd_role, pd_backend) (rate(polar_inference_decode_seconds_bucket{node_id=~\"$node_id\"}[$__rate_interval])))", "legendFormat": "{{engine}} {{pd_role}} {{pd_backend}} decode", "range": true, "refId": "C"}
       ],
       "title": "Engine Phase Latency P95", "type": "timeseries"
     },
@@ -83,7 +87,10 @@
       "fieldConfig": {"defaults": {"custom": {"drawStyle": "line", "fillOpacity": 8, "lineWidth": 1, "showPoints": "never"}, "unit": "percentunit"}, "overrides": []},
       "gridPos": {"h": 8, "w": 12, "x": 0, "y": 24}, "id": 9,
       "options": {"legend": {"calcs": ["lastNotNull"], "displayMode": "table", "placement": "bottom"}, "tooltip": {"mode": "multi"}},
-      "targets": [{"editorMode": "code", "expr": "sum by (engine) (rate(polar_inference_prefix_cache_hit_ratio_sum{node_id=~\"$node_id\"}[$__rate_interval])) / sum by (engine) (rate(polar_inference_prefix_cache_hit_ratio_count{node_id=~\"$node_id\"}[$__rate_interval]))", "legendFormat": "{{engine}}", "range": true, "refId": "A"}],
+      "targets": [
+        {"editorMode": "code", "expr": "avg by (engine, pd_role, pd_backend) (polar_inference_prefix_cache_hit_ratio{node_id=~\"$node_id\",engine=\"vllm-native\"})", "legendFormat": "{{engine}} {{pd_role}} {{pd_backend}}", "range": true, "refId": "A"},
+        {"editorMode": "code", "expr": "sum by (engine) (rate(polar_inference_prefix_cache_hit_ratio_sum{node_id=~\"$node_id\"}[$__rate_interval])) / clamp_min(sum by (engine) (rate(polar_inference_prefix_cache_hit_ratio_count{node_id=~\"$node_id\"}[$__rate_interval])), 0.001)", "legendFormat": "{{engine}} response-derived", "range": true, "refId": "B"}
+      ],
       "title": "Average Prefix Cache Hit Ratio", "type": "timeseries"
     },
     {
@@ -99,5 +106,5 @@
   "tags": ["Polar", "RL-Insight", "rollout", "inference"],
   "templating": {"list": [{"current": {}, "hide": 0, "includeAll": true, "label": "Node", "multi": true, "name": "node_id", "options": [], "query": {"query": "label_values(up{job=\"polar-gateway\"}, node_id)", "refId": "PrometheusVariableQueryEditor-VariableQuery"}, "refresh": 1, "regex": "", "skipUrlSync": false, "sort": 1, "type": "query"}]},
   "time": {"from": "now-1h", "to": "now"}, "timepicker": {}, "timezone": "browser",
-  "title": "Polar Gateway", "uid": "polar-gateway", "version": 1, "weekStart": ""
+  "title": "Polar Gateway", "uid": "polar-gateway", "version": 2, "weekStart": ""
 }
