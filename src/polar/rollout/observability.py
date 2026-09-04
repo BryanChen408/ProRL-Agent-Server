@@ -40,6 +40,7 @@ class SessionObservability:
         rl_insight_url: str | None = None,
         otlp_endpoint: str | None = None,
         otlp_headers: dict[str, str] | None = None,
+        otlp_include_action_content: bool = False,
         export_timeout_seconds: float = 3.0,
         service_name: str = "polar-gateway",
     ) -> None:
@@ -49,6 +50,7 @@ class SessionObservability:
         self.rl_insight_url = rl_insight_url.rstrip("/") if rl_insight_url else None
         self.otlp_endpoint = otlp_endpoint
         self.otlp_headers = dict(otlp_headers or {})
+        self.otlp_include_action_content = otlp_include_action_content
         self.export_timeout_seconds = export_timeout_seconds
         self.service_name = service_name
         self._sessions: dict[str, int] = defaultdict(int)
@@ -156,6 +158,7 @@ class SessionObservability:
             task_id=task_id,
             status=status,
             metadata=metadata,
+            include_action_content=self.otlp_include_action_content,
         )
         if not payload:
             return
@@ -306,6 +309,7 @@ def _build_otlp_payload(
     task_id: str,
     status: str,
     metadata: dict[str, Any],
+    include_action_content: bool = False,
 ) -> dict[str, Any] | None:
     boundaries = [
         (int(span["started_at_ns"]), int(span["finished_at_ns"]))
@@ -425,6 +429,17 @@ def _build_otlp_payload(
                     },
                 )
             )
+        spans.extend(
+            _agent_action_spans(
+                call,
+                trace_id=trace_id,
+                root_span_id=root_span_id,
+                session_id=session_id,
+                call_index=index,
+                identity=identity,
+                include_content=include_action_content,
+            )
+        )
     return {
         "resourceSpans": [{
             "resource": {"attributes": [_attribute("service.name", service_name)]},
@@ -434,6 +449,73 @@ def _build_otlp_payload(
             }],
         }]
     }
+
+
+def _agent_action_spans(
+    call: dict[str, Any],
+    *,
+    trace_id: str,
+    root_span_id: str,
+    session_id: str,
+    call_index: int,
+    identity: dict[str, Any],
+    include_content: bool,
+) -> list[dict[str, Any]]:
+    """Render bounded Agent action spans inside the measured inter-call gap."""
+    actions = call.get("agent_actions") or []
+    start = call.get("agent_side_gap_started_at_ns")
+    end = call.get("agent_side_gap_finished_at_ns")
+    if not isinstance(actions, list) or not isinstance(start, int) or not isinstance(end, int):
+        return []
+    if end < start:
+        return []
+    cursor = start
+    spans: list[dict[str, Any]] = []
+    for action_index, action in enumerate(actions):
+        if not isinstance(action, dict):
+            continue
+        duration_ms = action.get("duration_ms", 0)
+        if not isinstance(duration_ms, (int, float)) or isinstance(duration_ms, bool):
+            duration_ms = 0
+        action_end = min(end, cursor + int(max(0.0, float(duration_ms)) * 1_000_000))
+        kind = _safe_label(str(action.get("kind") or "other").lower())
+        attributes: dict[str, Any] = {
+            **identity,
+            "turn": int(call.get("round", call_index + 1)),
+            "action.kind": kind,
+            "tool.name": _bounded_text(action.get("tool_name", ""), 128),
+            "tool.use_id": _bounded_text(action.get("tool_use_id", ""), 256),
+            "action.is_error": bool(action.get("is_error", False)),
+            "action.duration_estimated": bool(action.get("duration_estimated", True)),
+            "action.parallel": bool(action.get("parallel", False)),
+        }
+        if include_content:
+            for source, target, limit in (
+                ("summary", "action.summary", 512),
+                ("command", "tool.command", 2048),
+                ("target", "tool.target", 1024),
+                ("description", "action.description", 1024),
+            ):
+                if action.get(source):
+                    attributes[target] = _bounded_text(action[source], limit)
+        spans.append(
+            _otlp_span(
+                trace_id,
+                _span_id(session_id, f"agent:{call_index}:{action_index}"),
+                "agent.think" if kind == "think" else f"agent.tool.{kind}",
+                cursor,
+                action_end,
+                parent_span_id=root_span_id,
+                attributes=attributes,
+            )
+        )
+        cursor = action_end
+    return spans
+
+
+def _bounded_text(value: Any, limit: int) -> str:
+    text = str(value)
+    return text if len(text) <= limit else f"{text[: max(0, limit - 1)]}…"
 
 
 def _engine_metric_intervals(call: dict[str, Any]) -> list[tuple[str, int, int]]:
