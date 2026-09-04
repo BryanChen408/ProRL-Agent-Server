@@ -1,10 +1,13 @@
 import { useMemo, useState } from "react";
 import type { ChromeTraceEvent, SessionTracePayload } from "../api/types";
+import { JsonView } from "./JsonView";
 
 interface Props {
   trace: SessionTracePayload | undefined;
   loading?: boolean;
   unavailable?: boolean;
+  onOpenCompletion?: (turn: number) => void;
+  onOpenTrajectory?: (turn: number) => void;
 }
 
 const PROCESS_NAMES: Record<number, string> = { 1: "Gateway", 2: "Engine", 3: "Agent" };
@@ -20,9 +23,16 @@ function spanEvents(events: ChromeTraceEvent[]): ChromeTraceEvent[] {
     .sort((left, right) => Number(left.ts) - Number(right.ts));
 }
 
-export function TraceWaterfall({ trace, loading, unavailable }: Props) {
+export function TraceWaterfall({
+  trace,
+  loading,
+  unavailable,
+  onOpenCompletion,
+  onOpenTrajectory,
+}: Props) {
   const [query, setQuery] = useState("");
   const [processId, setProcessId] = useState("all");
+  const [selected, setSelected] = useState<ChromeTraceEvent | null>(null);
   const spans = useMemo(() => spanEvents(trace?.trace_events ?? []), [trace]);
   const filtered = useMemo(() => {
     const needle = query.trim().toLowerCase();
@@ -41,6 +51,7 @@ export function TraceWaterfall({ trace, loading, unavailable }: Props) {
   const start = spans.length ? Number(spans[0].ts) : 0;
   const end = Math.max(...spans.map((span) => Number(span.ts) + Number(span.dur)), start + 1);
   const extent = Math.max(1, end - start);
+  const selectedTurn = eventTurn(selected);
 
   return (
     <div className="space-y-3">
@@ -69,7 +80,12 @@ export function TraceWaterfall({ trace, loading, unavailable }: Props) {
           const offsetMs = (Number(span.ts) - start) / 1000;
           const durationMs = Number(span.dur) / 1000;
           return (
-            <div key={`${span.pid}-${span.name}-${span.ts}-${index}`} className="grid grid-cols-[240px_1fr] border-b border-slate-100 text-[11px] last:border-b-0">
+            <button
+              type="button"
+              key={`${span.pid}-${span.name}-${span.ts}-${index}`}
+              onClick={() => setSelected(span)}
+              className={`grid w-full grid-cols-[240px_1fr] border-b border-slate-100 text-left text-[11px] last:border-b-0 hover:bg-blue-50 ${selected === span ? "bg-blue-50" : ""}`}
+            >
               <div className="truncate px-2 py-1 font-mono" title={span.name}>{span.name ?? "unnamed"}</div>
               <div className="relative my-1 mr-2 h-5 rounded bg-slate-50">
                 <div
@@ -78,11 +94,40 @@ export function TraceWaterfall({ trace, loading, unavailable }: Props) {
                   title={`${PROCESS_NAMES[Number(span.pid)] ?? span.pid} · +${offsetMs.toFixed(2)} ms · ${durationMs.toFixed(2)} ms`}
                 />
               </div>
-            </div>
+            </button>
           );
         })}
         {!filtered.length && <div className="p-4 text-sm text-slate-500">No spans match the filter.</div>}
       </div>
+      {selected && (
+        <div className="rounded border border-blue-200 bg-blue-50 p-3 text-xs">
+          <div className="mb-2 flex flex-wrap items-center gap-3">
+            <span className="font-mono font-medium">{selected.name ?? "unnamed"}</span>
+            <span>process: {PROCESS_NAMES[Number(selected.pid)] ?? selected.pid}</span>
+            <span>offset: {((Number(selected.ts) - start) / 1000).toFixed(2)} ms</span>
+            <span>duration: {(Number(selected.dur) / 1000).toFixed(2)} ms</span>
+            {selectedTurn != null && (
+              <>
+                <button type="button" className="ml-auto rounded bg-blue-600 px-2 py-1 text-white" onClick={() => onOpenCompletion?.(selectedTurn)}>
+                  Open completion {selectedTurn}
+                </button>
+                <button type="button" className="rounded border border-blue-500 px-2 py-1 text-blue-700" onClick={() => onOpenTrajectory?.(selectedTurn)}>
+                  Open trajectory
+                </button>
+              </>
+            )}
+          </div>
+          <JsonView value={selected.args ?? {}} collapsed={false} maxHeight="260px" />
+        </div>
+      )}
     </div>
   );
+}
+
+function eventTurn(event: ChromeTraceEvent | null): number | null {
+  if (!event) return null;
+  const round = event.args?.round;
+  if (typeof round === "number" && Number.isInteger(round) && round > 0) return round;
+  const match = event.name?.match(/llm_call_(\d+)/);
+  return match ? Number(match[1]) : null;
 }
