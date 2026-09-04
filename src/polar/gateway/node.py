@@ -102,6 +102,7 @@ class GatewayNodeManager:
         otlp_headers: dict[str, str] | None = None,
         otlp_include_action_content: bool = False,
         observability_export_timeout_seconds: float = 3.0,
+        observability_registration_refresh_seconds: float = 30.0,
         observability_service_name: str = "polar-gateway",
     ) -> None:
         self.node_id = node_id
@@ -133,8 +134,10 @@ class GatewayNodeManager:
             otlp_headers=otlp_headers,
             otlp_include_action_content=otlp_include_action_content,
             export_timeout_seconds=observability_export_timeout_seconds,
+            registration_refresh_seconds=observability_registration_refresh_seconds,
             service_name=observability_service_name,
         )
+        self._observability_registration_task: asyncio.Task[None] | None = None
         self._client = httpx.AsyncClient(timeout=30.0)
         self._dispatcher = SessionDispatcher(
             max_init_workers=max_init_workers,
@@ -160,6 +163,10 @@ class GatewayNodeManager:
     async def start(self) -> None:
         await self._dispatcher.start()
         await self.observability.register_prometheus_target(self._client)
+        if self.observability.registration_enabled:
+            self._observability_registration_task = asyncio.create_task(
+                self.observability.refresh_prometheus_registration(self._client)
+            )
         if self._rollout_server_url is not None:
             self._control_client = httpx.AsyncClient(
                 base_url=self._rollout_server_url, timeout=15.0
@@ -168,6 +175,13 @@ class GatewayNodeManager:
             self._heartbeat_task = asyncio.create_task(self._heartbeat_loop())
 
     async def close(self) -> None:
+        if self._observability_registration_task is not None:
+            self._observability_registration_task.cancel()
+            await asyncio.gather(
+                self._observability_registration_task,
+                return_exceptions=True,
+            )
+            self._observability_registration_task = None
         if self._heartbeat_task is not None:
             self._heartbeat_task.cancel()
             await asyncio.gather(self._heartbeat_task, return_exceptions=True)

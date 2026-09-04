@@ -103,6 +103,7 @@ class _ObservabilityConfig(_StrictModel):
     otlp_headers: dict[str, str] = Field(default_factory=dict)
     otlp_include_action_content: bool = False
     export_timeout_seconds: float = Field(default=3.0, gt=0)
+    registration_refresh_seconds: float = Field(default=30.0, gt=0)
     service_name: str = "polar-gateway"
 
     @field_validator("rl_insight_url", "otlp_endpoint")

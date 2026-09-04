@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import logging
 import math
@@ -42,6 +43,7 @@ class SessionObservability:
         otlp_headers: dict[str, str] | None = None,
         otlp_include_action_content: bool = False,
         export_timeout_seconds: float = 3.0,
+        registration_refresh_seconds: float = 30.0,
         service_name: str = "polar-gateway",
     ) -> None:
         self.node_id = node_id
@@ -52,7 +54,9 @@ class SessionObservability:
         self.otlp_headers = dict(otlp_headers or {})
         self.otlp_include_action_content = otlp_include_action_content
         self.export_timeout_seconds = export_timeout_seconds
+        self.registration_refresh_seconds = registration_refresh_seconds
         self.service_name = service_name
+        self._registration_healthy: bool | None = None
         self._sessions: dict[str, int] = defaultdict(int)
         self._llm_calls = 0
         self._tokens: dict[str, int] = defaultdict(int)
@@ -108,10 +112,14 @@ class SessionObservability:
                 _RATIO_BUCKETS,
             )
 
-    async def register_prometheus_target(self, client: httpx.AsyncClient) -> None:
+    @property
+    def registration_enabled(self) -> bool:
+        return self.prometheus_enabled and self.rl_insight_url is not None
+
+    async def register_prometheus_target(self, client: httpx.AsyncClient) -> bool:
         """Register this gateway's `/metrics` target with RL-Insight when configured."""
-        if not self.prometheus_enabled or not self.rl_insight_url:
-            return
+        if not self.registration_enabled:
+            return True
         parsed = urlparse(self.gateway_url)
         target = parsed.netloc or parsed.path
         try:
@@ -124,9 +132,23 @@ class SessionObservability:
                 timeout=self.export_timeout_seconds,
             )
             response.raise_for_status()
-            logger.info("Registered Polar metrics target %s with RL-Insight", target)
+            if self._registration_healthy is not True:
+                logger.info("Registered Polar metrics target %s with RL-Insight", target)
+            self._registration_healthy = True
+            return True
         except Exception:
-            logger.warning("Failed to register metrics target with RL-Insight", exc_info=True)
+            if self._registration_healthy is not False:
+                logger.warning("Failed to register metrics target with RL-Insight", exc_info=True)
+            else:
+                logger.debug("RL-Insight metrics target registration is still unavailable")
+            self._registration_healthy = False
+            return False
+
+    async def refresh_prometheus_registration(self, client: httpx.AsyncClient) -> None:
+        """Periodically refresh the idempotent target registration until cancelled."""
+        while self.registration_enabled:
+            await asyncio.sleep(self.registration_refresh_seconds)
+            await self.register_prometheus_target(client)
 
     async def record_session(
         self,

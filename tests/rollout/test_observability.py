@@ -244,6 +244,37 @@ def test_rl_insight_target_registration_uses_gateway_authority() -> None:
     }]
 
 
+def test_prometheus_registration_refresh_recovers_after_rl_insight_starts() -> None:
+    attempts = 0
+    recovered = asyncio.Event()
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal attempts
+        attempts += 1
+        if attempts < 3:
+            return httpx.Response(503)
+        recovered.set()
+        return httpx.Response(200)
+
+    async def _run() -> None:
+        exporter = SessionObservability(
+            node_id="node-a",
+            gateway_url="http://10.0.0.8:8081",
+            rl_insight_url="http://insight:18080",
+            registration_refresh_seconds=0.001,
+        )
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            assert await exporter.register_prometheus_target(client) is False
+            task = asyncio.create_task(exporter.refresh_prometheus_registration(client))
+            await asyncio.wait_for(recovered.wait(), timeout=1)
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+            assert exporter._registration_healthy is True
+
+    asyncio.run(_run())
+    assert attempts == 3
+
+
 def test_gateway_metrics_endpoint_uses_live_stage_snapshot(monkeypatch) -> None:
     exporter = SessionObservability(node_id="node-a", gateway_url="http://node-a:8081")
 
