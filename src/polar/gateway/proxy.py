@@ -21,6 +21,37 @@ from polar.gateway.engine import InferenceEngine
 logger = logging.getLogger(__name__)
 
 
+def _nonnegative_token_count(value: Any) -> int:
+    """Return a safe token count for optional OpenAI-compatible usage fields."""
+    if isinstance(value, bool):
+        return 0
+    try:
+        return max(0, int(value))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _extract_token_counts(result: Any) -> tuple[int, int]:
+    """Extract prompt/output counts, preferring exact returned output token IDs."""
+    if not isinstance(result, dict):
+        return 0, 0
+    usage = result.get("usage")
+    usage = usage if isinstance(usage, dict) else {}
+    prompt_tokens = _nonnegative_token_count(usage.get("prompt_tokens"))
+
+    choices = result.get("choices")
+    first_choice = choices[0] if isinstance(choices, list) and choices else {}
+    first_choice = first_choice if isinstance(first_choice, dict) else {}
+    token_ids = first_choice.get("token_ids")
+    if isinstance(token_ids, list):
+        response_tokens = len(token_ids)
+    else:
+        # Some OpenAI-compatible engines report standard usage but omit the
+        # non-standard ``return_token_ids`` response extension.
+        response_tokens = _nonnegative_token_count(usage.get("completion_tokens"))
+    return prompt_tokens, response_tokens
+
+
 class UpstreamError(RuntimeError):
     """Base class for upstream gateway failures."""
 
@@ -288,10 +319,7 @@ class InferenceClient:
         self.last_roundtrip_ms    = (t_normalize_end - t_acquire_end) * 1000.0
 
         # ── Extract token counts ──
-        usage = result.get("usage", {}) if isinstance(result, dict) else {}
-        self.last_prompt_tokens = int(usage.get("prompt_tokens", 0))
-        choice = (result.get("choices", [{}]) or [{}])[0] if isinstance(result, dict) else {}
-        self.last_response_tokens = len(choice.get("token_ids", []) or [])
+        self.last_prompt_tokens, self.last_response_tokens = _extract_token_counts(result)
 
         self._response_trace_timings[id(result)] = {
             "request_started_at_ns": t_acquire_start_ns,
