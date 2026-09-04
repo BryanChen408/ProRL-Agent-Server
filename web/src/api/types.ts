@@ -17,11 +17,35 @@ export interface TaskSummary {
 }
 
 export interface SessionTiming {
+  schema_version?: number;
+  trace_start_time_ns?: number | null;
+  trace_end_time_ns?: number | null;
+  stage_spans?: Record<string, unknown>[];
   register_to_init_queue_ms?: number;
   init_ms?: number;
   run_ms?: number;
   postrun_ms?: number;
-  [key: string]: number | undefined;
+  [key: string]: unknown;
+}
+
+export interface ChromeTraceEvent {
+  name?: string;
+  cat?: string;
+  ph?: string;
+  ts?: number;
+  dur?: number;
+  pid?: number;
+  tid?: string | number;
+  args?: Record<string, unknown>;
+}
+
+export interface SessionTracePayload {
+  session_id: string;
+  schema_version: number;
+  metadata: Record<string, unknown>;
+  trace_events: ChromeTraceEvent[];
+  event_count: number;
+  download_url: string;
 }
 
 export interface SessionSummary {
@@ -104,4 +128,3 @@ export interface TopologyPayload {
     health: any;
   }[];
 }
-

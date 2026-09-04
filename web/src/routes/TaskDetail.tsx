@@ -6,7 +6,7 @@ import { RewardChart } from "../components/RewardChart";
 import { CopyBtn } from "../components/CopyBtn";
 import { JsonView } from "../components/JsonView";
 import { api } from "../api/client";
-import { formatMs, formatReward, shortId } from "../lib/utils";
+import { formatMs, formatReward, shortId } from "../utils";
 
 export function TaskDetail() {
   const { taskId } = useParams<{ taskId: string }>();

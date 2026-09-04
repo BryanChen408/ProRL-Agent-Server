@@ -17,6 +17,22 @@ from polar.platform.server import create_app
 def topology_with_results(tmp_path: Path) -> Path:
     save_dir = tmp_path / "rollout_results"
     save_dir.mkdir(parents=True)
+    trace_dir = save_dir / "perfetto_traces"
+    trace_dir.mkdir()
+    (trace_dir / "abc.json").write_text(
+        json.dumps({
+            "schemaVersion": 2,
+            "traceEvents": [{
+                "name": "run",
+                "ph": "X",
+                "ts": 1_700_000_000_000_000,
+                "dur": 200_000,
+                "pid": 1,
+                "tid": "abc",
+            }],
+            "metadata": {"sessionId": "abc"},
+        })
+    )
     task_dir = save_dir / "task_demo-claude_code-001"
     task_dir.mkdir()
     (task_dir / "ses_abc.json").write_text(
@@ -57,6 +73,7 @@ rollout:
   save_dir: {save_dir}
 gateway:
   heartbeat_interval_seconds: 30
+  persist_traces_dir: {trace_dir}
   nodes:
     - id: gw-test
       host: 127.0.0.1
@@ -130,6 +147,22 @@ def test_session_detail_and_trajectory(topology_with_results: Path) -> None:
         ev = r.json()
         assert ev["outcome_reward"] == 1.0
         assert ev["strategy"] == "test_on_output"
+
+
+def test_session_trace_view_and_download(topology_with_results: Path) -> None:
+    with _client(topology_with_results) as client:
+        response = client.get("/api/sessions/abc/trace")
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["schema_version"] == 2
+        assert payload["event_count"] == 1
+        assert payload["trace_events"][0]["name"] == "run"
+        assert payload["download_url"].endswith("/abc/trace/download")
+
+        download = client.get(payload["download_url"])
+        assert download.status_code == 200
+        assert download.headers["content-type"] == "application/json"
+        assert "abc.trace.json" in download.headers["content-disposition"]
 
 
 def test_dashboard_has_no_submit_or_templates(topology_with_results: Path) -> None:

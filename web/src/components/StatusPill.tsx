@@ -1,4 +1,4 @@
-import { statusClass } from "../lib/utils";
+import { statusClass } from "../utils";
 
 interface Props {
   status?: string | null;
