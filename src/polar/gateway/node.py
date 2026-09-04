@@ -8,6 +8,7 @@ import logging
 import os
 import posixpath
 import shutil
+import time
 from contextlib import suppress
 from pathlib import Path
 from tempfile import mkdtemp
@@ -38,7 +39,7 @@ from polar.rollout.models import (
     SessionStatus,
 )
 from polar.rollout.timer import StageTimer
-from polar.rollout.trace_exporter import export_chrome_trace
+from polar.rollout.trace_exporter import build_chrome_trace_document
 from polar.runtime.base import BaseRuntime
 from polar.runtime.factory import create_runtime
 from polar.runtime.models import ExecInput, RuntimeSpec
@@ -314,6 +315,7 @@ class GatewayNodeManager:
         roundtrip_ms: float = 0.0,
         prompt_tokens: int = 0,
         response_tokens: int = 0,
+        trace_timing: dict[str, int] | None = None,
     ) -> None:
         """Record LLM inference timing on the active session's StageTimer."""
         managed = self._dispatcher._sessions.get(session_id)
@@ -326,6 +328,7 @@ class GatewayNodeManager:
                 roundtrip_ms=roundtrip_ms,
                 prompt_tokens=prompt_tokens,
                 response_tokens=response_tokens,
+                trace_timing=trace_timing,
             )
         # Also log for direct API sessions — visible in gateway logs
         logger.info(
@@ -358,24 +361,36 @@ class GatewayNodeManager:
             return 0.0
         return max(0.0, (arrival_time - managed.last_llm_departure_at) * 1000.0)
 
-    def mark_llm_departure(self, session_id: str, departure_time: float) -> None:
+    def mark_llm_departure(
+        self,
+        session_id: str,
+        departure_time: float,
+        departure_time_ns: int | None = None,
+    ) -> None:
         """Record the timestamp when the Gateway sent the LLM response back to the agent."""
         managed = self._dispatcher._sessions.get(session_id)
         if managed is not None:
             managed.last_llm_departure_at = departure_time
+            managed.last_llm_departure_at_ns = departure_time_ns
 
     def patch_last_llm_agent_side_gap_ms(
         self,
         session_id: str,
         gap_ms: float,
         original_request: dict | None = None,
+        gap_finished_at_ns: int | None = None,
     ) -> None:
         """Patch the agent gap and classify tool results from the request."""
         managed = self._dispatcher._sessions.get(session_id)
         if managed is None:
             return
         actions = extract_completed_agent_actions(original_request or {})
-        managed.timer.patch_last_llm_agent_side_gap(gap_ms=gap_ms, actions=actions)
+        managed.timer.patch_last_llm_agent_side_gap(
+            gap_ms=gap_ms,
+            actions=actions,
+            gap_started_at_ns=managed.last_llm_departure_at_ns,
+            gap_finished_at_ns=gap_finished_at_ns,
+        )
 
     # ── Per-session trace artifacts (W&B + Chrome Trace JSON) ──
 
@@ -400,19 +415,19 @@ class GatewayNodeManager:
         # ── Option C: Chrome Trace Event JSON ──
         if self._enable_session_trace_json:
             try:
-                events = export_chrome_trace(
+                trace_document = build_chrome_trace_document(
                     timing,
                     session_id=session_id,
                     node_id=self.node_id,
                     task_id=request.task_id,
                 )
-                trace_json = json.dumps(events, ensure_ascii=False)
+                trace_json = json.dumps(trace_document, ensure_ascii=False)
                 # Always write inside the session directory (for debugging).
                 managed.session_dir.mkdir(parents=True, exist_ok=True)
                 trace_path = managed.session_dir / "trace.json"
                 trace_path.write_text(trace_json, encoding="utf-8")
                 logger.debug("Chrome Trace JSON written: %s (%d events)",
-                             trace_path, len(events))
+                             trace_path, len(trace_document["traceEvents"]))
                 # Persist to durable directory.
                 if self._persist_traces_dir is not None:
                     self._persist_traces_dir.mkdir(parents=True, exist_ok=True)
@@ -699,17 +714,21 @@ class GatewayNodeManager:
                 )
             merged_env = {**env, **(step.env or {})}
             t_step_start = asyncio.get_event_loop().time()
+            t_step_start_ns = time.time_ns()
             result = await runtime.exec(
                 step.command,
                 cwd=step.cwd,
                 env=merged_env,
                 timeout_sec=self._remaining_budget(managed),
             )
+            step_finished_ns = time.time_ns()
             step_duration_ms = (asyncio.get_event_loop().time() - t_step_start) * 1000.0
             managed.timer.record_tool_exec(
                 command=step.command,
                 duration_ms=step_duration_ms,
                 exit_code=result.return_code,
+                started_at_ns=t_step_start_ns,
+                finished_at_ns=step_finished_ns,
             )
             self._write_exec_log(
                 log_dir, f"step.{i:02d}", result.stdout, result.stderr

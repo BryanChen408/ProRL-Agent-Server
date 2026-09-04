@@ -16,9 +16,11 @@ _POSTRUN_MARKS: tuple[str, ...] = ("postrun", "build", "eval", "teardown")
 
 @dataclass(slots=True)
 class StageTimer:
-    """Record monotonic timestamps for session stages."""
+    """Record stable durations plus wall-clock anchors for trace correlation."""
 
     _marks: dict[str, float] = field(default_factory=dict)
+    _clock_monotonic_origin: float = field(default_factory=time.monotonic)
+    _clock_epoch_origin_ns: int = field(default_factory=time.time_ns)
 
     # Accumulators for per-LLM-call timing (populated by gateway proxy).
     _llm_call_count: int = 0
@@ -32,6 +34,11 @@ class StageTimer:
         """Mark a stage start or finish."""
         self._marks[f"{stage}_{event}"] = time.monotonic()
 
+    def monotonic_to_epoch_ns(self, value: float) -> int:
+        """Map a monotonic timestamp onto the timer's wall-clock epoch anchor."""
+        delta_ns = int((value - self._clock_monotonic_origin) * 1_000_000_000)
+        return self._clock_epoch_origin_ns + delta_ns
+
     def record_llm_call(
         self, *,
         acquire_wait_ms: float = 0.0,
@@ -42,6 +49,7 @@ class StageTimer:
         post_ms: float = 0.0,
         prompt_tokens: int = 0,
         response_tokens: int = 0,
+        trace_timing: dict[str, int] | None = None,
     ) -> None:
         """Record one LLM inference call's timing (called by gateway proxy).
 
@@ -55,7 +63,7 @@ class StageTimer:
         self._llm_call_count += 1
         self._llm_total_ms += sglang_wait_ms
         self._llm_request_total_ms += roundtrip_ms
-        self._llm_calls.append({
+        call = {
             "round": self._llm_call_count,
             "acquire_wait_ms": round(acquire_wait_ms, 2),
             "prepare_ms": round(prepare_ms, 2),
@@ -65,13 +73,22 @@ class StageTimer:
             "roundtrip_ms": round(roundtrip_ms, 2),
             "prompt_tokens": prompt_tokens,
             "response_tokens": response_tokens,
-        })
+        }
+        if trace_timing:
+            call["trace_timing"] = {
+                str(key): int(value)
+                for key, value in trace_timing.items()
+                if isinstance(value, int) and value >= 0
+            }
+        self._llm_calls.append(call)
 
     def record_tool_exec(
         self, *,
         command: str = "",
         duration_ms: float = 0.0,
         exit_code: int = 0,
+        started_at_ns: int | None = None,
+        finished_at_ns: int | None = None,
     ) -> None:
         """Record one agent tool execution (bash/sed/python etc.).
 
@@ -79,18 +96,25 @@ class StageTimer:
         step the agent harness emits.  Each call is a separate per-step data
         point that can be plotted or embedded in Chrome Trace spans.
         """
-        self._tool_execs.append({
+        tool_exec = {
             "idx": len(self._tool_execs),
             "command": command[:256],   # truncate long commands
             "duration_ms": round(duration_ms, 2),
             "exit_code": exit_code,
-        })
+        }
+        if started_at_ns is not None:
+            tool_exec["started_at_ns"] = started_at_ns
+        if finished_at_ns is not None:
+            tool_exec["finished_at_ns"] = finished_at_ns
+        self._tool_execs.append(tool_exec)
 
     def patch_last_llm_agent_side_gap(
         self,
         *,
         gap_ms: float,
         actions: list[dict] | None = None,
+        gap_started_at_ns: int | None = None,
+        gap_finished_at_ns: int | None = None,
     ) -> None:
         """Attach the pre-call agent gap and its completed actions.
 
@@ -106,6 +130,10 @@ class StageTimer:
         safe_gap_ms = max(0.0, gap_ms)
         call = self._llm_calls[-1]
         call["agent_side_gap_ms"] = round(safe_gap_ms, 2)
+        if gap_started_at_ns is not None:
+            call["agent_side_gap_started_at_ns"] = gap_started_at_ns
+        if gap_finished_at_ns is not None:
+            call["agent_side_gap_finished_at_ns"] = gap_finished_at_ns
         self._llm_agent_side_total_ms += safe_gap_ms
 
         normalized = [dict(action) for action in (actions or [])]
@@ -171,7 +199,21 @@ class StageTimer:
         # ── total ──
         total_ms = self._span_ms("dispatch_started", "return_finished")
 
+        stage_spans = self._stage_spans()
+        trace_start_ns = min(
+            (span["started_at_ns"] for span in stage_spans),
+            default=None,
+        )
+        trace_end_ns = max(
+            (span["finished_at_ns"] for span in stage_spans),
+            default=None,
+        )
+
         return SessionTiming(
+            schema_version=2,
+            trace_start_time_ns=trace_start_ns,
+            trace_end_time_ns=trace_end_ns,
+            stage_spans=stage_spans,
             # coarse
             register_to_init_queue_ms=self._span_ms("dispatch_started", "init_started"),
             init_ms=init_ms if init_ms > 0 else runtime_create_ms + prepare_ms,
@@ -205,6 +247,44 @@ class StageTimer:
             # total
             total_ms=total_ms,
         )
+
+    def _stage_spans(self) -> list[dict]:
+        """Return completed stage intervals with epoch-nanosecond boundaries."""
+        spans: list[dict] = []
+        for key, started in self._marks.items():
+            if not key.endswith("_started"):
+                continue
+            stage = key.removesuffix("_started")
+            finished = self._marks.get(f"{stage}_finished")
+            if finished is None:
+                continue
+            started_at_ns = self.monotonic_to_epoch_ns(started)
+            finished_at_ns = self.monotonic_to_epoch_ns(max(started, finished))
+            spans.append({
+                "name": stage,
+                "started_at_ns": started_at_ns,
+                "finished_at_ns": finished_at_ns,
+                "duration_ms": round((finished_at_ns - started_at_ns) / 1_000_000, 2),
+            })
+        for name, start_mark, end_mark in (
+            ("session", "dispatch_started", "return_finished"),
+            ("register_to_init_queue", "dispatch_started", "init_started"),
+            ("ready_wait", "init_finished", "run_started"),
+        ):
+            started = self._marks.get(start_mark)
+            finished = self._marks.get(end_mark)
+            if started is None or finished is None:
+                continue
+            started_at_ns = self.monotonic_to_epoch_ns(started)
+            finished_at_ns = self.monotonic_to_epoch_ns(max(started, finished))
+            spans.append({
+                "name": name,
+                "started_at_ns": started_at_ns,
+                "finished_at_ns": finished_at_ns,
+                "duration_ms": round((finished_at_ns - started_at_ns) / 1_000_000, 2),
+            })
+        spans.sort(key=lambda span: (span["started_at_ns"], span["finished_at_ns"]))
+        return spans
 
     def _duration_ms(self, stage: str) -> float:
         started = self._marks.get(f"{stage}_started")
