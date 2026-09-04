@@ -1289,6 +1289,7 @@ async def _handle_non_streaming(
             response_tokens=state.inference.last_response_tokens,
             trace_timing=trace_timing,
             trace_id=_trace["x-polar-trace-id"],
+            engine_name=getattr(getattr(state.inference, "engine", None), "name", "unknown"),
             engine_url=state.inference.base_url,
             engine_metrics=extract_engine_metrics(response),
         )
@@ -1409,6 +1410,7 @@ async def _handle_streaming(
             response_tokens=state.inference.last_response_tokens,
             trace_timing=trace_timing,
             trace_id=_trace["x-polar-trace-id"],
+            engine_name=getattr(getattr(state.inference, "engine", None), "name", "unknown"),
             engine_url=state.inference.base_url,
             engine_metrics=extract_engine_metrics(response),
         )

@@ -246,6 +246,7 @@ def _build_otlp_payload(
                     "prompt_tokens": int(call.get("prompt_tokens", 0)),
                     "response_tokens": int(call.get("response_tokens", 0)),
                     "polar.trace_id": call.get("trace_id", ""),
+                    "engine": call.get("engine_name", "unknown"),
                     "engine_url": call.get("engine_url", ""),
                     **(call.get("engine_metrics") or {}),
                 },
@@ -260,11 +261,22 @@ def _build_otlp_payload(
                 _otlp_span(
                     trace_id,
                     _span_id(session_id, f"llm:{index}:{segment}"),
-                    f"gateway_generation.{segment}",
+                    f"gateway_generation.{'inference' if segment == 'sglang' else segment}",
                     int(segment_start),
                     int(segment_end),
                     parent_span_id=call_span_id,
-                    attributes={**identity, "turn": int(call.get("round", index + 1))},
+                    attributes={
+                        **identity,
+                        "turn": int(call.get("round", index + 1)),
+                        **(
+                            {
+                                "engine": str(call.get("engine_name") or "unknown"),
+                                "engine_url": str(call.get("engine_url") or ""),
+                            }
+                            if segment == "sglang"
+                            else {}
+                        ),
+                    },
                 )
             )
         for detail, detail_start, detail_end in _engine_metric_intervals(call):

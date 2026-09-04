@@ -5,7 +5,7 @@ into https://ui.perfetto.dev for waterfall / flame-graph analysis.
 
 Process layout (``pid``):
   1 — Gateway (init / run / postrun stages)
-  2 — SGLang (inference)
+  2 — Engine (inference)
   3 — Agent (tool execution + thinking)
 
 All events share ``tid = session_id`` so they appear on the same horizontal
@@ -22,7 +22,7 @@ from polar.rollout.models import SessionTiming
 
 # Perfetto process IDs — stable across sessions
 GW_PID = 1      # Gateway
-SGL_PID = 2     # SGLang inference server
+ENGINE_PID = 2  # OpenAI-compatible inference engine
 AGT_PID = 3     # Agent (inside runtime container)
 
 
@@ -178,8 +178,8 @@ def _append_metadata(
     events.append({
         "name": "process_name",
         "ph": "M",
-        "pid": SGL_PID,
-        "args": {"name": "SGLang"},
+        "pid": ENGINE_PID,
+        "args": {"name": "Engine"},
     })
     events.append({
         "name": "process_name",
@@ -280,22 +280,25 @@ def _export_clocked_trace(
                 "measured": True,
             },
         )
-        for segment, pid, category in (
-            ("acquire", GW_PID, "gateway,llm"),
-            ("prepare", GW_PID, "gateway,llm"),
-            ("sglang", SGL_PID, "sglang"),
-            ("normalize", GW_PID, "gateway,llm"),
-            ("post", GW_PID, "gateway,llm"),
+        engine_name = str(call.get("engine_name") or "unknown")
+        for segment, display_name, pid, category in (
+            ("acquire", "acquire", GW_PID, "gateway,llm"),
+            ("prepare", "prepare", GW_PID, "gateway,llm"),
+            ("sglang", "inference", ENGINE_PID, f"engine,{engine_name}"),
+            ("normalize", "normalize", GW_PID, "gateway,llm"),
+            ("post", "post", GW_PID, "gateway,llm"),
         ):
             segment_args: dict[str, Any] = {"clock": "epoch_ns", "measured": True}
             if segment == "sglang":
                 segment_args.update(call.get("engine_metrics") or {})
                 segment_args["trace_id"] = call.get("trace_id", "")
+                segment_args["engine"] = engine_name
+                segment_args["engine_url"] = call.get("engine_url", "")
             _add_clock_event(
                 events,
                 started_at_ns=trace.get(f"{segment}_started_at_ns"),
                 finished_at_ns=trace.get(f"{segment}_finished_at_ns"),
-                name=f"{label}/{segment}",
+                name=f"{label}/{display_name}",
                 cat=category,
                 pid=pid,
                 tid=session_id,
@@ -357,7 +360,7 @@ def _emit_clocked_engine_metrics(
             finished_at_ns=end,
             name=f"{call_label}/engine/{label}",
             cat=f"engine,{label}",
-            pid=SGL_PID,
+            pid=ENGINE_PID,
             tid=session_id,
             args={
                 "duration_measured": True,
@@ -379,7 +382,7 @@ def _emit_clocked_engine_metrics(
             finished_at_ns=ttft_end,
             name=f"{call_label}/engine/time_to_first_token",
             cat="engine,ttft",
-            pid=SGL_PID,
+            pid=ENGINE_PID,
             tid=session_id,
             args={"duration_measured": True, "position_derived": True},
         )
@@ -394,7 +397,7 @@ def _emit_clocked_engine_metrics(
             finished_at_ns=decode_end,
             name=f"{call_label}/engine/decode",
             cat="engine,decode",
-            pid=SGL_PID,
+            pid=ENGINE_PID,
             tid=session_id,
             args={
                 "duration_measured": True,
@@ -648,11 +651,13 @@ def _emit_llm_call_events(
                    f"{call_label}/prepare", "gateway,llm",
                    GW_PID, session_id)
 
-        # ── SGLang inference ──
+        # ── Inference engine ──
         sglang_ms = call.get("sglang_wait_ms", 0.0)
         _add_event(events, t, sglang_ms,
-                   f"{call_label}/sglang", "sglang",
-                   SGL_PID, session_id)
+                   f"{call_label}/inference", f"engine,{call.get('engine_name', 'unknown')}",
+                   ENGINE_PID, session_id,
+                   args={"engine": call.get("engine_name", "unknown"),
+                         "engine_url": call.get("engine_url", "")})
 
         # ── Normalize + post ──
         norm_ms = call.get("normalize_ms", 0.0)

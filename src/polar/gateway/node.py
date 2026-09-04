@@ -342,6 +342,7 @@ class GatewayNodeManager:
         response_tokens: int = 0,
         trace_timing: dict[str, int] | None = None,
         trace_id: str | None = None,
+        engine_name: str | None = None,
         engine_url: str | None = None,
         engine_metrics: dict[str, float | int] | None = None,
     ) -> None:
@@ -358,13 +359,14 @@ class GatewayNodeManager:
                 response_tokens=response_tokens,
                 trace_timing=trace_timing,
                 trace_id=trace_id,
+                engine_name=engine_name,
                 engine_url=engine_url,
                 engine_metrics=engine_metrics,
             )
         # Also log for direct API sessions — visible in gateway logs
         logger.info(
-            "llm_call session=%s acquire=%.0fms prepare=%.0fms sglang=%.0fms normalize=%.0fms p_t=%d r_t=%d",
-            session_id, acquire_wait_ms, prepare_ms, sglang_wait_ms,
+            "llm_call session=%s engine=%s acquire=%.0fms prepare=%.0fms inference=%.0fms normalize=%.0fms p_t=%d r_t=%d",
+            session_id, engine_name or "unknown", acquire_wait_ms, prepare_ms, sglang_wait_ms,
             normalize_ms, prompt_tokens, response_tokens,
         )
 
