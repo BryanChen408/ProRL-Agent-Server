@@ -102,6 +102,9 @@ class InferenceClient:
         self.last_prompt_tokens: int = 0            # prompt token count
         self.last_response_tokens: int = 0          # response token count
         self.last_post_ms: float = 0.0              # I: storage + response formatting
+        # Keyed by returned response identity so concurrent sessions cannot overwrite
+        # one another's trace boundaries while retaining the legacy ``last_*`` fields.
+        self._response_trace_timings: dict[int, dict[str, int]] = {}
         # 12 & 17: Agent↔Gateway boundary timing
         self.arrival_time: float | None = None      # 12: request arrived at gateway
         self.gateway_total_ms: float = 0.0          # 12→17: total gateway processing
@@ -208,8 +211,10 @@ class InferenceClient:
 
         # ── B: acquire slot ──
         t_acquire_start = _time.monotonic()
+        t_acquire_start_ns = _time.time_ns()
         await self._acquire_generation_slot()
         t_acquire_end = _time.monotonic()
+        t_acquire_end_ns = _time.time_ns()
 
         try:
             # A request may have entered the gateway before pause and waited behind
@@ -222,11 +227,13 @@ class InferenceClient:
 
             # ── C: prepare ──
             t_prepare_start = _time.monotonic()
+            t_prepare_start_ns = _time.time_ns()
             request_copy = deepcopy(request)
             request_copy.pop("stream", None)
             request_copy["stream"] = False
             request_copy = self.engine.prepare_request(request_copy)
             t_prepare_end = _time.monotonic()
+            t_prepare_end_ns = _time.time_ns()
 
             headers = {
                 "Content-Type": "application/json",
@@ -254,6 +261,7 @@ class InferenceClient:
                     headers=headers,
                 )
                 t_sglang_end = _time.monotonic()
+                t_sglang_end_ns = _time.time_ns()
             except httpx.RequestError as exc:
                 raise self._translate_transport_error(exc) from exc
         finally:
@@ -267,8 +275,10 @@ class InferenceClient:
 
         # ── H: normalize ──
         t_normalize_start = _time.monotonic()
+        t_normalize_start_ns = _time.time_ns()
         result = self.engine.normalize_response(resp.json())
         t_normalize_end = _time.monotonic()
+        t_normalize_end_ns = _time.time_ns()
 
         # ── Store per-phase timing ──
         self.last_acquire_wait_ms = (t_acquire_end - t_acquire_start) * 1000.0
@@ -283,7 +293,23 @@ class InferenceClient:
         choice = (result.get("choices", [{}]) or [{}])[0] if isinstance(result, dict) else {}
         self.last_response_tokens = len(choice.get("token_ids", []) or [])
 
+        self._response_trace_timings[id(result)] = {
+            "request_started_at_ns": t_acquire_start_ns,
+            "acquire_started_at_ns": t_acquire_start_ns,
+            "acquire_finished_at_ns": t_acquire_end_ns,
+            "prepare_started_at_ns": t_prepare_start_ns,
+            "prepare_finished_at_ns": t_prepare_end_ns,
+            "sglang_started_at_ns": t_prepare_end_ns,
+            "sglang_finished_at_ns": t_sglang_end_ns,
+            "normalize_started_at_ns": t_normalize_start_ns,
+            "normalize_finished_at_ns": t_normalize_end_ns,
+        }
+
         return result
+
+    def pop_trace_timing(self, response: dict[str, Any]) -> dict[str, int]:
+        """Return per-response clock boundaries without cross-session races."""
+        return self._response_trace_timings.pop(id(response), {})
 
     async def _acquire_generation_slot(self) -> None:
         async with self._generation_condition:

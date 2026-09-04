@@ -9,7 +9,7 @@ from polar.rollout.agent_actions import (
 )
 from polar.rollout.models import SessionTiming
 from polar.rollout.timer import StageTimer
-from polar.rollout.trace_exporter import export_chrome_trace
+from polar.rollout.trace_exporter import build_chrome_trace_document, export_chrome_trace
 
 
 @pytest.mark.parametrize(
@@ -208,3 +208,40 @@ def test_trace_uses_classified_actions_and_hides_outer_agent_runner() -> None:
     grep_span = next(event for event in spans if "/tool/grep/" in event["name"])
     assert grep_span["args"]["action_kind"] == "grep"
     assert grep_span["args"]["duration_estimated"] is True
+
+
+def test_v2_trace_preserves_measured_clock_positions() -> None:
+    timer = StageTimer()
+    timer._clock_monotonic_origin = 10.0
+    timer._clock_epoch_origin_ns = 1_700_000_000_000_000_000
+    timer._marks.update({
+        "dispatch_started": 10.0,
+        "init_started": 10.125,
+        "init_finished": 10.375,
+        "run_started": 10.5,
+        "run_finished": 11.0,
+        "return_finished": 11.2,
+    })
+    timer.record_llm_call(
+        sglang_wait_ms=100,
+        trace_timing={
+            "request_started_at_ns": 1_700_000_000_600_000_000,
+            "sglang_started_at_ns": 1_700_000_000_650_000_000,
+            "sglang_finished_at_ns": 1_700_000_000_750_000_000,
+            "response_finished_at_ns": 1_700_000_000_800_000_000,
+        },
+    )
+
+    timing = timer.to_session_timing()
+    document = build_chrome_trace_document(timing, session_id="session-1")
+    spans = [event for event in document["traceEvents"] if event.get("ph") == "X"]
+
+    assert document["schemaVersion"] == 2
+    assert document["metadata"]["traceStartTimeNs"] == 1_700_000_000_000_000_000
+    queue = next(event for event in spans if event["name"] == "register_to_init_queue")
+    assert queue["ts"] == 1_700_000_000_000_000
+    assert queue["dur"] == 125_000
+    sglang = next(event for event in spans if event["name"] == "llm_call_1/sglang")
+    assert sglang["ts"] == 1_700_000_000_650_000
+    assert sglang["dur"] == 100_000
+    assert sglang["args"]["measured"] is True

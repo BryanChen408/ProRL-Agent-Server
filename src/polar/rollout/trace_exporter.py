@@ -37,6 +37,17 @@ def export_chrome_trace(
 
     Returns a list of trace events suitable for ``json.dump``.
     """
+    if timing.stage_spans or any(call.get("trace_timing") for call in timing.llm_calls):
+        events = _export_clocked_trace(timing, session_id=session_id)
+        _append_metadata(
+            events,
+            session_id=session_id,
+            node_id=node_id,
+            task_id=task_id,
+            schema_version=timing.schema_version,
+        )
+        return events
+
     events: list[dict[str, Any]] = []
     t = _Timeline()
 
@@ -112,7 +123,52 @@ def export_chrome_trace(
     _add_group(events, postrun_anchor, t.cursor - postrun_anchor,
                "postrun", "gateway,postrun", GW_PID, session_id)
 
-    # ── Perfetto metadata ──
+    _append_metadata(
+        events,
+        session_id=session_id,
+        node_id=node_id,
+        task_id=task_id,
+        schema_version=1,
+    )
+    return events
+
+
+def build_chrome_trace_document(
+    timing: SessionTiming,
+    *,
+    session_id: str,
+    node_id: str = "",
+    task_id: str = "",
+) -> dict[str, Any]:
+    """Build a versioned Chrome/Perfetto document around the event array."""
+    return {
+        "schemaVersion": timing.schema_version,
+        "displayTimeUnit": "ns",
+        "traceEvents": export_chrome_trace(
+            timing,
+            session_id=session_id,
+            node_id=node_id,
+            task_id=task_id,
+        ),
+        "metadata": {
+            "sessionId": session_id,
+            "taskId": task_id,
+            "nodeId": node_id,
+            "traceStartTimeNs": timing.trace_start_time_ns,
+            "traceEndTimeNs": timing.trace_end_time_ns,
+        },
+    }
+
+
+def _append_metadata(
+    events: list[dict[str, Any]],
+    *,
+    session_id: str,
+    node_id: str,
+    task_id: str,
+    schema_version: int,
+) -> None:
+    """Append stable track names and searchable session metadata."""
     events.append({
         "name": "process_name",
         "ph": "M",
@@ -143,10 +199,218 @@ def export_chrome_trace(
             "name": "session_metadata",
             "ph": "M",
             "pid": GW_PID,
-            "args": {"session_id": session_id, "task_id": task_id, "node_id": node_id},
+            "args": {
+                "session_id": session_id,
+                "task_id": task_id,
+                "node_id": node_id,
+                "schema_version": schema_version,
+            },
         })
 
+
+_STAGE_TRACE_NAMES = {
+    "session": "session",
+    "register_to_init_queue": "register_to_init_queue",
+    "ready_wait": "ready_wait",
+    "dispatch": "session",
+    "init": "init",
+    "runtime_create": "init/runtime_create",
+    "docker_create": "init/runtime_create/docker_create",
+    "docker_start": "init/runtime_create/docker_start",
+    "prepare": "init/prepare",
+    "run": "run",
+    "harness_setup": "run/harness_setup",
+    "agent_exec": "run/agent_exec",
+    "harness_postprocess": "run/harness_postprocess",
+    "postrun": "postrun",
+    "build": "postrun/build",
+    "eval": "postrun/eval",
+    "teardown": "postrun/teardown",
+    "docker_kill": "postrun/teardown/docker_kill",
+    "docker_rm": "postrun/teardown/docker_rm",
+    "push_result": "postrun/push_result",
+    "return": "return",
+}
+
+
+def _export_clocked_trace(
+    timing: SessionTiming,
+    *,
+    session_id: str,
+) -> list[dict[str, Any]]:
+    """Render v2 spans at their measured epoch timestamps."""
+    events: list[dict[str, Any]] = []
+    for span in timing.stage_spans:
+        stage = str(span.get("name", "stage"))
+        category = "gateway"
+        if stage.startswith("docker_"):
+            category += ",docker"
+        _add_clock_event(
+            events,
+            started_at_ns=span.get("started_at_ns"),
+            finished_at_ns=span.get("finished_at_ns"),
+            name=_STAGE_TRACE_NAMES.get(stage, stage),
+            cat=category,
+            pid=GW_PID,
+            tid=session_id,
+            args={"clock": "epoch_ns", "measured": True},
+        )
+
+    has_detailed_actions = any(call.get("agent_actions") for call in timing.llm_calls)
+    for index, call in enumerate(timing.llm_calls):
+        round_num = call.get("round", index + 1)
+        label = f"llm_call_{round_num}"
+        trace = call.get("trace_timing") or {}
+        _add_clock_event(
+            events,
+            started_at_ns=trace.get("request_started_at_ns"),
+            finished_at_ns=trace.get("response_finished_at_ns"),
+            name=label,
+            cat="gateway,llm",
+            pid=GW_PID,
+            tid=session_id,
+            args={
+                "_group": True,
+                "round": round_num,
+                "prompt_tokens": call.get("prompt_tokens", 0),
+                "response_tokens": call.get("response_tokens", 0),
+                "clock": "epoch_ns",
+                "measured": True,
+            },
+        )
+        for segment, pid, category in (
+            ("acquire", GW_PID, "gateway,llm"),
+            ("prepare", GW_PID, "gateway,llm"),
+            ("sglang", SGL_PID, "sglang"),
+            ("normalize", GW_PID, "gateway,llm"),
+            ("post", GW_PID, "gateway,llm"),
+        ):
+            _add_clock_event(
+                events,
+                started_at_ns=trace.get(f"{segment}_started_at_ns"),
+                finished_at_ns=trace.get(f"{segment}_finished_at_ns"),
+                name=f"{label}/{segment}",
+                cat=category,
+                pid=pid,
+                tid=session_id,
+                args={"clock": "epoch_ns", "measured": True},
+            )
+
+        gap_start = call.get("agent_side_gap_started_at_ns")
+        gap_end = call.get("agent_side_gap_finished_at_ns")
+        actions = call.get("agent_actions") or []
+        if gap_start is not None and gap_end is not None and gap_end >= gap_start:
+            _emit_clocked_agent_actions(
+                events,
+                actions,
+                call_label=label,
+                session_id=session_id,
+                gap_started_at_ns=gap_start,
+                gap_finished_at_ns=gap_end,
+            )
+
+    if not has_detailed_actions:
+        for tool_exec in timing.tool_execs:
+            if is_agent_runner_command(str(tool_exec.get("command", ""))):
+                continue
+            _emit_clocked_tool_exec(events, tool_exec, session_id)
     return events
+
+
+def _add_clock_event(
+    events: list[dict[str, Any]],
+    *,
+    started_at_ns: Any,
+    finished_at_ns: Any,
+    name: str,
+    cat: str,
+    pid: int,
+    tid: str,
+    args: dict[str, Any] | None = None,
+) -> None:
+    if not isinstance(started_at_ns, int) or not isinstance(finished_at_ns, int):
+        return
+    if finished_at_ns < started_at_ns:
+        return
+    event: dict[str, Any] = {
+        "name": name,
+        "cat": cat,
+        "ph": "X",
+        # Chrome Trace stores timestamps in microseconds. Integer conversion
+        # avoids losing additional precision when epoch-sized values become floats.
+        "ts": started_at_ns // 1000,
+        "dur": (finished_at_ns - started_at_ns) // 1000,
+        "pid": pid,
+        "tid": tid,
+    }
+    if args:
+        event["args"] = args
+    events.append(event)
+
+
+def _emit_clocked_agent_actions(
+    events: list[dict[str, Any]],
+    actions: list[dict],
+    *,
+    call_label: str,
+    session_id: str,
+    gap_started_at_ns: int,
+    gap_finished_at_ns: int,
+) -> None:
+    """Place estimated action allocations inside the measured agent gap."""
+    cursor = gap_started_at_ns
+    for index, action in enumerate(actions):
+        duration_ns = int(float(action.get("duration_ms", 0.0) or 0.0) * 1_000_000)
+        action_end = min(gap_finished_at_ns, cursor + max(0, duration_ns))
+        kind = str(action.get("kind") or "other")
+        summary = _preview(str(action.get("summary") or action.get("tool_name") or kind), 100)
+        name = (
+            f"{call_label}/agent/think"
+            if kind == "think"
+            else f"{call_label}/tool/{kind}/{index:02d}: {summary}"
+        )
+        _add_clock_event(
+            events,
+            started_at_ns=cursor,
+            finished_at_ns=action_end,
+            name=name,
+            cat="agent,think" if kind == "think" else f"agent,tool,{kind}",
+            pid=AGT_PID,
+            tid=session_id,
+            args={
+                "duration_estimated": True,
+                "gap_allocation": action.get("gap_allocation", "unknown"),
+                "parallel": bool(action.get("parallel", False)),
+                "measured_gap": True,
+            },
+        )
+        cursor = action_end
+
+
+def _emit_clocked_tool_exec(
+    events: list[dict[str, Any]],
+    tool_exec: dict,
+    session_id: str,
+) -> None:
+    command = str(tool_exec.get("command", ""))
+    first_line = command.split("\n")[0].strip()
+    tool_type = classify_shell_command(command)
+    _add_clock_event(
+        events,
+        started_at_ns=tool_exec.get("started_at_ns"),
+        finished_at_ns=tool_exec.get("finished_at_ns"),
+        name=f"tool/{tool_type}/{tool_exec.get('idx', 0):02d}: {_preview(first_line, 100)}",
+        cat=f"agent,tool,{tool_type}",
+        pid=AGT_PID,
+        tid=session_id,
+        args={
+            "command": first_line[:256],
+            "exit_code": tool_exec.get("exit_code", 0),
+            "duration_estimated": False,
+            "clock": "epoch_ns",
+            "measured": True,
+        },
+    )
 
 
 # ---------------------------------------------------------------------------

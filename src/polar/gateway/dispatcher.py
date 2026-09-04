@@ -80,6 +80,7 @@ class ManagedSession:
     # Timing: when the last LLM response departed back to the agent.
     # Used to compute agent_side_gap_ms between consecutive LLM calls.
     last_llm_departure_at: float | None = None
+    last_llm_departure_at_ns: int | None = None
 
     @property
     def session_id(self) -> str:

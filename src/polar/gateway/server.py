@@ -1221,6 +1221,7 @@ async def _handle_non_streaming(
 
     # ── I: storage + format ──
     t_post_start = _time.monotonic()
+    t_post_start_ns = _time.time_ns()
     if generation.should_save:
         metadata = _completion_metadata(session_info)
         metadata["generation_fingerprint"] = generation.fingerprint
@@ -1242,9 +1243,17 @@ async def _handle_non_streaming(
         )
     transformed = transformer.transform_response(response, original_request)
     t_post_end = _time.monotonic()
+    t_post_end_ns = _time.time_ns()
     post_ms = (t_post_end - t_post_start) * 1000.0
 
     if generation.should_save:
+        pop_trace_timing = getattr(state.inference, "pop_trace_timing", None)
+        trace_timing = pop_trace_timing(response) if pop_trace_timing else {}
+        trace_timing.update({
+            "post_started_at_ns": t_post_start_ns,
+            "post_finished_at_ns": t_post_end_ns,
+            "response_finished_at_ns": t_post_end_ns,
+        })
         # Record exactly once when duplicate requests share an in-flight generation.
         state.node_manager.record_llm_call(
             session_id,
@@ -1255,6 +1264,7 @@ async def _handle_non_streaming(
             roundtrip_ms=state.inference.last_roundtrip_ms,
             prompt_tokens=state.inference.last_prompt_tokens,
             response_tokens=state.inference.last_response_tokens,
+            trace_timing=trace_timing,
         )
         state.node_manager.patch_last_llm_post_ms(session_id, post_ms)
         # ── agent-side gap (Stage 18+19: tool execution + client overhead) ──
@@ -1265,6 +1275,7 @@ async def _handle_non_streaming(
             session_id,
             agent_side_gap_ms,
             original_request,
+            gap_finished_at_ns=trace_timing.get("request_started_at_ns"),
         )
         # ── 17: compute total gateway processing time ──
         gateway_total_ms = 0.0
@@ -1272,7 +1283,7 @@ async def _handle_non_streaming(
             gateway_total_ms = (t_post_end - state.inference.arrival_time) * 1000.0
         state.node_manager.patch_last_llm_gateway_total_ms(session_id, gateway_total_ms)
         # Mark when the response departs back to the agent (for next call's agent gap)
-        state.node_manager.mark_llm_departure(session_id, t_post_end)
+        state.node_manager.mark_llm_departure(session_id, t_post_end, t_post_end_ns)
         logger.info(
             "llm_call session=%s acquire=%.0f prep=%.0f sglang=%.0f norm=%.0f post=%.0f gw_total=%.0f p_t=%d r_t=%d",
             session_id,
@@ -1328,6 +1339,7 @@ async def _handle_streaming(
 
     import time as _time_stream
     t_post_stream_start = _time_stream.monotonic()
+    t_post_stream_start_ns = _time_stream.time_ns()
     if generation.should_save:
         metadata = _completion_metadata(session_info)
         metadata["generation_fingerprint"] = generation.fingerprint
@@ -1348,9 +1360,17 @@ async def _handle_streaming(
             streaming=True,
         )
     t_post_stream_end = _time_stream.monotonic()
+    t_post_stream_end_ns = _time_stream.time_ns()
     state.inference.last_post_ms = (t_post_stream_end - t_post_stream_start) * 1000.0
 
     if generation.should_save:
+        pop_trace_timing = getattr(state.inference, "pop_trace_timing", None)
+        trace_timing = pop_trace_timing(response) if pop_trace_timing else {}
+        trace_timing.update({
+            "post_started_at_ns": t_post_stream_start_ns,
+            "post_finished_at_ns": t_post_stream_end_ns,
+            "response_finished_at_ns": t_post_stream_end_ns,
+        })
         # Record LLM call timing on the active session.
         state.node_manager.record_llm_call(
             session_id,
@@ -1361,6 +1381,7 @@ async def _handle_streaming(
             roundtrip_ms=state.inference.last_roundtrip_ms,
             prompt_tokens=state.inference.last_prompt_tokens,
             response_tokens=state.inference.last_response_tokens,
+            trace_timing=trace_timing,
         )
         # ── 17: compute total gateway processing time ──
         gateway_total_ms = 0.0
@@ -1377,9 +1398,14 @@ async def _handle_streaming(
             session_id,
             agent_side_gap_ms,
             original_request,
+            gap_finished_at_ns=trace_timing.get("request_started_at_ns"),
         )
         # Mark when the response departs back to the agent (for next call's agent gap).
-        state.node_manager.mark_llm_departure(session_id, t_post_stream_end)
+        state.node_manager.mark_llm_departure(
+            session_id,
+            t_post_stream_end,
+            t_post_stream_end_ns,
+        )
 
     synthetic_chunk = _response_to_stream_chunk(response)
     stream_state = transformer.create_stream_state(original_request)

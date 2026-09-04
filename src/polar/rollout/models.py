@@ -165,6 +165,13 @@ class SessionTiming(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
+    # Trace schema v2 adds epoch-nanosecond anchors and explicit stage spans.
+    # Duration-only readers can continue to consume every field below unchanged.
+    schema_version: int = 1
+    trace_start_time_ns: int | None = None
+    trace_end_time_ns: int | None = None
+    stage_spans: list[dict] = Field(default_factory=list)
+
     # ── coarse (backward-compatible aggregates) ──
     register_to_init_queue_ms: float = 0.0
     init_ms: float = 0.0
@@ -190,8 +197,8 @@ class SessionTiming(BaseModel):
     llm_total_ms: float = 0.0             # aggregate SGLang wait time
     llm_request_total_ms: float = 0.0     # aggregate full round-trip (gateway→SGLang→gateway)
     llm_agent_side_total_ms: float = 0.0  # aggregate tool + client overhead between LLM calls
-    llm_calls: list[dict] = []            # per-call timing + classified agent_actions
-    tool_execs: list[dict] = []           # per-tool-exec detail: [{"idx":0, "command":"bash ...", "duration_ms":..., "exit_code":0}, ...]
+    llm_calls: list[dict] = Field(default_factory=list)  # per-call timing + classified agent_actions
+    tool_execs: list[dict] = Field(default_factory=list)  # per-tool-exec detail
 
     # ── POSTRUN breakdown ──
     postrun_build_ms: float = 0.0         # trajectory building
