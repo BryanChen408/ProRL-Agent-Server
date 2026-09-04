@@ -3,7 +3,6 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-
 DASHBOARD = Path("deploy/observability/grafana/polar_gateway.json")
 
 
@@ -20,6 +19,9 @@ def test_polar_grafana_dashboard_is_valid_and_uses_bounded_labels() -> None:
     assert any("polar_gateway_sessions" in expression for expression in expressions)
     assert any("polar_inference_ttft_seconds" in expression for expression in expressions)
     assert any("polar_inference_tokens_total" in expression for expression in expressions)
+    assert any('job="polar-inference-engine"' in expression for expression in expressions)
+    assert any("polar_pd_backend_up" in expression for expression in expressions)
+    assert any("pd_role" in expression and "pd_backend" in expression for expression in expressions)
     assert all("session_id" not in expression for expression in expressions)
     assert all("task_id" not in expression for expression in expressions)
 
