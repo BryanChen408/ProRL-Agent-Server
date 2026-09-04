@@ -153,6 +153,8 @@ def _build_state(topology: TopologyConfig, node_id: str | None) -> GatewayState:
         persist_session_artifacts=topology.gateway.persist_session_artifacts,
         session_artifacts_max_bytes=topology.gateway.session_artifacts_max_bytes,
         session_artifacts_max_files=topology.gateway.session_artifacts_max_files,
+        inference_metrics_url=node.inference_base_url,
+        inference_engine_name=node.engine,
         prometheus_enabled=topology.gateway.observability.prometheus_enabled,
         rl_insight_url=topology.gateway.observability.rl_insight_url,
         otlp_endpoint=topology.gateway.observability.otlp_endpoint,
