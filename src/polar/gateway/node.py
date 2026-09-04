@@ -334,6 +334,9 @@ class GatewayNodeManager:
         prompt_tokens: int = 0,
         response_tokens: int = 0,
         trace_timing: dict[str, int] | None = None,
+        trace_id: str | None = None,
+        engine_url: str | None = None,
+        engine_metrics: dict[str, float | int] | None = None,
     ) -> None:
         """Record LLM inference timing on the active session's StageTimer."""
         managed = self._dispatcher._sessions.get(session_id)
@@ -347,6 +350,9 @@ class GatewayNodeManager:
                 prompt_tokens=prompt_tokens,
                 response_tokens=response_tokens,
                 trace_timing=trace_timing,
+                trace_id=trace_id,
+                engine_url=engine_url,
+                engine_metrics=engine_metrics,
             )
         # Also log for direct API sessions — visible in gateway logs
         logger.info(

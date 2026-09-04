@@ -28,6 +28,13 @@ def _timing() -> SessionTiming:
             "round": 1,
             "prompt_tokens": 10,
             "response_tokens": 4,
+            "trace_id": "session-1:1",
+            "engine_metrics": {
+                "queue_ms": 10.0,
+                "prefill_ms": 90.0,
+                "decode_ms": 500.0,
+                "num_cached_tokens": 8,
+            },
             "trace_timing": {
                 "request_started_at_ns": start + 100_000_000,
                 "sglang_started_at_ns": start + 200_000_000,
@@ -89,9 +96,14 @@ def test_otlp_export_has_one_trace_and_parent_child_spans() -> None:
     root = next(span for span in spans if span["name"] == "agent_session")
     generation = next(span for span in spans if span["name"] == "gateway_generation")
     engine = next(span for span in spans if span["name"] == "gateway_generation.sglang")
+    prefill = next(
+        span for span in spans if span["name"] == "gateway_generation.engine.prefill"
+    )
     assert {span["traceId"] for span in spans} == {root["traceId"]}
     assert generation["parentSpanId"] == root["spanId"]
     assert engine["parentSpanId"] == generation["spanId"]
+    assert prefill["parentSpanId"] == generation["spanId"]
+    assert int(prefill["endTimeUnixNano"]) - int(prefill["startTimeUnixNano"]) == 90_000_000
     attributes = {
         item["key"]: next(iter(item["value"].values()))
         for item in root["attributes"]

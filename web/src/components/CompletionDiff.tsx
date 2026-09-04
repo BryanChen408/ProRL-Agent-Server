@@ -2,6 +2,7 @@ import { useState } from "react";
 import type { CompletionRecord } from "../api/types";
 import { JsonView } from "./JsonView";
 import { CopyBtn } from "./CopyBtn";
+import { formatMs } from "../utils";
 
 interface Props {
   completion: CompletionRecord;
@@ -22,6 +23,18 @@ export function CompletionDiff({ completion }: Props) {
   const originalRequest = completion.original_request ?? {};
   const transformedRequest = completion.transformed_request ?? completion.request ?? {};
   const response = completion.response ?? {};
+  const engineMetrics = {
+    ...(typeof response.timings === "object" && response.timings ? response.timings : {}),
+    ...(typeof response.metrics === "object" && response.metrics ? response.metrics : {}),
+  } as Record<string, unknown>;
+  const visibleEngineMetrics = [
+    ["TTFT", "ttft_ms", "ms"],
+    ["Prefill", "prefill_ms", "ms"],
+    ["Decode", "decode_ms", "ms"],
+    ["Queue", "queue_ms", "ms"],
+    ["Cached tokens", "num_cached_tokens", "count"],
+    ["Prefix cache", "prefix_cache_hit_pct", "pct"],
+  ].filter(([, key]) => engineMetrics[key] != null);
 
   return (
     <div className="rounded-lg border border-slate-200 bg-white">
@@ -44,11 +57,31 @@ export function CompletionDiff({ completion }: Props) {
         </span>
       </button>
       {open && (
-        <div className="grid grid-cols-1 gap-3 border-t border-slate-200 p-3 md:grid-cols-2">
-          <Panel title="Raw client request (original API format)" value={originalRequest} />
-          <Panel title="Transformed request" value={transformedRequest} />
-          <Panel title="Inference engine response" value={response} />
-          <Panel title="Metadata" value={completion.metadata ?? {}} />
+        <div className="space-y-3 border-t border-slate-200 p-3">
+          {visibleEngineMetrics.length > 0 && (
+            <div className="grid grid-cols-2 gap-2 md:grid-cols-6">
+              {visibleEngineMetrics.map(([label, key, unit]) => {
+                const value = engineMetrics[key];
+                const display = unit === "ms"
+                  ? formatMs(value)
+                  : unit === "pct"
+                    ? `${Number(value).toFixed(1)}%`
+                    : Number(value).toLocaleString();
+                return (
+                  <div key={key} className="rounded border border-slate-200 p-2">
+                    <div className="text-[10px] uppercase text-slate-500">{label}</div>
+                    <div className="font-mono text-sm">{display}</div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+          <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
+            <Panel title="Raw client request (original API format)" value={originalRequest} />
+            <Panel title="Transformed request" value={transformedRequest} />
+            <Panel title="Inference engine response" value={response} />
+            <Panel title="Metadata" value={completion.metadata ?? {}} />
+          </div>
         </div>
       )}
     </div>

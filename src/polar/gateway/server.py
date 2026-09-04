@@ -17,6 +17,7 @@ from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import JSONResponse, PlainTextResponse, StreamingResponse
 
 from polar.config import GatewayNodeConfig, TopologyConfig
+from polar.gateway.completion_metrics import extract_engine_metrics
 from polar.gateway.completion_writer import CompletionWriter
 from polar.gateway.control import GatewayControlStore
 from polar.gateway.detection import APIType, detect, extract_model
@@ -1284,6 +1285,9 @@ async def _handle_non_streaming(
             prompt_tokens=state.inference.last_prompt_tokens,
             response_tokens=state.inference.last_response_tokens,
             trace_timing=trace_timing,
+            trace_id=_trace["x-polar-trace-id"],
+            engine_url=state.inference.base_url,
+            engine_metrics=extract_engine_metrics(response),
         )
         state.node_manager.patch_last_llm_post_ms(session_id, post_ms)
         # ── agent-side gap (Stage 18+19: tool execution + client overhead) ──
@@ -1401,6 +1405,9 @@ async def _handle_streaming(
             prompt_tokens=state.inference.last_prompt_tokens,
             response_tokens=state.inference.last_response_tokens,
             trace_timing=trace_timing,
+            trace_id=_trace["x-polar-trace-id"],
+            engine_url=state.inference.base_url,
+            engine_metrics=extract_engine_metrics(response),
         )
         # ── 17: compute total gateway processing time ──
         gateway_total_ms = 0.0

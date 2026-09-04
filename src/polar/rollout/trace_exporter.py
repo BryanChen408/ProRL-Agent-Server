@@ -274,6 +274,8 @@ def _export_clocked_trace(
                 "round": round_num,
                 "prompt_tokens": call.get("prompt_tokens", 0),
                 "response_tokens": call.get("response_tokens", 0),
+                "trace_id": call.get("trace_id", ""),
+                "engine_url": call.get("engine_url", ""),
                 "clock": "epoch_ns",
                 "measured": True,
             },
@@ -285,6 +287,10 @@ def _export_clocked_trace(
             ("normalize", GW_PID, "gateway,llm"),
             ("post", GW_PID, "gateway,llm"),
         ):
+            segment_args: dict[str, Any] = {"clock": "epoch_ns", "measured": True}
+            if segment == "sglang":
+                segment_args.update(call.get("engine_metrics") or {})
+                segment_args["trace_id"] = call.get("trace_id", "")
             _add_clock_event(
                 events,
                 started_at_ns=trace.get(f"{segment}_started_at_ns"),
@@ -293,8 +299,14 @@ def _export_clocked_trace(
                 cat=category,
                 pid=pid,
                 tid=session_id,
-                args={"clock": "epoch_ns", "measured": True},
+                args=segment_args,
             )
+        _emit_clocked_engine_metrics(
+            events,
+            call,
+            call_label=label,
+            session_id=session_id,
+        )
 
         gap_start = call.get("agent_side_gap_started_at_ns")
         gap_end = call.get("agent_side_gap_finished_at_ns")
@@ -315,6 +327,82 @@ def _export_clocked_trace(
                 continue
             _emit_clocked_tool_exec(events, tool_exec, session_id)
     return events
+
+
+def _emit_clocked_engine_metrics(
+    events: list[dict[str, Any]],
+    call: dict,
+    *,
+    call_label: str,
+    session_id: str,
+) -> None:
+    """Render engine-returned durations inside the measured upstream interval."""
+    metrics = call.get("engine_metrics") or {}
+    trace = call.get("trace_timing") or {}
+    engine_start = trace.get("sglang_started_at_ns")
+    engine_end = trace.get("sglang_finished_at_ns")
+    if not isinstance(engine_start, int) or not isinstance(engine_end, int):
+        return
+
+    cursor = engine_start
+    emitted_prefill = False
+    for key, label in (("queue_ms", "queue"), ("prefill_ms", "prefill")):
+        value = metrics.get(key)
+        if not isinstance(value, (int, float)) or isinstance(value, bool):
+            continue
+        end = min(engine_end, cursor + int(max(0.0, float(value)) * 1_000_000))
+        _add_clock_event(
+            events,
+            started_at_ns=cursor,
+            finished_at_ns=end,
+            name=f"{call_label}/engine/{label}",
+            cat=f"engine,{label}",
+            pid=SGL_PID,
+            tid=session_id,
+            args={
+                "duration_measured": True,
+                "position_derived": True,
+                "trace_id": call.get("trace_id", ""),
+            },
+        )
+        cursor = end
+        emitted_prefill = emitted_prefill or key == "prefill_ms"
+
+    if not emitted_prefill and isinstance(metrics.get("ttft_ms"), (int, float)):
+        ttft_end = min(
+            engine_end,
+            engine_start + int(max(0.0, float(metrics["ttft_ms"])) * 1_000_000),
+        )
+        _add_clock_event(
+            events,
+            started_at_ns=engine_start,
+            finished_at_ns=ttft_end,
+            name=f"{call_label}/engine/time_to_first_token",
+            cat="engine,ttft",
+            pid=SGL_PID,
+            tid=session_id,
+            args={"duration_measured": True, "position_derived": True},
+        )
+        cursor = max(cursor, ttft_end)
+
+    decode_ms = metrics.get("decode_ms")
+    if isinstance(decode_ms, (int, float)) and not isinstance(decode_ms, bool):
+        decode_end = min(engine_end, cursor + int(max(0.0, float(decode_ms)) * 1_000_000))
+        _add_clock_event(
+            events,
+            started_at_ns=cursor,
+            finished_at_ns=decode_end,
+            name=f"{call_label}/engine/decode",
+            cat="engine,decode",
+            pid=SGL_PID,
+            tid=session_id,
+            args={
+                "duration_measured": True,
+                "position_derived": True,
+                "num_cached_tokens": metrics.get("num_cached_tokens", 0),
+                "prefix_cache_hit_pct": metrics.get("prefix_cache_hit_pct", 0),
+            },
+        )
 
 
 def _add_clock_event(

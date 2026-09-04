@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 
 def _utcnow_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(UTC).isoformat()
 
 
 def _int_or_none(value: Any) -> int | None:
@@ -28,7 +29,8 @@ def _float_or_none(value: Any) -> float | None:
     try:
         if value is None:
             return None
-        return float(value)
+        parsed = float(value)
+        return parsed if math.isfinite(parsed) else None
     except (TypeError, ValueError):
         return None
 
@@ -82,18 +84,22 @@ def _tokens_per_second(tokens: int | None, latency_ms: float | None) -> float | 
     return tokens / (latency_ms / 1000.0)
 
 
-def _engine_timing_passthrough(response: dict[str, Any]) -> dict[str, Any]:
+def extract_engine_metrics(response: dict[str, Any]) -> dict[str, float | int]:
     """If the engine returns per-request timing (some vllm builds put it under
     ``metrics``/``timings``), surface it so it joins the gateway event. All optional;
     the engine-side logger remains the primary source of TTFT/prefill/decode."""
-    out: dict[str, Any] = {}
+    out: dict[str, float | int] = {}
     for container in ("metrics", "timings"):
         blob = response.get(container)
         if isinstance(blob, dict):
             for k in ("ttft_ms", "prefill_ms", "decode_ms", "queue_ms",
                       "num_cached_tokens", "prefix_cache_hit_pct"):
-                if blob.get(k) is not None:
-                    out.setdefault(k, blob[k])
+                value = blob.get(k)
+                if value is None:
+                    continue
+                normalized = _int_or_none(value) if k == "num_cached_tokens" else _float_or_none(value)
+                if normalized is not None and normalized >= 0:
+                    out.setdefault(k, normalized)
     return out
 
 
@@ -152,7 +158,7 @@ def build_completion_metric_event(
         "completion_tokens_per_second": _tokens_per_second(completion_tokens, latency),
         "finish_reason": _finish_reason(response),
     }
-    event.update(_engine_timing_passthrough(response))
+    event.update(extract_engine_metrics(response))
     return event
 
 

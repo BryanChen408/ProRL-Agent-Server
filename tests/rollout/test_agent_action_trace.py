@@ -230,6 +230,14 @@ def test_v2_trace_preserves_measured_clock_positions() -> None:
             "sglang_finished_at_ns": 1_700_000_000_750_000_000,
             "response_finished_at_ns": 1_700_000_000_800_000_000,
         },
+        trace_id="session-1:1",
+        engine_metrics={
+            "queue_ms": 10,
+            "prefill_ms": 40,
+            "decode_ms": 50,
+            "num_cached_tokens": 8,
+            "prefix_cache_hit_pct": 80,
+        },
     )
 
     timing = timer.to_session_timing()
@@ -245,3 +253,8 @@ def test_v2_trace_preserves_measured_clock_positions() -> None:
     assert sglang["ts"] == 1_700_000_000_650_000
     assert sglang["dur"] == 100_000
     assert sglang["args"]["measured"] is True
+    prefill = next(event for event in spans if event["name"] == "llm_call_1/engine/prefill")
+    decode = next(event for event in spans if event["name"] == "llm_call_1/engine/decode")
+    assert prefill["dur"] == 40_000
+    assert prefill["args"]["position_derived"] is True
+    assert decode["args"]["num_cached_tokens"] == 8

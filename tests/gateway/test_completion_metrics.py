@@ -6,6 +6,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import polar.gateway.server as gateway_server
+from polar.gateway.completion_metrics import extract_engine_metrics
 from polar.gateway.completion_writer import CompletionWriter
 from polar.gateway.storage import SessionStore
 
@@ -20,6 +21,28 @@ def _response(prompt_tokens: int, completion_tokens: int) -> dict:
             "total_tokens": prompt_tokens + completion_tokens,
             "prompt_tokens_details": {"cached_tokens": 2},
         },
+    }
+
+
+def test_engine_metrics_are_normalized_and_bounded() -> None:
+    metrics = extract_engine_metrics({
+        "metrics": {
+            "ttft_ms": "12.5",
+            "decode_ms": 80,
+            "num_cached_tokens": "16",
+            "ignored": 1,
+        },
+        "timings": {
+            "ttft_ms": 99,
+            "queue_ms": -1,
+            "prefix_cache_hit_pct": float("inf"),
+        },
+    })
+
+    assert metrics == {
+        "ttft_ms": 12.5,
+        "decode_ms": 80.0,
+        "num_cached_tokens": 16,
     }
 
 
