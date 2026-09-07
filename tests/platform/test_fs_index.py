@@ -51,6 +51,7 @@ def test_fs_index_lists_tasks(tmp_path: Path) -> None:
     by_id = {t.task_id: t for t in tasks}
     assert by_id["calculator-claude_code-AAA"].harness == "claude_code"
     assert by_id["calculator-claude_code-AAA"].mean_reward == 1.0
+    assert by_id["calculator-claude_code-AAA"].session_time_ms == 351.0
     assert by_id["calculator-codex-BBB"].errored_sessions == 1
 
 

@@ -36,6 +36,7 @@ class TaskSummary:
     mean_reward: float | None = None
     mean_traces: float | None = None
     mean_completions: float | None = None
+    session_time_ms: float | None = None
     created_at: float | None = None
     updated_at: float | None = None
     save_dir_path: str = ""
@@ -54,6 +55,7 @@ class TaskSummary:
             "mean_reward": self.mean_reward,
             "mean_traces": self.mean_traces,
             "mean_completions": self.mean_completions,
+            "session_time_ms": self.session_time_ms,
             "created_at": self.created_at,
             "updated_at": self.updated_at,
             "save_dir_path": self.save_dir_path,
@@ -114,6 +116,31 @@ def _safe_load_json(path: Path) -> dict[str, Any] | None:
         logger.debug("Could not parse %s: %s", path, exc)
         return None
     return data if isinstance(data, dict) else None
+
+
+def _session_time_ms(session_data: dict[str, Any]) -> float | None:
+    """Return a persisted session's wall-clock duration in milliseconds."""
+    timing = session_data.get("timing") or {}
+    if not isinstance(timing, dict):
+        return None
+    total = timing.get("total_ms")
+    if isinstance(total, (int, float)) and not isinstance(total, bool):
+        return float(total)
+
+    stage_keys = (
+        "register_to_init_queue_ms",
+        "init_ms",
+        "run_ms",
+        "postrun_ms",
+    )
+    stages = [timing.get(key) for key in stage_keys]
+    if not any(isinstance(value, (int, float)) and not isinstance(value, bool) for value in stages):
+        return None
+    return sum(
+        float(value)
+        for value in stages
+        if isinstance(value, (int, float)) and not isinstance(value, bool)
+    )
 
 
 def _extract_session_summary(path: Path) -> SessionSummary | None:
@@ -195,6 +222,13 @@ def _scan_task_dir(task_dir: Path) -> TaskSummary | None:
         summary.mean_reward = index.get("mean_reward")
         summary.mean_traces = index.get("mean_traces")
         summary.mean_completions = index.get("mean_completions")
+        # A row in the Tasks view represents one session for the common
+        # one-sample rollout layout. Do not label an aggregate task duration as
+        # a single session duration when a task contains multiple sessions.
+        if len(session_files) == 1:
+            session_data = _safe_load_json(session_files[0])
+            if session_data is not None:
+                summary.session_time_ms = _session_time_ms(session_data)
         if index.get("created_at") is not None:
             try:
                 summary.created_at = float(index["created_at"])
@@ -211,6 +245,7 @@ def _scan_task_dir(task_dir: Path) -> TaskSummary | None:
     rewards: list[float] = []
     trace_counts: list[int] = []
     completion_counts: list[int] = []
+    session_times_ms: list[float] = []
     completed = 0
     errored = 0
     earliest = summary.created_at
@@ -234,6 +269,9 @@ def _scan_task_dir(task_dir: Path) -> TaskSummary | None:
         trace_counts.append(len(traces))
         record_count = (traj.get("metadata") or {}).get("record_count")
         completion_counts.append(int(record_count) if isinstance(record_count, int) else len(traces))
+        session_time_ms = _session_time_ms(data)
+        if session_time_ms is not None:
+            session_times_ms.append(session_time_ms)
         try:
             mtime = session_path.stat().st_mtime
             ctime = session_path.stat().st_ctime
@@ -258,6 +296,8 @@ def _scan_task_dir(task_dir: Path) -> TaskSummary | None:
     summary.mean_completions = (
         sum(completion_counts) / len(completion_counts) if completion_counts else None
     )
+    if len(session_files) == 1 and session_times_ms:
+        summary.session_time_ms = session_times_ms[0]
     summary.created_at = earliest
     summary.updated_at = latest
     if completed + errored == len(session_files) and session_files:

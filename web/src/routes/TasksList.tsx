@@ -3,7 +3,7 @@ import { Link, useNavigate } from "react-router-dom";
 import { useTasks } from "../api/queries";
 import { StatusPill } from "../components/StatusPill";
 import { RewardChart } from "../components/RewardChart";
-import { relativeTime, shortId, formatReward } from "../utils";
+import { relativeTime, shortId, formatMs, formatReward } from "../utils";
 
 const STATUS_OPTIONS = ["all", "running", "completed", "failed"];
 
@@ -122,6 +122,12 @@ export function TasksList() {
                 <th className="px-3 py-2">model</th>
                 <th className="px-3 py-2">reward</th>
                 <th className="px-3 py-2">sessions</th>
+                <th
+                  className="px-3 py-2"
+                  title="Wall-clock execution time for single-session tasks"
+                >
+                  session_time
+                </th>
                 <th className="px-3 py-2">updated</th>
               </tr>
             </thead>
@@ -156,6 +162,9 @@ export function TasksList() {
                   </td>
                   <td className="px-3 py-2 text-xs">
                     {task.completed_sessions}/{task.num_samples}
+                  </td>
+                  <td className="px-3 py-2 font-mono text-xs">
+                    {formatMs(task.session_time_ms)}
                   </td>
                   <td className="px-3 py-2 text-xs text-slate-500">
                     {relativeTime(task.updated_at)}

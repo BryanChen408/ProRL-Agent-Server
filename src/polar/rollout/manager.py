@@ -96,6 +96,13 @@ def _mean_completions(results: list[SessionResult]) -> float | None:
     return sum(counts) / len(counts)
 
 
+def _single_session_time_ms(results: list[SessionResult]) -> float | None:
+    """Return wall-clock duration when this task represents one session."""
+    if len(results) != 1:
+        return None
+    return float(results[0].timing.total_ms)
+
+
 class RolloutManager:
     """Manage the lifecycle of rollout sessions for a single submitted task."""
 
@@ -799,6 +806,7 @@ class RolloutManager:
                     "mean_reward": _mean_reward(record.results),
                     "mean_traces": _mean_traces(record.results),
                     "mean_completions": _mean_completions(record.results),
+                    "session_time_ms": _single_session_time_ms(record.results),
                     "created_at": record.created_at,
                     "updated_at": record.updated_at,
                     "source": "live",
