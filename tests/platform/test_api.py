@@ -125,6 +125,7 @@ def test_tasks_route_lists_filesystem(topology_with_results: Path) -> None:
         assert tasks[0]["task_id"] == "demo-claude_code-001"
         assert tasks[0]["harness"] == "claude_code"
         assert tasks[0]["status"] == "completed"
+        assert tasks[0]["session_time_ms"] == 351.0
 
 
 def test_task_detail_includes_sessions(topology_with_results: Path) -> None:
