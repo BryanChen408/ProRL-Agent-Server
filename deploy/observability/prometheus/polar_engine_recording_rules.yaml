@@ -55,6 +55,6 @@ groups:
           engine: vllm-native
 
       - record: polar_inference_prefix_cache_hit_ratio
-        expr: sum by (node_id, pd_role, pd_backend) (rate(vllm:prefix_cache_hits{job="polar-inference-engine"}[5m])) / clamp_min(sum by (node_id, pd_role, pd_backend) (rate(vllm:prefix_cache_queries{job="polar-inference-engine"}[5m])), 0.001)
+        expr: sum by (node_id, pd_role, pd_backend) (rate(vllm:prefix_cache_hits_total{job="polar-inference-engine"}[5m])) / clamp_min(sum by (node_id, pd_role, pd_backend) (rate(vllm:prefix_cache_queries_total{job="polar-inference-engine"}[5m])), 0.001)
         labels:
           engine: vllm-native
