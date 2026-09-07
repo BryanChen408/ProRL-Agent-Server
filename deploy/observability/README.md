@@ -1,5 +1,8 @@
 # Polar observability assets
 
+For the complete Chinese deployment and usage guide, see
+[`POLAR_RL_INSIGHT_GUIDE.zh-CN.md`](POLAR_RL_INSIGHT_GUIDE.zh-CN.md).
+
 `grafana/polar_gateway.json` is an importable Grafana dashboard for metrics
 exposed by a Polar Gateway and registered with RL-Insight.
 
@@ -8,9 +11,9 @@ select RL-Insight's `Prometheus` data source and click **Import**. The dashboard
 defaults to the last hour, refreshes every ten seconds, and filters by one or
 more `node_id` values.
 
-The inference panels require a Gateway containing commit `feat(metrics): expose
-live inference engine telemetry`. Older Gateway processes still populate the
-session, queue, aggregate token, and export-failure metrics.
+The inference panels require a Gateway that exposes live inference engine
+telemetry. Older Gateway processes still populate the session, queue, aggregate
+token, and export-failure metrics.
 
 ## Prometheus alert rules
 
