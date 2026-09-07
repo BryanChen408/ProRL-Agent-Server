@@ -51,3 +51,10 @@ def test_engine_recording_rules_normalize_native_vllm_histograms() -> None:
     assert "polar_inference_prefix_cache_hit_ratio" in records
     assert all(rule["labels"]["engine"] == "vllm-native" for rule in rules)
     assert all('job="polar-inference-engine"' in rule["expr"] for rule in rules)
+    cache_rule = next(
+        rule
+        for rule in rules
+        if rule["record"] == "polar_inference_prefix_cache_hit_ratio"
+    )
+    assert "vllm:prefix_cache_hits_total" in cache_rule["expr"]
+    assert "vllm:prefix_cache_queries_total" in cache_rule["expr"]
