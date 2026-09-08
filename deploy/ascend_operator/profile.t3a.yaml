@@ -1,0 +1,120 @@
+# AscendC t3a(replica)profile —— 复刻官方 tilelang2ascendc-ops-generator 环境 × RL 接线。
+# 与 profile.t2a.yaml 的差异(本文件同样是整份复制,loader 不支持继承):
+#   R1. paths.operator_runtime_dir: operator_runtime_t3a(canonical = 官方复刻件 + R1-R4 补丁)
+#   R2. agent:复刻需要 Skill/Agent/Task 工具(官方主-子代理流程),仅禁交互类与网络类;
+#       不写 skillOverrides(无 only_project_skills)、不预生成骨架、无固定入口、无 stop_guard。
+#   R3. evaluator:判分接线走我方 judge(= t2a 管线),但提交物形态从「agent 产 tarball」
+#       变为「session 收尾由 judge 侧打包 {op}/」——阶段 3 完成接线,当前为占位(见末尾)。
+# 起 run 时用 POLAR_PROFILE 选:
+#   POLAR_PROFILE=.../profile.t3a.yaml      复刻基线(官方流程原样)
+#   POLAR_PROFILE=.../profile.t2a.yaml      现行基线(对照组)
+service:
+  bind_host: 0.0.0.0
+  rollout_url: http://80.48.5.64:8180
+  gateway_url: http://80.48.5.64:8200
+  sglang_router_url: http://80.48.5.56:8011
+  inference_engine: vllm
+  model_served: /home/docker/Qwen3.6-35B-A3B-agentical-ascendc-hf-4t-bf16
+
+paths:
+  output_dir: output/ascend_operator
+  operator_runtime_dir: operator_runtime_t3a      # ← R1
+
+operator_runtime:
+  workflow: legacy
+  backend: ascendc
+  task_assets_dir: /home/docker/datasets/ascendc-rl-datasets/NPUKernelBench/src
+  asc_devkit_dir: /home/docker/asc-devkit-9.0.0-a2a3
+  budget:
+    generation_max: 8
+    optimization_max: 4
+    interval_seconds: 2
+  npu_lease:
+    enabled: true
+    pool: [0, 1, 2, 3, 4, 5, 6, 7]
+    lock_dir: /dev/shm/npu-locks
+
+observer:
+  host: 0.0.0.0
+  port: 18189
+
+gateway:
+  node_id: ascend-node-01
+  release_session_affinity: true
+  max_init_workers: 8
+  max_run_workers: 64
+  max_postrun_workers: 16
+  completion_persistence:
+    enabled: true
+    max_field_bytes: 67108864
+    queue_size: 4096
+
+operator:
+  profile: operator_npu
+  timeout_seconds: 21600.0
+  runtime:
+    image: ascendc-tilelang:v1
+    network: host
+    workdir: /opt/workspace/agent_workdir
+    env:
+      SOC_VERSION: "ascend910b1"
+      ASCENDC_SOC_VERSION: "ascend910b1"
+      ASC_DEVKIT_DIR: "/opt/asc-devkit"
+      # 262144 总窗口预留 24576 输出 token；必须为正整数字符串。
+      CLAUDE_CODE_MAX_CONTEXT_TOKENS: "237568"
+
+  agent:
+    env:
+      BASH_DEFAULT_TIMEOUT_MS: "2700000"
+      BASH_MAX_TIMEOUT_MS: "2700000"
+    model_name: claude-opus-4-5
+    # 官方流程的主代理是调度壳、子代理承担 40~180 次请求;主线轮次给足。
+    max_turns: 300
+    # ← R2 复刻纪律:不写 skillOverrides(16 族全量可见);skills 由 prepare 拷进
+    #   workdir/.claude/skills(项目级),harness preset 不再拷用户级(防双份)。
+    skills_path: ""
+    max_output_tokens: 24576
+    inference_timeout_ms: 14400000
+    # ← R2 复刻纪律:官方流程需要 Skill(引导式诊断)与 Agent(子代理派发)工具,
+    #   TaskCreate 系列做 Phase 追踪;只禁交互类(非交互运行)与网络类(训练确定性)。
+    allowed_tools: "Bash Read Edit Write Grep Glob Skill Agent TaskCreate TaskGet TaskList TaskUpdate TodoWrite"
+    disallowed_tools: "AskUserQuestion CronCreate CronDelete CronList EnterPlanMode EnterWorktree ExitPlanMode ExitWorktree NotebookEdit ScheduleWakeup WebFetch WebSearch Workflow"
+    append_system_prompt: >-
+      Follow ./CLAUDE.md. The user instruction provides the concrete operator name; reference is at
+      input/{op_name}.py. 按 CLAUDE.md 的工作流产出 {op_name}/ 工程。
+      Do not ask user questions in this non-interactive run.
+      路径纪律(硬规则):调用任何脚本、读取任何文件,一律使用绝对路径
+      (workdir = /opt/workspace/agent_workdir,例如
+      bash /opt/workspace/agent_workdir/.claude/skills/tilelang2ascend-translator/scripts/evaluate_ascendc.sh
+      /opt/workspace/agent_workdir/{op_name})——不要在 cd 到 kernel/build 等子目录后用相对路径调脚本。
+      评测形态纪律(硬规则):功能验证/评测只允许两种直接调用形态——
+      bash <绝对路径>/.claude/skills/tilelang2ascend-translator/scripts/evaluate_ascendc.sh <output_dir>
+      python3 <绝对路径>/.claude/skills/tilelang2ascend-translator/scripts/verification_ascendc.py <output_dir>
+      禁止用 python -c 内联注入、自写 wrapper 脚本、拷贝脚本改名等间接方式调评测:
+      这些形态 hook 无法识别,该次评测不计入过程记录,等于白跑。
+      脚本 import 报错时,读报错修正调用路径或环境变量,不要自造调用方式绕过。
+      本环境为共享卡池:禁止自设 ASCEND_RT_VISIBLE_DEVICES、禁止运行 npu-smi;
+      SOC_VERSION 已在环境变量里;NPU 使用一律经评测/验证脚本走(内部由租约调度),不要手写占卡探针。
+      输出纪律(会话存活,RL 接线):思考占输出预算,写太长会顶穿预算、本轮 content 为空,
+      连续几轮会话就被终止 —— 每轮只想「下一步动作」并立刻输出一个 tool call;
+      写代码分小块;如果收到「Output token limit hit」提示:不要重新规划,立即用更小的块直接重试输出。
+  evaluator:
+    # ← R3 judge 接线(已完成):判优驱动按 ranked list 验收,AST/状态化打掉顺延;
+    #   候选由 hook 静默快照(attempt stream 里的 promote 记录),judge 只认 sha256 对应字节。
+    #
+    # 主链不训(t3a 语义,默认关):gateway 的 prefix_merging builder 已按 system 指纹给每条
+    #   trace 打 chain_role(main=主调度链 / sub=子代理独立会话)。主链只做读题/派发/复核
+    #   (实测 0 评测),广播分挂给它是相关噪声,且其行为是流程文档写死的规则。
+    #   vime 侧 adapter(vime_bridge/adapter.py)在 POLAR_T3A_MASK_MAIN_CHAIN=1 时跳过
+    #   chain_role=="main" 的 trace —— 该环境变量属于 **vime 启动环境**(rollout manager
+    #   进程),polar 的 runtime.env 到不了那里;t2a 不设 = 行为逐字不变。
+    # per-attempt span(G1,默认关):gateway 的 attempt_spans 在 POLAR_T3A_ATTEMPT_SPANS=1 时
+    #   从 hook 判决块([skill_script_hook intercepted execution])切 span 并给分
+    #   (PASS→0.4 / D→0.3+0.1·通过率 / A→0.2,与终局 reward 同 ladder;缺块=None 不给分)。
+    #   该环境变量属于 **polar gateway 启动环境**;t2a 会话没有 hook 标记,天然零影响。
+    judge_command: "bash /opt/workspace/agent_workdir/judge/judge_best.sh --op_name {op_name} --out_dir judge_out"
+    submission_path: output/submission/{op_name}_impl.tar.gz
+    submission_candidates:
+      - output/submission/{op_name}_impl.tar.gz
+    metrics_path: judge_out/metrics.json
+    judge_timeout: 5400
