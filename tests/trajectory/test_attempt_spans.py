@@ -716,6 +716,156 @@ class TestPostBestMasking:
         assert "traces_dropped_post_best" not in traj.metadata["reconstruction_stats"]
 
 
+# ---------------------------------------------------------------------------
+# t3a(cannbot 复刻)attempt 检测 —— POLAR_T3A_ATTEMPT_SPANS=1 开启
+# ---------------------------------------------------------------------------
+
+_T3A_CMD = (
+    "bash .claude/skills/tilelang2ascend-translator/scripts/evaluate_ascendc.sh /wd/OP"
+)
+
+
+def _t3a_block(command: str, exit_code: int, stdout: str, stderr: str = "") -> str:
+    return (
+        "[skill_script_hook intercepted execution]\n"
+        f"command: {command}\n"
+        "cwd: /wd\n"
+        f"exit_code: {exit_code}\n"
+        "duration_ms: 65387\n"
+        f"--- stdout ---\n{stdout}\n"
+        f"--- stderr ---\n{stderr}\n"
+    )
+
+
+class _T3AEnvGuard:
+    def __init__(self, value: str | None):
+        self.value = value
+
+    def __enter__(self):
+        self.saved = os.environ.pop("POLAR_T3A_ATTEMPT_SPANS", None)
+        if self.value is not None:
+            os.environ["POLAR_T3A_ATTEMPT_SPANS"] = self.value
+        return self
+
+    def __exit__(self, *_):
+        os.environ.pop("POLAR_T3A_ATTEMPT_SPANS", None)
+        if self.saved is not None:
+            os.environ["POLAR_T3A_ATTEMPT_SPANS"] = self.saved
+
+
+class TestT3AEvalCmdRegex:
+    def test_direct_and_prefix_forms(self):
+        assert attempt_spans.is_t3a_eval_invocation(_T3A_CMD)
+        assert attempt_spans.is_t3a_eval_invocation(
+            "export ASCENDC_SOC_VERSION=ascend910b1; " + _T3A_CMD + " 2>&1 | tail -50"
+        )
+        assert attempt_spans.is_t3a_eval_invocation(
+            "python3 /wd/.claude/skills/tilelang2ascend-translator/scripts/verification_ascendc.py /wd/OP"
+        )
+
+    def test_inline_c_form(self):
+        # Abs 冒烟实证 evasion:python -c sys.path 注入 + exec(open(script).read())
+        assert attempt_spans.is_t3a_eval_invocation(
+            'python3 -c "\nimport sys\nsys.path.insert(0, \'/wd/scripts\')\n'
+            "sys.argv = ['verification_ascendc.py', '/wd/OP']\n"
+            "exec(open('/wd/.claude/skills/tilelang2ascend-translator/scripts/verification_ascendc.py').read())\n"
+            '" 2>&1 | tail -40'
+        )
+
+    def test_read_forms_and_t2a_entry_rejected(self):
+        assert not attempt_spans.is_t3a_eval_invocation(
+            "sed -n '1,150p' /wd/.claude/skills/tilelang2ascend-translator/scripts/evaluate_ascendc.sh"
+        )
+        assert not attempt_spans.is_t3a_eval_invocation(
+            "cat /wd/.claude/skills/tilelang2ascend-translator/scripts/verification_ascendc.py"
+        )
+        assert not attempt_spans.is_t3a_eval_invocation(_PIPELINE_CMD)  # t2a 固定入口
+        assert not attempt_spans.is_t3a_eval_invocation("bash run_my_eval.sh")
+
+
+class TestT3ABlockParsing:
+    def test_raw_and_catn_forms(self):
+        block = _t3a_block(_T3A_CMD, 1, "CMake Error at kernel/CMakeLists.txt:42\nerror: expected ';'")
+        for text in (block, "1\t" + block.replace("\n", "\n2\t")):
+            blocks = attempt_spans.t3a_blocks_from_text(text)
+            assert len(blocks) == 1
+            cmd, exit_code, stdout, _ = blocks[0]
+            assert cmd == attempt_spans._normalize_command(_T3A_CMD)
+            assert exit_code == 1
+            assert attempt_spans.t3a_classify(exit_code, stdout, "") == "A"
+
+    def test_classify_and_score_ladder(self):
+        v = attempt_spans.t3a_verdict_score
+        assert v("PASS") == 0.4
+        assert v("D", 4, 5) == 0.3 + 0.1 * 0.8
+        assert v("D") == 0.35
+        assert v("A") == 0.2
+        assert v("UNKNOWN") is None and v(None) is None
+        assert attempt_spans.t3a_classify(0, "case[0]: ok\nResult: pass\n", "") == "PASS"
+        assert attempt_spans.t3a_classify(0, "max_abs_diff = 1.5e-3\nResult: fail", "") == "D"
+        assert attempt_spans.t3a_classify(0, "nothing useful", "") == "UNKNOWN"
+
+
+class TestT3ABuilderIntegration:
+    def test_span_scored_from_hook_block(self):
+        with _EnvGuard("1"), _T3AEnvGuard("1"):
+            records = [
+                _record("00-eval", [1, 2], [10, EOT], finish_reason="tool_calls",
+                        tool_calls=_tool_calls("Bash", "call_1", _T3A_CMD)),
+                _record("01-after", [1, 2, 10, EOT, 50], [20, EOT],
+                        prompt_messages=[{"role": "user", "content": "task"},
+                                         {"role": "assistant", "content": "00-eval"},
+                                         _verdict_msg("call_read", _t3a_block(
+                                             _T3A_CMD, 0, "case[0]: ok\ncase[1]: ok\nResult: pass"))]),
+            ]
+            traj = _build(records)
+            spans = traj.traces[0].metadata["attempt_spans"]
+            # response = [10,EOT, 50, 20,EOT] -> 5 tokens;事件 0 从 hook 块得分(PASS→0.4)
+            assert spans == [[0, 5, 0, 0.4]]
+
+    def test_fifo_pairing_same_command_reruns(self):
+        with _EnvGuard("1"), _T3AEnvGuard("1"):
+            records = [
+                _record("00-e1", [1, 2], [10, EOT], finish_reason="tool_calls",
+                        tool_calls=_tool_calls("Bash", "call_1", _T3A_CMD)),
+                _record("01-e2", [1, 2, 10, EOT, 50], [20, EOT], finish_reason="tool_calls",
+                        prompt_messages=[{"role": "user", "content": "task"},
+                                         {"role": "assistant", "content": "00-e1"},
+                                         _verdict_msg("r1", _t3a_block(
+                                             _T3A_CMD, 1, "CMake Error\nerror: expected ';'"))],
+                        tool_calls=_tool_calls("Bash", "call_2", _T3A_CMD)),
+                _record("02-e3", [1, 2, 10, EOT, 50, 20, EOT, 51], [30, EOT],
+                        prompt_messages=[{"role": "user", "content": "task"},
+                                         {"role": "assistant", "content": "00-e1"},
+                                         {"role": "assistant", "content": "01-e2"},
+                                         _verdict_msg("r1", _t3a_block(
+                                             _T3A_CMD, 1, "CMake Error\nerror: expected ';'")),
+                                         _verdict_msg("r2", _t3a_block(
+                                             _T3A_CMD, 0, "Result: pass"))]),
+            ]
+            traj = _build(records)
+            spans = traj.traces[0].metadata["attempt_spans"]
+            # response = [10,EOT, 50, 20,EOT, 51, 30,EOT] -> 8 tokens
+            # 事件 0=A(0.2),事件 1=PASS(0.4);best=1 在最后,无 post-best 掩码
+            assert spans == [[0, 3, 0, 0.2], [3, 8, 1, 0.4]]
+            assert "post_best_masked_tokens" not in traj.traces[0].metadata
+
+    def test_flag_off_t3a_session_yields_no_spans(self):
+        """默认关:t3a 形态的 session 不进 t2a 检测,无 spans(t2a 行为逐字不变)。"""
+        with _EnvGuard("1"), _T3AEnvGuard(None):
+            records = [
+                _record("00-eval", [1, 2], [10, EOT], finish_reason="tool_calls",
+                        tool_calls=_tool_calls("Bash", "call_1", _T3A_CMD)),
+                _record("01-after", [1, 2, 10, EOT, 50], [20, EOT],
+                        prompt_messages=[{"role": "user", "content": "task"},
+                                         {"role": "assistant", "content": "00-eval"},
+                                         _verdict_msg("r1", _t3a_block(
+                                             _T3A_CMD, 0, "Result: pass"))]),
+            ]
+            traj = _build(records)
+            assert "attempt_spans" not in traj.traces[0].metadata
+
+
 if __name__ == "__main__":
     import sys
     tests = [(k, v) for k, v in sorted(globals().items()) if k.startswith("Test") and callable(v)]

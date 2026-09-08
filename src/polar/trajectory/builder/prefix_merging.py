@@ -37,7 +37,9 @@ Design in two stages:
 
 from __future__ import annotations
 
+import json
 import logging
+import re
 from copy import deepcopy
 from dataclasses import dataclass
 from typing import Any
@@ -120,6 +122,8 @@ def _prepare_attempt_span_state(kept: list[CompletionRecord]) -> dict[str, Any]:
         completion (-1 when none) — resolves a no-event trace/segment's leading
         span: -1 = segment 0 (trace0), k = continuation of event k's segment.
     """
+    if _attempt_spans.t3a_on():
+        return _prepare_t3a_attempt_span_state(kept)
     verdict_by_call_id: dict[str, Any] = {}
     ordinal_by_completion_id: dict[str, tuple[int, str]] = {}
     prev_ordinal_by_completion_id: dict[str, int] = {}
@@ -157,6 +161,136 @@ def _prepare_attempt_span_state(kept: list[CompletionRecord]) -> dict[str, Any]:
         # break cannot lose the boundary. None -> no scored attempt -> nothing to mask.
         "best_ordinal": _attempt_spans.best_ordinal(
             ordinal_by_completion_id, verdict_by_call_id
+        ),
+    }
+
+
+def _t3a_message_text(message: dict[str, Any]) -> str:
+    """消息文本化:str content 直取;list content 递归拼 text/tool_result 文本件。"""
+
+    def _text_of(content: Any) -> str:
+        if isinstance(content, str):
+            return content
+        if isinstance(content, list):
+            return "\n".join(
+                _text_of(p.get("text", p.get("content")) if isinstance(p, dict) else p)
+                for p in content
+            )
+        return ""
+
+    return _text_of(message.get("content"))
+
+
+_T3A_SIDECAR_RE = re.compile(r"hook-(tool_[A-Za-z0-9_-]+)-\d+-additionalContext\.txt")
+
+
+def _t3a_sidecar_reads(assistant_msg: dict[str, Any]) -> list[tuple[str, str]]:
+    """assistant 消息里读 hook sidecar 的调用:[(本次调用 id, sidecar 文件名里的原调用 id)]。
+
+    sidecar 文件名 hook-<tool_call_id>-N-additionalContext.txt 自带调用身份——
+    这是判决块与 attempt 的真实锚点:同名命令重跑(编译挂→修复→通过)按命令文本
+    FIFO 会把后一次 attempt 配上前一次的旧判决(审查实证 0.2/0.4/0.2 错配),
+    身份绑定后只有无 sidecar 途径的块(harness 内联注入)才退到 FIFO。
+    """
+    out: list[tuple[str, str]] = []
+    if not isinstance(assistant_msg, dict) or assistant_msg.get("role") != "assistant":
+        return out
+    for tc in assistant_msg.get("tool_calls") or []:
+        fn = (tc or {}).get("function") or {}
+        args = fn.get("arguments")
+        if isinstance(args, str):
+            try:
+                args = json.loads(args)
+            except ValueError:
+                continue
+        if not isinstance(args, dict):
+            continue
+        text = str(args.get("file_path") or "") + str(args.get("command") or "")
+        m = _T3A_SIDECAR_RE.search(text)
+        if m and tc.get("id"):
+            out.append((tc["id"], m.group(1)))
+    return out
+
+
+def _prepare_t3a_attempt_span_state(kept: list[CompletionRecord]) -> dict[str, Any]:
+    """t3a(cannbot 复刻)版 session 级 pre-pass —— 与 t2a 版同构,只在
+    POLAR_T3A_ATTEMPT_SPANS=1 时被 _prepare_attempt_span_state 调用。
+
+    差异仅在判决来源:t2a 从固定入口的 verdict 行解析;t3a 从 hook 判决块
+    (``[skill_script_hook intercepted execution]``)解析。块的归属按信任优先级:
+    ① sidecar 文件名身份绑定(hook-<tool_call_id>-N-...txt);② 剩余块按命令文本
+    FIFO(仅 harness 内联注入形态走这里)。全部块按 (命令,exit,stdout) 全局去重——
+    嵌套历史会让同一块在每个后续 completion 重复目击(审查实证:连续折叠不够,
+    同输出真重跑宁可少记一次,也绝不错配)。产物与 t2a 版同形,外加
+    ``score_by_call_id`` 直给分(build_spans/best_ordinal 走 score 快路)。
+    """
+    verdict_by_call_id: dict[str, Any] = {}
+    ordinal_by_completion_id: dict[str, tuple[int, str]] = {}
+    prev_ordinal_by_completion_id: dict[str, int] = {}
+    attempts: list[tuple[int, str, str]] = []  # (ordinal, call_id, norm_command)
+    blocks: list[tuple[str, float | None]] = []  # 未绑定块 FIFO 池(全局去重后)
+    bound_scores: dict[str, float | None] = {}  # sidecar 身份绑定:target_call_id → score
+    sidecar_bound: dict[str, str] = {}  # 读 sidecar 的调用 id → 原调用 id
+    seen_blocks: set[tuple[str, int, int]] = set()
+    next_ordinal = 0
+    for completion in kept:
+        trace = build_trace_from_completion(completion)
+        for message in trace.prompt_messages:
+            if not isinstance(message, dict):
+                continue
+            bound_id = None
+            if message.get("role") == "tool" and message.get("tool_call_id"):
+                verdict_by_call_id[message["tool_call_id"]] = message.get("content")
+                bound_id = sidecar_bound.get(message["tool_call_id"])
+            text = _t3a_message_text(message)
+            for norm_cmd, exit_code, stdout, stderr in _attempt_spans.t3a_blocks_from_text(text):
+                cls = _attempt_spans.t3a_classify(exit_code, stdout, stderr)
+                cp, ct = _attempt_spans.t3a_case_stats(stdout)
+                score = _attempt_spans.t3a_verdict_score(cls, cp, ct)
+                if bound_id:
+                    # 身份绑定块不去重:sidecar 文件名即身份——内容相同但来自不同
+                    # sidecar 的块是不同事件(同输出重跑各自归各);同一 read 结果在
+                    # 嵌套历史里重复目击只是重复赋值同一目标,幂等无害。
+                    bound_scores[bound_id] = score
+                    continue
+                key = (norm_cmd, exit_code, hash(stdout))
+                if key in seen_blocks:
+                    continue
+                seen_blocks.add(key)
+                blocks.append((norm_cmd, score))
+        prev_ordinal_by_completion_id[completion.completion_id] = next_ordinal - 1
+        call_id = None
+        for message in trace.response_messages:
+            for read_id, target_id in _t3a_sidecar_reads(message):
+                sidecar_bound[read_id] = target_id
+            if call_id is None:
+                call_id = _attempt_spans.t3a_eval_call_id(message)
+        if call_id:
+            cmd = next(
+                (c for cid, c in _attempt_spans.bash_calls(message) if cid == call_id), ""
+            )
+            ordinal_by_completion_id[completion.completion_id] = (next_ordinal, call_id)
+            attempts.append((next_ordinal, call_id, _attempt_spans._normalize_command(cmd)))
+            next_ordinal += 1
+    # 配对:身份绑定优先;未绑定 attempt 按命令文本从 FIFO 池取(内联注入形态)
+    score_by_call_id: dict[str, float | None] = dict(bound_scores)
+    queues: dict[str, list[float | None]] = {}
+    for norm_cmd, score in blocks:
+        queues.setdefault(norm_cmd, []).append(score)
+    for _ordinal, call_id, norm_cmd in attempts:
+        if call_id in score_by_call_id:
+            continue
+        q = queues.get(norm_cmd)
+        if q:
+            score_by_call_id[call_id] = q.pop(0)
+    return {
+        "verdict_by_call_id": verdict_by_call_id,
+        "ordinal_by_completion_id": ordinal_by_completion_id,
+        "prev_ordinal_by_completion_id": prev_ordinal_by_completion_id,
+        "total_events": next_ordinal,
+        "score_by_call_id": score_by_call_id,
+        "best_ordinal": _attempt_spans.best_ordinal(
+            ordinal_by_completion_id, verdict_by_call_id, score_by_call_id
         ),
     }
 
@@ -282,6 +416,33 @@ class _FinalizedChain:
     break_reason: str | None = None
 
 
+def _chain_system_key(chain: list[CompletionRecord]) -> str | None:
+    """链的 system 指纹:取链首请求的第一条 system 消息内容做角色判定。
+
+    主链与其 compaction 续段共享同一 system prompt(判同角色);Skill/Agent
+    派发的子会话 system 不同(判 sub)。没有 system 消息时取第一条消息内容;
+    消息为空返回 None(不参与角色判定,链按 sub 处理)。
+    """
+    if not chain:
+        return None
+    messages = build_trace_from_completion(chain[0]).prompt_messages or []
+    if not messages:
+        return None
+    first = messages[0] if isinstance(messages[0], dict) else {}
+    content = first.get("content")
+    if isinstance(content, list):
+        content = "".join(str(b.get("text", "")) for b in content if isinstance(b, dict))
+    if content:
+        return f"{first.get('role')}::{len(str(content))}::{hash(str(content))}"
+    if len(messages) > 1 and isinstance(messages[1], dict):
+        c2 = messages[1].get("content")
+        if isinstance(c2, list):
+            c2 = "".join(str(b.get("text", "")) for b in c2 if isinstance(b, dict))
+        if c2:
+            return f"{messages[1].get('role')}::{len(str(c2))}::{hash(str(c2))}"
+    return None
+
+
 class PrefixMergingBuilder(BaseTrajectoryBuilder):
     """Rebuild a chain's merged token stream using raw + canonical-interstitial.
 
@@ -366,6 +527,11 @@ class PrefixMergingBuilder(BaseTrajectoryBuilder):
             "completions_dropped": 0,
             "break_reasons": {},
         }
+        # chain_role:主链角色判定。以会话首链的 system 消息为基准,system 相同
+        # 的链视为同一「主」角色(compaction 续段与主链共享 system,自然归入);
+        # 不同 system 的链 = 独立子会话(Skill/Agent 派发)。只写 metadata,
+        # 是否按角色掩码由下游 adapter 决定(默认不动)。
+        main_system_key = _chain_system_key(chains[0]) if chains else None
         final_traces: list[Trace] = []
         # P3 stage-2: session-wide attempt-span state (env-gated,默认开;
         # POLAR_ATTEMPT_CREDIT=0 关). Created ONCE per trajectory and shared by
@@ -380,6 +546,11 @@ class PrefixMergingBuilder(BaseTrajectoryBuilder):
             start = 0
             segment_index = 0
             chain_had_break = False
+            chain_role = (
+                "main" if main_system_key is not None
+                and _chain_system_key(chain) == main_system_key
+                else "sub"
+            )
             while start < len(chain):
                 finalized = self._finalize_chain(
                     chain[start:],
@@ -389,6 +560,7 @@ class PrefixMergingBuilder(BaseTrajectoryBuilder):
                     segment_start=start,
                     span_state=span_state,
                     chain_continues=chain_continues[chain_index],
+                    chain_role=chain_role,
                 )
                 # A trace that post-best masking emptied is dropped so
                 # trajectory_trace_counts stays honest. The masked_tokens guard is
@@ -597,6 +769,7 @@ class PrefixMergingBuilder(BaseTrajectoryBuilder):
         segment_start: int,
         span_state: dict | None = None,
         chain_continues: bool = False,
+        chain_role: str = "sub",
     ) -> _FinalizedChain:
         # Everything in C_1.prompt_ids is the non-trainable
         # prompt; C_1.response_ids plus every subsequent raw response +
@@ -757,6 +930,7 @@ class PrefixMergingBuilder(BaseTrajectoryBuilder):
             kept_completion_count=kept,
             break_reason=break_reason,
         )
+        _metadata["chain_role"] = chain_role
         if _want_spans:
             # Segment spans (plan §6.2): the opening span covers everything before
             # this trace's first event — idx -1 = segment 0 (e.g. the Skill-dispatch
@@ -778,6 +952,7 @@ class PrefixMergingBuilder(BaseTrajectoryBuilder):
                 span_state["verdict_by_call_id"],
                 _leading,
                 chain_resp_end,
+                score_by_call_id=span_state.get("score_by_call_id"),
             )
             if _spans:
                 _metadata["attempt_spans"] = _spans

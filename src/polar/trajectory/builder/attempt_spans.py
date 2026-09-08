@@ -40,6 +40,24 @@ credit downstream — never fabricated).
 verdict 行前缀 [triton-eval]→[ascendc-eval](参数形态 --task 改可选)。
 score 走本仓 operator_reward 的六档 ladder(0.2-0.75 soft-saturating),
 与终局 reward 同尺度(credit 数学全相对,跨 fork 无需再协调)。
+
+t3a(cannbot 复刻)检测(G1,POLAR_T3A_ATTEMPT_SPANS=1 开启,默认关——
+t2a 轨迹里下列标记天然不出现,开启与否行为逐字不变):
+t3a 没有只读固定入口,评测在官方 claude-harness 复刻环境内由
+skill_script_hook(PreToolUse)拦截代跑。transcript 里每次评测留下:
+  - assistant Bash 调用:evaluate_ascendc.sh / verification_ascendc.py
+    (合法形态白名单,见 profile.t3a.yaml;python -c 内联注入形态由 hook R6 同抓);
+  - 该调用的 tool_result:"[hook-noop] ..."(hook 把原命令换成了 no-op);
+  - 判决块:"[skill_script_hook intercepted execution]\ncommand: ...\nexit_code: N\n
+    --- stdout ---\n..." —— harness 以 additionalContext 注入,或被 agent 从
+    hook-*-additionalContext.txt sidecar 读回(带 cat-n 行号前缀)。
+span 边界 = 发起调用的轮次(与 t2a 相同);分数只从判决块取(绝不从普通
+tool result 文本刮——那是 agent 可伪造面)。判决块按 command: 文本与
+attempt 归一化匹配,FIFO 配对(同名命令重跑各归各)。伪造一个判决块只能
+错配 per-attempt credit:终局 reward 来自 host 侧 judge 对 sha256 快照的
+复判,信任模型与 t2a ladder 相同(防御纵深,不是最后防线)。
+分类规则是 hook 侧 _classify_result 的移植(改动需两边同步:
+operator_runtime_t3a/hooks/skill_script_hook.py)。
 """
 
 from __future__ import annotations
@@ -360,6 +378,7 @@ def claim_backgrounded_verdicts(
 def best_ordinal(
     ordinal_by_completion_id: dict[str, tuple[int, str]],
     verdict_by_call_id: dict[str, Any],
+    score_by_call_id: dict[str, float | None] | None = None,
 ) -> int | None:
     """Trajectory-level ordinal of the attempt that PEAKED — the FIRST one to reach
     the trajectory-wide max ladder score (``>``, so a tie keeps the earlier one).
@@ -387,13 +406,19 @@ def best_ordinal(
     best_ord: int | None = None
     best_score: float | None = None
     for ordinal, call_id in sorted(ordinal_by_completion_id.values()):
-        content = verdict_by_call_id.get(call_id)
-        if content is None:
-            continue
-        metrics = parse_verdict(content)
-        if metrics is None:
-            continue
-        score = verdict_score(metrics)
+        if score_by_call_id is not None:
+            # t3a:hook 判决块已分类给分,跳过 verdict 行解析
+            score = score_by_call_id.get(call_id)
+            if score is None:
+                continue
+        else:
+            content = verdict_by_call_id.get(call_id)
+            if content is None:
+                continue
+            metrics = parse_verdict(content)
+            if metrics is None:
+                continue
+            score = verdict_score(metrics)
         if best_score is None or score > best_score:
             best_score, best_ord = score, ordinal
     return best_ord
@@ -404,6 +429,7 @@ def build_spans(
     verdict_by_call_id: dict[str, Any],
     leading_idx: int | None,
     chain_resp_end: int,
+    score_by_call_id: dict[str, float | None] | None = None,
 ) -> list[list[Any]]:
     """Segment spans for one finalized trace, in RESPONSE-token coordinates.
 
@@ -435,11 +461,15 @@ def build_spans(
         if seg_end <= start:
             continue
         score = None
-        content = verdict_by_call_id.get(call_id)
-        if content is not None:
-            metrics = parse_verdict(content)
-            if metrics is not None:
-                score = verdict_score(metrics)
+        if score_by_call_id is not None:
+            # t3a:hook 判决块给分;缺块 = None(位置保留,不给分)
+            score = score_by_call_id.get(call_id)
+        else:
+            content = verdict_by_call_id.get(call_id)
+            if content is not None:
+                metrics = parse_verdict(content)
+                if metrics is not None:
+                    score = verdict_score(metrics)
         spans.append([int(start), int(seg_end), int(ordinal), score])
     return spans
 
@@ -461,3 +491,152 @@ def post_best_mask_on() -> bool:
     credit 的 R_e=0 负项柔和接管。用于「掩码 vs credit」的 A/B 对照。
     """
     return os.environ.get("POLAR_POST_BEST_MASK", "1").lower() not in ("0", "false", "no", "off")
+
+
+# ────────────────────────────────────────────────────────────────────────
+# t3a(cannbot 复刻)attempt 检测 —— 全部只在 t3a_on() 时被调用。
+# ────────────────────────────────────────────────────────────────────────
+
+
+def t3a_on() -> bool:
+    """POLAR_T3A_ATTEMPT_SPANS=1 开启 t3a 检测;默认关(t2a 行为逐字不变)。"""
+    return os.environ.get("POLAR_T3A_ATTEMPT_SPANS", "0").lower() in ("1", "true", "yes", "on")
+
+
+# 合法评测调用形态(与 hook should_intercept 主匹配 + R6 内联 -c 同形,改动需同步:
+# operator_runtime_t3a/hooks/skill_script_hook.py)。只取四个评测脚本;
+# validate_*/build_* 不是「评测轮」,不进 span。
+_T3A_SCRIPT_ALT = (
+    r"(?:evaluate_ascendc\.sh|verification_ascendc\.py"
+    r"|evaluate_tilelang\.sh|verification_tilelang\.py)"
+)
+_T3A_EVAL_CMD_RE = re.compile(
+    r"^\s*"
+    r"(?:export\s+)?(?:[A-Za-z_][A-Za-z0-9_]*=\S+\s+)*"
+    r"(?:cd\s+\S+\s*&&\s*)?"
+    r"(?:export\s+)?(?:[A-Za-z_][A-Za-z0-9_]*=\S+\s+)*"
+    r"(?:&&\s+)*"
+    r"(?:bash|sh|python|python3|python3\.\d+)\s+"
+    r"(?:(?:\S*/)?" + _T3A_SCRIPT_ALT + r"(?:\s|$)"
+    r"|-c\s+[\"'][\s\S]*?" + _T3A_SCRIPT_ALT + r")"
+)
+
+
+def is_t3a_eval_invocation(command: str) -> bool:
+    """True iff this Bash command is a legal t3a evaluation call (span boundary).
+
+    宽松于 t2a 的 is_pipeline_invocation:这里只定边界,分数另有来源(hook 判决块),
+    尾部 `| tail` 之类不影响归属。读源码形态(cat/sed/grep)不匹配「解释器+脚本」
+    主调,天然排除。
+    """
+    return bool(_T3A_EVAL_CMD_RE.search(_normalize_command(command)))
+
+
+def t3a_eval_call_id(assistant_msg: dict[str, Any]) -> str | None:
+    """t3a 版 pipeline_tool_call_id:该 assistant 消息发起合法评测调用则返回其 id。"""
+    for call_id, command in bash_calls(assistant_msg):
+        if is_t3a_eval_invocation(command):
+            return call_id
+    return None
+
+
+# hook 判决块。stdout/stderr 经 hook truncate()(头尾保留,中间 [... truncated ...]),
+# 分类标记(Result:/error:/max_abs_diff)都在头尾,截断不影响判定。
+_T3A_BLOCK_RE = re.compile(
+    r"\[skill_script_hook intercepted execution\]\s*\n"
+    r"command: (?P<command>[\s\S]*?)\n"
+    r"cwd: [^\n]*\n"
+    r"exit_code: (?P<exit>-?\d+)\s*\n"
+    r"duration_ms: [0-9]+\s*\n"
+    r"--- stdout ---\n(?P<stdout>[\s\S]*?)\n"
+    r"--- stderr ---\n(?P<stderr>[\s\S]*?)"
+    r"(?=\n\[skill_script_hook intercepted execution\]|\Z)"
+)
+_T3A_CATN_RE = re.compile(r"(?m)^\s*\d+\t")
+
+
+def t3a_blocks_from_text(text: str) -> list[tuple[str, int, str, str]]:
+    """从任意消息文本抽出判决块 ``[(norm_command, exit_code, stdout, stderr)]``。
+
+    两遍:先按原样匹配;没匹配到但含标记时,按 cat-n 行号前缀(agent 从 sidecar
+    读回的形态)剥一遍再匹配。
+    """
+    if "skill_script_hook intercepted execution" not in text:
+        return []
+    blocks = [
+        (_normalize_command(m.group("command")), int(m.group("exit")),
+         m.group("stdout"), m.group("stderr"))
+        for m in _T3A_BLOCK_RE.finditer(text)
+    ]
+    if not blocks:
+        stripped = _T3A_CATN_RE.sub("", text)
+        blocks = [
+            (_normalize_command(m.group("command")), int(m.group("exit")),
+             m.group("stdout"), m.group("stderr"))
+            for m in _T3A_BLOCK_RE.finditer(stripped)
+        ]
+    return blocks
+
+
+# ── 分类规则:hook _classify_result / _extract_case_stats 的移植(同步见模块 docstring)。
+_T3A_A_CLASS_RE = re.compile(
+    r"\berror:\s|\bfatal error:\s|undefined reference|Segmentation fault|core dumped"
+    r"|cannot find -l|No such file or directory|CMake Error|make\[\d+\]: \*\*\*",
+    re.IGNORECASE,
+)
+_T3A_PASS_RE = re.compile(r"^\s*Result:\s*(pass|fail)\s*$", re.MULTILINE | re.IGNORECASE)
+_T3A_NUMERIC_RE = re.compile(
+    r"max_abs_diff\s*=\s*[\d.e+\-]+|MERE\s*=\s*[\d.e+\-]+|matched_ratio\s*=\s*[\d.]+"
+)
+_T3A_CASE_LINE_RE = re.compile(r"case\[(\d+)\]:([^\n]*)")
+_T3A_CASE_FAIL_RE = re.compile(r"mismatch|differ|FAIL|error", re.IGNORECASE)
+_T3A_RATIO_RE = re.compile(r"Result:\s*(\d+)\s*/\s*(\d+)\s+passed")
+
+
+def t3a_classify(exit_code: int, stdout: str, stderr: str) -> str:
+    """PASS / D / A / UNKNOWN —— 与 hook _classify_result 逐行同规则。"""
+    combined = f"{stdout}\n{stderr}"
+    pass_matches = _T3A_PASS_RE.findall(combined)
+    if pass_matches and pass_matches[-1].lower() == "pass":
+        return "PASS"
+    if _T3A_A_CLASS_RE.search(combined):
+        return "A"
+    if _T3A_NUMERIC_RE.search(combined):
+        return "D"
+    if exit_code != 0:
+        return "A"
+    return "UNKNOWN"
+
+
+def t3a_case_stats(stdout: str) -> tuple[int, int]:
+    """(passed, total):case[N]: 行优先;没有则退 Result: P/T passed 行。"""
+    cases: dict[str, bool] = {}
+    for idx, rest in _T3A_CASE_LINE_RE.findall(stdout or ""):
+        cases[idx] = cases.get(idx, True) and (not _T3A_CASE_FAIL_RE.search(rest))
+    if cases:
+        return sum(1 for ok in cases.values() if ok), len(cases)
+    m = _T3A_RATIO_RE.search(stdout or "")
+    if m:
+        return int(m.group(1)), int(m.group(2))
+    return 0, 0
+
+
+def t3a_verdict_score(classification: str | None, case_pass: int = 0, case_total: int = 0) -> float | None:
+    """hook 分类 → operator_reward ladder 同尺度分(终局 reward 同一把尺):
+
+      PASS(本地全过) -> 0.4   correctness_ok 档;benchmark 只有 judge 可判,不进 success 档
+      D(对拍跑完没对)-> 0.3 + 0.1*通过率(缺统计回退 0.35)  correctness_failed 档同公式
+      A(编译/崩溃)   -> 0.2   「编译过但没能有效跑完」档
+      UNKNOWN/无判决 -> None  位置保留、不给分、绝不编造(与 t2a score=None 同语义)
+
+    全档严格低于 judge success 下限 0.5:本地 PASS ≠ success,正确性门控语义不变。
+    """
+    if classification == "PASS":
+        return 0.4
+    if classification == "D":
+        if case_total > 0 and 0 <= case_pass <= case_total:
+            return 0.3 + 0.1 * min(case_pass / case_total, 0.999)
+        return 0.35
+    if classification == "A":
+        return 0.2
+    return None
