@@ -33,6 +33,7 @@ Set ``evaluator.refresh_runtime: true`` in the request so final scoring uses a f
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import posixpath
@@ -154,10 +155,15 @@ class OperatorJudgeEvaluator(BaseTrajectoryEvaluator):
         refresh_runtime = bool(runtime.get("refresh_runtime"))
         submission_host_path = runtime.get("submission_host_path")
         submission_missing = bool(runtime.get("submission_missing"))
+        # t3a(replica):提交物是 hook 快照的 t3a_candidates/(经 node 的 t3a_mode 标记,
+        # 或宿主 artifacts 直检兜底)。此时没有也不需要 submission tarball / agent runtime。
+        artifacts_dir = Path(runtime["artifacts_dir"])
+        t3a_mode = bool(runtime.get("t3a_mode")) or (artifacts_dir / "t3a_candidates" / "index.json").is_file()
         if (
             not submission_missing
             and submission_host_path is None
             and not isinstance(source, BaseRuntime)
+            and not t3a_mode
         ):
             raise RuntimeError("operator_judge requires a live agent runtime")
         if refresh_runtime and not submission_missing and not isinstance(fresh, BaseRuntime):
@@ -179,6 +185,7 @@ class OperatorJudgeEvaluator(BaseTrajectoryEvaluator):
         env = runtime.get("env") if isinstance(runtime.get("env"), dict) else {}
         timeout_cap = runtime.get("timeout_seconds")
         timeout = self.judge_timeout if timeout_cap is None else min(self.judge_timeout, float(timeout_cap))
+        t3a_mode = t3a_mode or (artifacts_dir / "t3a_candidates" / "index.json").is_file()
 
         # 截断事件计数(训练信号,见 operator_reward.apply_truncation_penalty)。优先读
         # builder 的 completion 级统计(空截断轮修复后不再单独成 trace);旧落盘没有
@@ -189,7 +196,7 @@ class OperatorJudgeEvaluator(BaseTrajectoryEvaluator):
                 1 for t in (trajectory.traces or []) if t.finish_reason == "length"
             )
 
-        if submission_missing:
+        if submission_missing and not t3a_mode:
             return self._scored(
                 {"success": False, "ast_check_ok": False, "correctness_ok": False,
                  "error_type": "submission_missing",
@@ -198,28 +205,43 @@ class OperatorJudgeEvaluator(BaseTrajectoryEvaluator):
                 truncation_events=truncation_events,
             )
 
-        # 1) pull the submitted kernel out of the AGENT runtime. R1 anti-regression (mirrors
-        #    _judge_and_record): prefer the best-so-far successful impl the fixed entry saves on each
-        #    success ({op}_impl.best.py) so a later optimization that breaks the kernel can't drag the
-        #    reward below what was already achieved; fall back to the final impl. Absent == agent
-        #    delivered nothing -> OPERATOR failure (floor reward), NOT infra.
-        local_impl = artifacts_dir / "submission_impl.py"
-        picked: str | None
-        if submission_host_path is not None:
-            local_impl = Path(str(submission_host_path))
-            if not local_impl.is_file():
-                return self._scored(
-                    {"success": False, "ast_check_ok": False, "correctness_ok": False,
-                     "error_type": "submission_missing",
-                     "error": f"host submission artifact is missing: {local_impl}"},
-                    artifacts_dir, submission_used=None,
-                    truncation_events=truncation_events,
+        if t3a_mode:
+            # t3a(replica):impl 下载/上传整段跳过(没有 submission tarball);把 hook 快照的
+            # 候选池与 attempt stream 从宿主 artifacts 搬进 judge 容器,并用
+            # POLAR_T3A_CANDIDATES_DIR 指给 judge_best.sh 的发现链。
+            if not isinstance(judge_rt, BaseRuntime):
+                raise RuntimeError("operator_judge t3a: judge runtime required")
+            await self._upload_t3a_candidates(judge_rt, artifacts_dir)
+            stream_src = artifacts_dir / "t3a_attempt_stream.jsonl"
+            if stream_src.is_file():
+                await judge_rt.upload_file(
+                    str(stream_src), self._abs("judge/t3a_attempt_stream.jsonl")
                 )
-            picked_value = runtime.get("submission_used")
-            picked = str(picked_value) if picked_value else str(local_impl)
+            env = {**env, "POLAR_T3A_CANDIDATES_DIR": self._abs("judge/t3a_candidates")}
+            picked = "t3a_candidates"
         else:
-            assert isinstance(source, BaseRuntime)
-            picked = None
+            # 1) pull the submitted kernel out of the AGENT runtime. R1 anti-regression (mirrors
+            #    _judge_and_record): prefer the best-so-far successful impl the fixed entry saves on each
+            #    success ({op}_impl.best.py) so a later optimization that breaks the kernel can't drag the
+            #    reward below what was already achieved; fall back to the final impl. Absent == agent
+            #    delivered nothing -> OPERATOR failure (floor reward), NOT infra.
+            local_impl = artifacts_dir / "submission_impl.py"
+            picked: str | None
+            if submission_host_path is not None:
+                local_impl = Path(str(submission_host_path))
+                if not local_impl.is_file():
+                    return self._scored(
+                        {"success": False, "ast_check_ok": False, "correctness_ok": False,
+                         "error_type": "submission_missing",
+                         "error": f"host submission artifact is missing: {local_impl}"},
+                        artifacts_dir, submission_used=None,
+                        truncation_events=truncation_events,
+                    )
+                picked_value = runtime.get("submission_used")
+                picked = str(picked_value) if picked_value else str(local_impl)
+            else:
+                assert isinstance(source, BaseRuntime)
+                picked = None
             # Keep每个候选的真实失败原因。原实现是 `except Exception: continue`,把
             # "文件不存在"(agent 没交 → 记 0.2 合理)和"源容器已销毁 / 传输失败"
             # (infra 故障 → 应 retry 不计分)塌缩成同一条 submission_missing,
@@ -254,9 +276,11 @@ class OperatorJudgeEvaluator(BaseTrajectoryEvaluator):
                 )
 
         # 2) place ONLY the impl into the judge runtime (canonical pipeline comes from eval_prepare).
-        assert isinstance(judge_rt, BaseRuntime)
-        if judge_rt is not source or submission_host_path is not None:
-            await judge_rt.upload_file(str(local_impl), self._abs(self.submission_dest))
+        #    t3a 无 impl:候选池已在上面搬入 judge 容器,整步跳过。
+        if not t3a_mode:
+            assert isinstance(judge_rt, BaseRuntime)
+            if judge_rt is not source or submission_host_path is not None:
+                await judge_rt.upload_file(str(local_impl), self._abs(self.submission_dest))
 
         if self.judge_mode == self.CANNBOT_MODE:
             return await self._evaluate_cannbot(
@@ -296,6 +320,18 @@ class OperatorJudgeEvaluator(BaseTrajectoryEvaluator):
             metrics = self._with_error_log_infra_classification(metrics, local_metrics_error)
             local_metrics.write_text(json.dumps(metrics, ensure_ascii=False, indent=2))
 
+        # t3a 过程分回传:judge_best.sh 在 judge_out 合成的 process_reward.json 一并下载
+        # (t2a 永远没有此文件,下载失败静默略过)。消费点:_scored 的 t3a 分支。
+        if t3a_mode:
+            process_path = artifacts_dir / "process_reward.json"
+            process_path.unlink(missing_ok=True)  # Do not reuse a previous judge attempt's reward.
+            try:
+                _proc_remote = posixpath.join(posixpath.dirname(self.metrics_path), "process_reward.json")
+                await judge_rt.download_file(self._abs(_proc_remote), str(process_path))
+            except Exception:
+                process_path.unlink(missing_ok=True)
+                logger.warning("operator_judge t3a: process reward unavailable", exc_info=True)
+
         return self._scored(
             metrics,
             artifacts_dir,
@@ -303,6 +339,32 @@ class OperatorJudgeEvaluator(BaseTrajectoryEvaluator):
             metrics_error_path=str(local_metrics_error) if local_metrics_error is not None else None,
             truncation_events=truncation_events,
         )
+
+    async def _upload_t3a_candidates(self, judge_rt: BaseRuntime, artifacts_dir: Path) -> None:
+        """Transfer only verified snapshot files; container absolute paths are not portable."""
+        root = (artifacts_dir / "t3a_candidates").resolve()
+        entries = json.loads((root / "index.json").read_text())
+        if not isinstance(entries, list) or not 1 <= len(entries) <= 5:
+            raise ValueError("t3a candidate index must contain 1..5 entries")
+        relocated = []
+        files = []
+        for entry in entries:
+            name = posixpath.basename(entry["file"])
+            source = root / name
+            if not name.endswith(".tar.gz") or source.is_symlink() or not source.is_file():
+                raise ValueError(f"Invalid t3a candidate: {name!r}")
+            with source.open("rb") as stream:
+                digest = hashlib.file_digest(stream, "sha256").hexdigest()
+            if digest != entry.get("sha256"):
+                raise ValueError(f"t3a candidate checksum mismatch: {name}")
+            destination = self._abs(f"judge/t3a_candidates/{name}")
+            relocated.append({**entry, "file": destination})
+            files.append((source, destination))
+        for source, destination in files:
+            await judge_rt.upload_file(str(source), destination)
+        manifest = artifacts_dir / "t3a_judge_index.json"
+        manifest.write_text(json.dumps(relocated, ensure_ascii=False))
+        await judge_rt.upload_file(str(manifest), self._abs("judge/t3a_candidates/index.json"))
 
     async def _evaluate_cannbot(
         self,
@@ -606,11 +668,33 @@ class OperatorJudgeEvaluator(BaseTrajectoryEvaluator):
         # 过程奖励(dev_04/dev_05):infra retry 分支在上面已经 raise,走不到这里(C4)。
         # 合并顺序:先 process 塑形(±Δ,floor 0.0 / ceil 1.0),再截断惩罚(独立作用于
         # 最终分,其内部 floor 依然兜底)。校验不过/文件缺失 -> 分量 0,与改造前逐分一致。
-        events, process_why = self._load_process_events(artifacts_dir, metrics)
-        if events is not None:
-            r_proc, process_components = process_reward(events, metrics)
+        #
+        # t3a(replica)过程源:attempt stream(hook 判决+promote)经 judge_best.sh
+        # 在 judge_out 合成的 process_reward.json —— 文件存在即优先采用(其 total 已含
+        # ±0.10 截断与 judge 一致性作废),不走 process_info.json 通道。judge 侧
+        # pipeline 自己的单次判分事件已在 judge_best.sh 里挪名中和,不会误入这里。
+        t3a_proc = None
+        t3a_proc_path = artifacts_dir / "process_reward.json"
+        if t3a_proc_path.is_file():
+            try:
+                t3a_proc = json.loads(t3a_proc_path.read_text(encoding="utf-8"))
+            except Exception:  # noqa: BLE001
+                t3a_proc = None
+        if t3a_proc is not None:
+            r_proc = float(t3a_proc.get("total") or 0.0)
+            process_components = {
+                "source": "t3a_attempt_stream",
+                "counts": t3a_proc.get("counts"),
+                "anomalies": t3a_proc.get("anomalies"),
+                "band": t3a_proc.get("band"),
+            }
+            process_why = "t3a_stream"
         else:
-            r_proc, process_components = 0.0, {"disabled": process_why}
+            events, process_why = self._load_process_events(artifacts_dir, metrics)
+            if events is not None:
+                r_proc, process_components = process_reward(events, metrics)
+            else:
+                r_proc, process_components = 0.0, {"disabled": process_why}
         # floor 0.0:阶梯已含 0 档(AST 不过),max(0 + 负 process, 0.15) 会倒挂着抬分;
         # clamp 到 0 保持 reward 非负的对外约定。
         base_reward = min(max(outcome["reward"] + r_proc, 0.0), 1.0)

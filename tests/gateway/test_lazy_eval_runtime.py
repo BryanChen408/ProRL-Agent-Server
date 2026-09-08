@@ -383,6 +383,18 @@ def test_lazy_eval_stops_agent_before_starting_judge_and_uploads_submission(
     assert Path(local_upload).read_text() == "# final kernel"
 
 
+def test_t3a_snapshot_index_bypasses_missing_legacy_submission(tmp_path):
+    request = _request(lazy=True)
+    agent = FakeRuntime("agent", [], tmp_path / "agent")
+    managed = _managed(request, agent, tmp_path)
+    pool = managed.artifacts_dir / "t3a_candidates"
+    pool.mkdir(parents=True, exist_ok=True)
+    (pool / "index.json").write_text("[]")
+    context = asyncio.run(_run_manager()._extract_operator_judge_submission(managed, request.evaluator))
+    assert context["t3a_mode"] is True
+    assert context["submission_missing"] is False
+
+
 def test_cannbot_lazy_submission_candidates_prefer_phase5_final() -> None:
     manager = _run_manager()
     evaluator = EvaluatorSpec(

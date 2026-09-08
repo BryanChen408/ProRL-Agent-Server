@@ -104,6 +104,46 @@ def test_success_speedup_reward():
     assert res.metadata["process_validation"] == "missing"
 
 
+def test_t3a_relocates_candidates_and_returns_process_reward(tmp_path):
+    import hashlib
+    import pytest
+    candidates = tmp_path / "t3a_candidates"
+    candidates.mkdir()
+    snapshot = candidates / "cand_1.tar.gz"
+    snapshot.write_bytes(b"snapshot bytes")
+    entries = [{"file": "/polar/session/artifacts/t3a_candidates/cand_1.tar.gz",
+                "sha256": hashlib.sha256(snapshot.read_bytes()).hexdigest(), "rank": 1}]
+    (candidates / "index.json").write_text(json.dumps(entries))
+    (tmp_path / "t3a_attempt_stream.jsonl").write_text('{"classification":"PASS"}\n')
+    judge = FakeRuntime(files={
+        METRICS: json.dumps({"success": True, "perf_data": {"speedup_vs_torch": 2.0}}),
+        "judge_out/process_reward.json": json.dumps({"total": 0.04}),
+    })
+    ev = OperatorJudgeEvaluator(op_name=OP, judge_command="bash judge/judge_best.sh", metrics_path=METRICS)
+    result = asyncio.run(ev.evaluate(Trajectory(status="COMPLETED", traces=[]),
+        fresh_eval_runtime=judge, refresh_runtime=True, artifacts_dir=str(tmp_path)))
+    uploaded = dict((remote, local) for local, remote in judge.uploaded)
+    manifest = json.loads(Path(uploaded["judge/t3a_candidates/index.json"]).read_text())
+    assert manifest[0]["file"] == "judge/t3a_candidates/cand_1.tar.gz"
+    assert manifest[0]["sha256"] == entries[0]["sha256"]
+    assert "judge/t3a_attempt_stream.jsonl" in uploaded
+    assert judge.exec_envs[0]["POLAR_T3A_CANDIDATES_DIR"] == "judge/t3a_candidates"
+    assert result.metadata["process_validation"] == "t3a_stream"
+    assert result.outcome_reward == pytest.approx(0.94)
+
+    # On a retry, a missing new process result must not reuse the old +0.04.
+    judge.files.pop("judge_out/process_reward.json")
+    result = asyncio.run(ev.evaluate(Trajectory(status="COMPLETED", traces=[]),
+        fresh_eval_runtime=judge, refresh_runtime=True, artifacts_dir=str(tmp_path)))
+    assert result.metadata["process_reward"] == 0.0
+
+    snapshot.write_bytes(b"tampered")
+    judge.uploaded.clear()
+    with pytest.raises(ValueError, match="checksum mismatch"):
+        asyncio.run(ev._upload_t3a_candidates(judge, tmp_path))
+    assert judge.uploaded == []
+
+
 # ------------------------- process reward(dev_04/dev_05)-------------------------
 
 _PROCESS_ENVS = ("POLAR_PROCESS_REWARD", "POLAR_PROCESS_REWARD_CAP")

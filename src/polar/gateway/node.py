@@ -1261,6 +1261,17 @@ class GatewayNodeManager:
                     exc_info=True,
                 )
 
+        # t3a(replica):agent 不打 submission tarball,提交物是 hook 静默快照的
+        # t3a_candidates/(ranked list,落在 bind-mount 的 session artifacts,宿主可见)。
+        # 判 submission_missing 前先认它——否则写对的算子会被当成没提交(审查实证)。
+        # 数据驱动:t2a 永远没有 t3a_candidates,行为逐字不变。
+        if (managed.artifacts_dir / "t3a_candidates" / "index.json").is_file():
+            return {
+                "submission_missing": False,
+                "submission_used": "t3a_candidates",
+                "t3a_mode": True,
+            }
+
         return {"submission_missing": True, "submission_used": None}
 
     def _operator_judge_submission_candidates(
