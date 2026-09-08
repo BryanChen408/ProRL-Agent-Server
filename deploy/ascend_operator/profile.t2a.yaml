@@ -27,7 +27,7 @@ operator_runtime:
   backend: ascendc      # ← delta 5:prepare 走 input/{op}.py + --backend ascendc(triton 侧无此字段=默认 triton)
   # ← delta 6:算子同名 .json(NPUKernelBench 用例规格,get_input_groups() 要读)随 prepare 上传到 input/。
   #   {op}.py 走 vime task_source 内容寻址,.json 没有该通道 → 从数据集目录直传。triton 侧无此字段=不产生该动作。
-  task_assets_dir: /home/docker/datasets/op_tasks/op_assets_cudallm_filtered189/op_tasks
+  task_assets_dir: /home/docker/datasets/ascendc-rl-datasets/NPUKernelBench/src
   # ← delta 11:asc-devkit(上游 init.sh Step 4 会 clone 的算子开发资料仓)。
   #   $ASC_DEVKIT_DIR 在 21 个 skill 文档里被引用 46 次,是出现最多的环境变量;
   #   ascendc-docs-search 整个 skill 就是查它。只读挂到 /opt/asc-devkit,不进 workdir 拷贝。
@@ -39,7 +39,7 @@ operator_runtime:
   #   打在 950-only 页上,学错签名烧 A 类迭代。原件 asc-devkit-9.0.0 保留,回退=改回该路径。
   asc_devkit_dir: /home/docker/asc-devkit-9.0.0-a2a3
   budget:
-    generation_max: 8
+    generation_max: 10
     optimization_max: 4
     interval_seconds: 2
   npu_lease:
@@ -69,7 +69,7 @@ operator:
   # ← delta 13:generation 最多 8 次、首次正确后 optimization 独立最多 4 次；
   #   每个候选都参与编译/对拍/测速，单次长尾可超过 30 min；
   #   加上 Phase 0-3 探索，保留 9000s 会话上限。
-  timeout_seconds: 14400.0
+  timeout_seconds: 21600.0
   runtime:
     image: ascendc-tilelang:v1                          # ← delta 2
     network: host
