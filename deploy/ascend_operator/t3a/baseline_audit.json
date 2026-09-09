@@ -1,0 +1,913 @@
+{
+  "source_commit": "13b2ae5652c75fe83a3e4114552a6477d3a01f3d",
+  "agent_path": "plugins-community/tilelang2ascendc-ops-generator/agents/tilelang2ascendc-kernel-generator.md",
+  "source_sha256": "1bd8dfd26dc07532ce4a638fd1fb6ad301f242e3acc68200384d013558dbd661",
+  "sample_files": 748,
+  "exact_source_matches": 0,
+  "status": "unverified",
+  "variants": [
+    {
+      "body_sha256": "2a151782e6a8795b8f734d77011220f786fcacf770be603ba6c4686747f2f627",
+      "example": "CANN/tianyazhang/11_AddRmsNormDynamicQuantV2__sub_ascend-kernel-developer.raw.json",
+      "exact_source_match": false,
+      "outline": "Phase 0: 参数确认 + 算子分类    (解析输入，判定简单/复杂路径)\nPhase 1: 环境准备 + 工程初始化  (复制算子文件 + 初始化 kernel 工程 + 算子注册)\nPhase 2: 测试用例精简           (ascendc-case-simplifier)\nPhase 3: 设计表达              (分支)\n  ├─ 简单算子: design.md 生成 (ascendc-design-doc-generator)\n  └─ 复杂算子: TileLang 设计  (ascendc-tilelang-designer + 退化检测 + 迭代)\nPhase 4: AscendC 生成与验证    (分支)\n  ├─ 简单算子: 模板代码生成    (ascendc-code-gen + 退化检测 + 迭代)\n  └─ 复杂算子: TileLang→AscendC 转译 (ascendc-translator + 退化检测 + 迭代)\nPhase 5: 性能分析              (ascendc-performance-analyzer)\nPhase 6: 全量用例验证\nPhase 7: Trace 记录            (ascendc-trace-recorder)",
+      "files": 133
+    },
+    {
+      "body_sha256": "900fe7f29e05184b20c02ef4c8ac124a26bf4df6cd569246cf7b3ea9e578a243",
+      "example": "cudaLLM/tianyazhang/109_SoftMarginLoss__sub_ascend-kernel-developer.raw.json",
+      "exact_source_match": false,
+      "outline": "Phase 0: 参数确认 + 算子分类    (解析输入，判定简单/复杂路径)\nPhase 1: 环境准备 + 工程初始化  (复制算子文件 + 初始化 kernel 工程 + 算子注册)\nPhase 2: 测试用例精简           (ascendc-case-simplifier)\nPhase 3: 设计表达              (分支)\n  ├─ 简单算子: design.md 生成 (ascendc-design-doc-generator)\n  └─ 复杂算子: TileLang 设计  (ascendc-tilelang-designer + 退化检测 + 迭代)\nPhase 4: AscendC 生成与验证    (分支)\n  ├─ 简单算子: 模板代码生成    (ascendc-code-gen + 退化检测 + 迭代)\n  └─ 复杂算子: TileLang→AscendC 转译 (ascendc-translator + 退化检测 + 迭代)\nPhase 5: 性能分析              (ascendc-performance-analyzer)\nPhase 6: 全量用例验证\nPhase 7: Trace 记录            (ascendc-trace-recorder)",
+      "files": 98
+    },
+    {
+      "body_sha256": "d68ebd4859f89281e14055e6edb34d7930601c720f86dea8610858beac0a4502",
+      "example": "CANN/pass1/14_AdvanceStep__sub_ascend-kernel-developer.raw.json",
+      "exact_source_match": false,
+      "outline": "Phase 0: 参数确认 + 算子分类    (解析输入，判定简单/复杂路径)\nPhase 1: 环境准备 + 工程初始化  (复制算子文件 + 初始化 kernel 工程 + 算子注册)\nPhase 2: 测试用例精简           (ascendc-case-simplifier)\nPhase 3: 设计表达              (分支)\n  ├─ 简单算子: design.md 生成 (ascendc-design-doc-generator)\n  └─ 复杂算子: TileLang 设计  (ascendc-tilelang-designer + 退化检测 + 迭代)\nPhase 4: AscendC 生成与验证    (分支)\n  ├─ 简单算子: 模板代码生成    (ascendc-code-gen + 退化检测 + 迭代)\n  └─ 复杂算子: TileLang→AscendC 转译 (ascendc-translator + 退化检测 + 迭代)\nPhase 5: 性能分析              (ascendc-performance-analyzer)\nPhase 6: 全量用例验证\nPhase 7: Trace 记录            (ascendc-trace-recorder)",
+      "files": 55
+    },
+    {
+      "body_sha256": "9a5db20bb25a0e5831c4cf013350f59667fb8bc524bc4d132d7836d71c3c2aca",
+      "example": "CANN/liziqi/15_CosMath__sub_ascend-kernel-developer.json",
+      "exact_source_match": false,
+      "outline": "Phase 0: 参数确认 + 算子分类    (解析输入，判定简单/复杂路径)\nPhase 1: 环境准备 + 工程初始化  (复制算子文件 + 初始化 kernel 工程 + 算子注册)\nPhase 2: 测试用例精简           (ascendc-case-simplifier)\nPhase 3: 设计表达              (分支)\n  ├─ 简单算子: design.md 生成 (ascendc-design-doc-generator)\n  └─ 复杂算子: TileLang 设计  (ascendc-tilelang-designer + 退化检测 + 迭代)\nPhase 4: AscendC 生成与验证    (分支)\n  ├─ 简单算子: 模板代码生成    (ascendc-code-gen + 退化检测 + 迭代)\n  └─ 复杂算子: TileLang→AscendC 转译 (ascendc-translator + 退化检测 + 迭代)\nPhase 5: 性能分析              (ascendc-performance-analyzer)\nPhase 6: 全量用例验证\nPhase 7: Trace 记录            (ascendc-trace-recorder)",
+      "files": 38
+    },
+    {
+      "body_sha256": "7981f0411cdbe20fe04d37268286aa9a8da31928376a1a7b4801735eaf6fb37a",
+      "example": "cudaLLM/tyz_0817/203_InstanceNorm3d__sub_tilelang2ascendc-kernel-generator.raw.json",
+      "exact_source_match": false,
+      "outline": "Phase 0: 参数确认 + 算子分类    (解析输入，判定简单/复杂路径)\nPhase 1: 环境准备 + 工程初始化  (复制算子文件 + 初始化 kernel 工程 + 算子注册)\nPhase 2: 测试用例精简           (tilelang2ascend-case-simplifier)\nPhase 3: 设计表达              (分支)\n  ├─ 简单算子: 架构设计 + 设计串讲 (ops-direct-invoke: DESIGN.md + PLAN.md + WALKTHROUGH.md)\n  └─ 复杂算子: TileLang 设计  (tilelang2ascend-tilelang-designer + 退化检测 + 迭代)\nPhase 4: AscendC 生成与验证    (分支)\n  ├─ 简单算子: 开发实现 + 代码审查 + 修复循环 (ops-direct-invoke: 渐进式开发 + REVIEW.md + 最多3轮修复)\n  └─ 复杂算子: TileLang→AscendC 转译 (tilelang2ascend-translator + 退化检测 + 迭代)\nPhase 5: 性能分析              (ops-profiling --quick 模式)\nPhase 6: 全量用例验证\nPhase 7: Trace 记录            (tilelang2ascend-trace-recorder)",
+      "files": 30
+    },
+    {
+      "body_sha256": "5d0f32b63ae7971f037258c67a3a2b688d092aed948076528fc886a2f5465195",
+      "example": "cudaLLM/liziqi/10_one_hot__sub_ascend-kernel-developer.json",
+      "exact_source_match": false,
+      "outline": "Phase 0: 参数确认 + 算子分类    (解析输入，判定简单/复杂路径)\nPhase 1: 环境准备 + 工程初始化  (复制算子文件 + 初始化 kernel 工程 + 算子注册)\nPhase 2: 测试用例精简           (ascendc-case-simplifier)\nPhase 3: 设计表达              (分支)\n  ├─ 简单算子: design.md 生成 (ascendc-design-doc-generator)\n  └─ 复杂算子: TileLang 设计  (ascendc-tilelang-designer + 退化检测 + 迭代)\nPhase 4: AscendC 生成与验证    (分支)\n  ├─ 简单算子: 模板代码生成    (ascendc-code-gen + 退化检测 + 迭代)\n  └─ 复杂算子: TileLang→AscendC 转译 (ascendc-translator + 退化检测 + 迭代)\nPhase 5: 性能分析              (ascendc-performance-analyzer)\nPhase 6: 全量用例验证\nPhase 7: Trace 记录            (ascendc-trace-recorder)",
+      "files": 26
+    },
+    {
+      "body_sha256": "f486d92d50f8fa7b1891e772bb4640153f5f512ba9d82c7eea1d4e63ba99c71e",
+      "example": "level_0/11_Sigmoid__sub_ascend-kernel-developer.raw.json",
+      "exact_source_match": false,
+      "outline": "Phase 0: 参数确认 + 算子分类    (解析输入，判定简单/复杂路径)\nPhase 1: 环境准备 + 工程初始化  (复制算子文件 + 初始化 kernel 工程 + 算子注册)\nPhase 2: 测试用例精简           (ascendc-case-simplifier)\nPhase 3: 设计表达              (分支)\n  ├─ 简单算子: design.md 生成 (ascendc-design-doc-generator)\n  └─ 复杂算子: TileLang 设计  (ascendc-tilelang-designer + 退化检测 + 迭代)\nPhase 4: AscendC 生成与验证    (分支)\n  ├─ 简单算子: 模板代码生成    (ascendc-code-gen + 退化检测 + 迭代)\n  └─ 复杂算子: TileLang→AscendC 转译 (ascendc-translator + 退化检测 + 迭代)\nPhase 5: 性能分析              (ascendc-performance-analyzer)\nPhase 6: 全量用例验证\nPhase 7: Trace 记录            (ascendc-trace-recorder)",
+      "files": 19
+    },
+    {
+      "body_sha256": "46761d45378fe8cc3f723479cf0791080566aa35b1da4958dbe96f7d8a019867",
+      "example": "CANN/liziqi/11_CircularPad__sub_ascend-kernel-developer.json",
+      "exact_source_match": false,
+      "outline": "Phase 0: 参数确认 + 算子分类    (解析输入，判定简单/复杂路径)\nPhase 1: 环境准备 + 工程初始化  (复制算子文件 + 初始化 kernel 工程 + 算子注册)\nPhase 2: 测试用例精简           (ascendc-case-simplifier)\nPhase 3: 设计表达              (分支)\n  ├─ 简单算子: design.md 生成 (ascendc-design-doc-generator)\n  └─ 复杂算子: TileLang 设计  (ascendc-tilelang-designer + 退化检测 + 迭代)\nPhase 4: AscendC 生成与验证    (分支)\n  ├─ 简单算子: 模板代码生成    (ascendc-code-gen + 退化检测 + 迭代)\n  └─ 复杂算子: TileLang→AscendC 转译 (ascendc-translator + 退化检测 + 迭代)\nPhase 5: 性能分析              (ascendc-performance-analyzer)\nPhase 6: 全量用例验证\nPhase 7: Trace 记录            (ascendc-trace-recorder)",
+      "files": 16
+    },
+    {
+      "body_sha256": "717937ed96ce0182522b8f7b3d96a355812c0d5e1e16506db751c1f8580271df",
+      "example": "CANN/liujinxue_0706/11_GroupedMatmulSliceM__sub_ascend-kernel-developer.json",
+      "exact_source_match": false,
+      "outline": "Phase 0: 参数确认 + 算子分类    (解析输入，判定简单/复杂路径)\nPhase 1: 环境准备 + 工程初始化  (复制算子文件 + 初始化 kernel 工程 + 算子注册)\nPhase 2: 测试用例精简           (ascendc-case-simplifier)\nPhase 3: 设计表达              (分支)\n  ├─ 简单算子: design.md 生成 (ascendc-design-doc-generator)\n  └─ 复杂算子: TileLang 设计  (ascendc-tilelang-designer + 退化检测 + 迭代)\nPhase 4: AscendC 生成与验证    (分支)\n  ├─ 简单算子: 模板代码生成    (ascendc-code-gen + 退化检测 + 迭代)\n  └─ 复杂算子: TileLang→AscendC 转译 (ascendc-translator + 退化检测 + 迭代)\nPhase 5: 性能分析              (ascendc-performance-analyzer)\nPhase 6: 全量用例验证\nPhase 7: Trace 记录            (ascendc-trace-recorder)",
+      "files": 14
+    },
+    {
+      "body_sha256": "7236b1279f543ff202c6a9e0df912ffa8692fe95f24ada39dd79ce6ef0d4ae88",
+      "example": "CANN/pass1/32_InplaceIndexAddWithSorted__sub_ascend-kernel-developer.raw.json",
+      "exact_source_match": false,
+      "outline": "Phase 0: 参数确认 + 算子分类    (解析输入，判定简单/复杂路径)\nPhase 1: 环境准备 + 工程初始化  (复制算子文件 + 初始化 kernel 工程 + 算子注册)\nPhase 2: 测试用例精简           (ascendc-case-simplifier)\nPhase 3: 设计表达              (分支)\n  ├─ 简单算子: design.md 生成 (ascendc-design-doc-generator)\n  └─ 复杂算子: TileLang 设计  (ascendc-tilelang-designer + 退化检测 + 迭代)\nPhase 4: AscendC 生成与验证    (分支)\n  ├─ 简单算子: 模板代码生成    (ascendc-code-gen + 退化检测 + 迭代)\n  └─ 复杂算子: TileLang→AscendC 转译 (ascendc-translator + 退化检测 + 迭代)\nPhase 5: 性能分析              (ascendc-performance-analyzer)\nPhase 6: 全量用例验证\nPhase 7: Trace 记录            (ascendc-trace-recorder)",
+      "files": 14
+    },
+    {
+      "body_sha256": "ff65540f084b38f4c81778372faf8cfea23bd78a995a7f97d7c3971e8a242b7e",
+      "example": "cudaLLM/liziqi/246_unsafe_split_with_sizes__sub_ascend-kernel-developer.json",
+      "exact_source_match": false,
+      "outline": "Phase 0: 参数确认 + 算子分类    (解析输入，判定简单/复杂路径)\nPhase 1: 环境准备 + 工程初始化  (复制算子文件 + 初始化 kernel 工程 + 算子注册)\nPhase 2: 测试用例精简           (ascendc-case-simplifier)\nPhase 3: 设计表达              (分支)\n  ├─ 简单算子: design.md 生成 (ascendc-design-doc-generator)\n  └─ 复杂算子: TileLang 设计  (ascendc-tilelang-designer + 退化检测 + 迭代)\nPhase 4: AscendC 生成与验证    (分支)\n  ├─ 简单算子: 模板代码生成    (ascendc-code-gen + 退化检测 + 迭代)\n  └─ 复杂算子: TileLang→AscendC 转译 (ascendc-translator + 退化检测 + 迭代)\nPhase 5: 性能分析              (ascendc-performance-analyzer)\nPhase 6: 全量用例验证\nPhase 7: Trace 记录            (ascendc-trace-recorder)",
+      "files": 11
+    },
+    {
+      "body_sha256": "fae31b675d58d6a0ac1d24c610234281d55ac84016a2563841a17ee20d8ff76c",
+      "example": "level_2/liujinxue/13_InterleaveRope__sub_ascend-kernel-developer.json",
+      "exact_source_match": false,
+      "outline": "Phase 0: 参数确认 + 算子分类    (解析输入，判定简单/复杂路径)\nPhase 1: 环境准备 + 工程初始化  (复制算子文件 + 初始化 kernel 工程 + 算子注册)\nPhase 2: 测试用例精简           (ascendc-case-simplifier)\nPhase 3: 设计表达              (分支)\n  ├─ 简单算子: design.md 生成 (ascendc-design-doc-generator)\n  └─ 复杂算子: TileLang 设计  (ascendc-tilelang-designer + 退化检测 + 迭代)\nPhase 4: AscendC 生成与验证    (分支)\n  ├─ 简单算子: 模板代码生成    (ascendc-code-gen + 退化检测 + 迭代)\n  └─ 复杂算子: TileLang→AscendC 转译 (ascendc-translator + 退化检测 + 迭代)\nPhase 5: 性能分析              (ascendc-performance-analyzer)\nPhase 6: 全量用例验证\nPhase 7: Trace 记录            (ascendc-trace-recorder)",
+      "files": 11
+    },
+    {
+      "body_sha256": "7a31f87ac544511633a2c47231bf4ee6d6658f54384932f166f8f7ba046af811",
+      "example": "cudaLLM/liziqi/200_bucketize__sub_ascend-kernel-developer.json",
+      "exact_source_match": false,
+      "outline": "Phase 0: 参数确认 + 算子分类    (解析输入，判定简单/复杂路径)\nPhase 1: 环境准备 + 工程初始化  (复制算子文件 + 初始化 kernel 工程 + 算子注册)\nPhase 2: 测试用例精简           (ascendc-case-simplifier)\nPhase 3: 设计表达              (分支)\n  ├─ 简单算子: design.md 生成 (ascendc-design-doc-generator)\n  └─ 复杂算子: TileLang 设计  (ascendc-tilelang-designer + 退化检测 + 迭代)\nPhase 4: AscendC 生成与验证    (分支)\n  ├─ 简单算子: 模板代码生成    (ascendc-code-gen + 退化检测 + 迭代)\n  └─ 复杂算子: TileLang→AscendC 转译 (ascendc-translator + 退化检测 + 迭代)\nPhase 5: 性能分析              (ascendc-performance-analyzer)\nPhase 6: 全量用例验证\nPhase 7: Trace 记录            (ascendc-trace-recorder)",
+      "files": 10
+    },
+    {
+      "body_sha256": "6439591ca00b88655f7bd3a1f53c47ed4cc3c1664fcec48843dc171085f35138",
+      "example": "level_1/第一批收集/10_LayerNorm__sub_ascend-kernel-developer.raw.json",
+      "exact_source_match": false,
+      "outline": "Phase 0: 参数确认 + 算子分类    (解析输入，判定简单/复杂路径)\nPhase 1: 环境准备 + 工程初始化  (复制算子文件 + 初始化 kernel 工程 + 算子注册)\nPhase 2: 测试用例精简           (ascendc-case-simplifier)\nPhase 3: 设计表达              (分支)\n  ├─ 简单算子: design.md 生成 (ascendc-design-doc-generator)\n  └─ 复杂算子: TileLang 设计  (ascendc-tilelang-designer + 退化检测 + 迭代)\nPhase 4: AscendC 生成与验证    (分支)\n  ├─ 简单算子: 模板代码生成    (ascendc-code-gen + 退化检测 + 迭代)\n  └─ 复杂算子: TileLang→AscendC 转译 (ascendc-translator + 退化检测 + 迭代)\nPhase 5: 性能分析              (ascendc-performance-analyzer)\nPhase 6: 全量用例验证\nPhase 7: Trace 记录            (ascendc-trace-recorder)",
+      "files": 10
+    },
+    {
+      "body_sha256": "ca5d49bccbf3ac86ab99b93c76e91d4af1ae78d58a0ff683a3ba1f5d137a25c2",
+      "example": "CANN/pass1/109_GridSampler3DGrad__sub_ascend-kernel-developer.raw.json",
+      "exact_source_match": false,
+      "outline": "Phase 0: 参数确认 + 算子分类    (解析输入，判定简单/复杂路径)\nPhase 1: 环境准备 + 工程初始化  (复制算子文件 + 初始化 kernel 工程 + 算子注册)\nPhase 2: 测试用例精简           (ascendc-case-simplifier)\nPhase 3: 设计表达              (分支)\n  ├─ 简单算子: design.md 生成 (ascendc-design-doc-generator)\n  └─ 复杂算子: TileLang 设计  (ascendc-tilelang-designer + 退化检测 + 迭代)\nPhase 4: AscendC 生成与验证    (分支)\n  ├─ 简单算子: 模板代码生成    (ascendc-code-gen + 退化检测 + 迭代)\n  └─ 复杂算子: TileLang→AscendC 转译 (ascendc-translator + 退化检测 + 迭代)\nPhase 5: 性能分析              (ascendc-performance-analyzer)\nPhase 6: 全量用例验证\nPhase 7: Trace 记录            (ascendc-trace-recorder)",
+      "files": 9
+    },
+    {
+      "body_sha256": "84f960c3013038c6d0c2f9755504345c793bc733604ff64a044e208ef09fd42a",
+      "example": "cudaLLM/liziqi/218_SiLU__sub_ascend-kernel-developer.json",
+      "exact_source_match": false,
+      "outline": "Phase 0: 参数确认 + 算子分类    (解析输入，判定简单/复杂路径)\nPhase 1: 环境准备 + 工程初始化  (复制算子文件 + 初始化 kernel 工程 + 算子注册)\nPhase 2: 测试用例精简           (ascendc-case-simplifier)\nPhase 3: 设计表达              (分支)\n  ├─ 简单算子: design.md 生成 (ascendc-design-doc-generator)\n  └─ 复杂算子: TileLang 设计  (ascendc-tilelang-designer + 退化检测 + 迭代)\nPhase 4: AscendC 生成与验证    (分支)\n  ├─ 简单算子: 模板代码生成    (ascendc-code-gen + 退化检测 + 迭代)\n  └─ 复杂算子: TileLang→AscendC 转译 (ascendc-translator + 退化检测 + 迭代)\nPhase 5: 性能分析              (ascendc-performance-analyzer)\nPhase 6: 全量用例验证\nPhase 7: Trace 记录            (ascendc-trace-recorder)",
+      "files": 9
+    },
+    {
+      "body_sha256": "d10ee95cba18de285f5dda6933f901dd97af6057cfb9468ebe2dd5a29a471768",
+      "example": "CANN/pass1/100_ForeachZeroInplace__sub_ascend-kernel-developer.raw.json",
+      "exact_source_match": false,
+      "outline": "Phase 0: 参数确认 + 算子分类    (解析输入，判定简单/复杂路径)\nPhase 1: 环境准备 + 工程初始化  (复制算子文件 + 初始化 kernel 工程 + 算子注册)\nPhase 2: 测试用例精简           (ascendc-case-simplifier)\nPhase 3: 设计表达              (分支)\n  ├─ 简单算子: design.md 生成 (ascendc-design-doc-generator)\n  └─ 复杂算子: TileLang 设计  (ascendc-tilelang-designer + 退化检测 + 迭代)\nPhase 4: AscendC 生成与验证    (分支)\n  ├─ 简单算子: 模板代码生成    (ascendc-code-gen + 退化检测 + 迭代)\n  └─ 复杂算子: TileLang→AscendC 转译 (ascendc-translator + 退化检测 + 迭代)\nPhase 5: 性能分析              (ascendc-performance-analyzer)\nPhase 6: 全量用例验证\nPhase 7: Trace 记录            (ascendc-trace-recorder)",
+      "files": 8
+    },
+    {
+      "body_sha256": "852796ebec9bcf6f81086ba47abf53774b3c6744ef51befe293e1d774f590c55",
+      "example": "cudaLLM/liziqi/10_one_hot__sub_ascend-kernel-developer.raw.json",
+      "exact_source_match": false,
+      "outline": "Phase 0: 参数确认 + 算子分类    (解析输入，判定简单/复杂路径)\nPhase 1: 环境准备 + 工程初始化  (复制算子文件 + 初始化 kernel 工程 + 算子注册)\nPhase 2: 测试用例精简           (ascendc-case-simplifier)\nPhase 3: 设计表达              (分支)\n  ├─ 简单算子: design.md 生成 (ascendc-design-doc-generator)\n  └─ 复杂算子: TileLang 设计  (ascendc-tilelang-designer + 退化检测 + 迭代)\nPhase 4: AscendC 生成与验证    (分支)\n  ├─ 简单算子: 模板代码生成    (ascendc-code-gen + 退化检测 + 迭代)\n  └─ 复杂算子: TileLang→AscendC 转译 (ascendc-translator + 退化检测 + 迭代)\nPhase 5: 性能分析              (ascendc-performance-analyzer)\nPhase 6: 全量用例验证\nPhase 7: Trace 记录            (ascendc-trace-recorder)",
+      "files": 7
+    },
+    {
+      "body_sha256": "0137461c3881dfd960bb90ed04689071f81ad7f4e7ea7f150cfae920d4e68a3c",
+      "example": "cudaLLM/tyz_0817/114_cosine_embedding_loss__sub_tilelang2ascendc-kernel-generator.raw.json",
+      "exact_source_match": false,
+      "outline": "Phase 0: 参数确认 + 算子分类    (解析输入，判定简单/复杂路径)\nPhase 1: 环境准备 + 工程初始化  (复制算子文件 + 初始化 kernel 工程 + 算子注册)\nPhase 2: 测试用例精简           (tilelang2ascend-case-simplifier)\nPhase 3: 设计表达              (分支)\n  ├─ 简单算子: 架构设计 + 设计串讲 (ops-direct-invoke: DESIGN.md + PLAN.md + WALKTHROUGH.md)\n  └─ 复杂算子: TileLang 设计  (tilelang2ascend-tilelang-designer + 退化检测 + 迭代)\nPhase 4: AscendC 生成与验证    (分支)\n  ├─ 简单算子: 开发实现 + 代码审查 + 修复循环 (ops-direct-invoke: 渐进式开发 + REVIEW.md + 最多3轮修复)\n  └─ 复杂算子: TileLang→AscendC 转译 (tilelang2ascend-translator + 退化检测 + 迭代)\nPhase 5: 性能分析              (ops-profiling --quick 模式)\nPhase 6: 全量用例验证\nPhase 7: Trace 记录            (tilelang2ascend-trace-recorder)",
+      "files": 7
+    },
+    {
+      "body_sha256": "21ffefd976796597234416c5e0c5203031e7be5b5e2076174efef68e9e857ff2",
+      "example": "level_1/zhouxupeng/14_Split__sub_ascend-kernel-developer.json",
+      "exact_source_match": false,
+      "outline": "Phase 0: 参数确认 + 算子分类    (解析输入，判定简单/复杂路径)\nPhase 1: 环境准备 + 工程初始化  (复制算子文件 + 初始化 kernel 工程 + 算子注册)\nPhase 2: 测试用例精简           (ascendc-case-simplifier)\nPhase 3: 设计表达              (分支)\n  ├─ 简单算子: design.md 生成 (ascendc-design-doc-generator)\n  └─ 复杂算子: TileLang 设计  (ascendc-tilelang-designer + 退化检测 + 迭代)\nPhase 4: AscendC 生成与验证    (分支)\n  ├─ 简单算子: 模板代码生成    (ascendc-code-gen + 退化检测 + 迭代)\n  └─ 复杂算子: TileLang→AscendC 转译 (ascendc-translator + 退化检测 + 迭代)\nPhase 5: 性能分析              (ascendc-performance-analyzer)\nPhase 6: 全量用例验证\nPhase 7: Trace 记录            (ascendc-trace-recorder)",
+      "files": 7
+    },
+    {
+      "body_sha256": "fb2ebd781b795c30699f859fb9c8fdb627dcf7e696627b54459a9331bfcf839f",
+      "example": "CANN/liujinxue_0706/18_MoeComputeExpertTokens__sub_ascend-kernel-developer.json",
+      "exact_source_match": false,
+      "outline": "Phase 0: 参数确认 + 算子分类    (解析输入，判定简单/复杂路径)\nPhase 1: 环境准备 + 工程初始化  (复制算子文件 + 初始化 kernel 工程 + 算子注册)\nPhase 2: 测试用例精简           (ascendc-case-simplifier)\nPhase 3: 设计表达              (分支)\n  ├─ 简单算子: design.md 生成 (ascendc-design-doc-generator)\n  └─ 复杂算子: TileLang 设计  (ascendc-tilelang-designer + 退化检测 + 迭代)\nPhase 4: AscendC 生成与验证    (分支)\n  ├─ 简单算子: 模板代码生成    (ascendc-code-gen + 退化检测 + 迭代)\n  └─ 复杂算子: TileLang→AscendC 转译 (ascendc-translator + 退化检测 + 迭代)\nPhase 5: 性能分析              (ascendc-performance-analyzer)\nPhase 6: 全量用例验证\nPhase 7: Trace 记录            (ascendc-trace-recorder)",
+      "files": 6
+    },
+    {
+      "body_sha256": "c68112d3a53938461511403daacb5a1db75b0feaa36b364f26718898904b782a",
+      "example": "CANN/liziqi_0706/10_Ccopy__sub_ascend-kernel-developer.json",
+      "exact_source_match": false,
+      "outline": "Phase 0: 参数确认 + 算子分类    (解析输入，判定简单/复杂路径)\nPhase 1: 环境准备 + 工程初始化  (复制算子文件 + 初始化 kernel 工程 + 算子注册)\nPhase 2: 测试用例精简           (ascendc-case-simplifier)\nPhase 3: 设计表达              (分支)\n  ├─ 简单算子: design.md 生成 (ascendc-design-doc-generator)\n  └─ 复杂算子: TileLang 设计  (ascendc-tilelang-designer + 退化检测 + 迭代)\nPhase 4: AscendC 生成与验证    (分支)\n  ├─ 简单算子: 模板代码生成    (ascendc-code-gen + 退化检测 + 迭代)\n  └─ 复杂算子: TileLang→AscendC 转译 (ascendc-translator + 退化检测 + 迭代)\nPhase 5: 性能分析              (ascendc-performance-analyzer)\nPhase 6: 全量用例验证\nPhase 7: Trace 记录            (ascendc-trace-recorder)",
+      "files": 6
+    },
+    {
+      "body_sha256": "129a7ffb4c3d78c205c3b0b81da4c75b988d76a4585e7581264d3d1892007be3",
+      "example": "CANN/liujinxue_0706/19_MoeFinalizeRouting__sub_ascend-kernel-developer.json",
+      "exact_source_match": false,
+      "outline": "Phase 0: 参数确认 + 算子分类    (解析输入，判定简单/复杂路径)\nPhase 1: 环境准备 + 工程初始化  (复制算子文件 + 初始化 kernel 工程 + 算子注册)\nPhase 2: 测试用例精简           (ascendc-case-simplifier)\nPhase 3: 设计表达              (分支)\n  ├─ 简单算子: design.md 生成 (ascendc-design-doc-generator)\n  └─ 复杂算子: TileLang 设计  (ascendc-tilelang-designer + 退化检测 + 迭代)\nPhase 4: AscendC 生成与验证    (分支)\n  ├─ 简单算子: 模板代码生成    (ascendc-code-gen + 退化检测 + 迭代)\n  └─ 复杂算子: TileLang→AscendC 转译 (ascendc-translator + 退化检测 + 迭代)\nPhase 5: 性能分析              (ascendc-performance-analyzer)\nPhase 6: 全量用例验证\nPhase 7: Trace 记录            (ascendc-trace-recorder)",
+      "files": 5
+    },
+    {
+      "body_sha256": "3f42c0eb46d37a987f11677d160a831a8c1b78c6aca4581b424f7b8d91a2a1f4",
+      "example": "CANN/liziqi/52_PadV4Grad__sub_ascend-kernel-developer.json",
+      "exact_source_match": false,
+      "outline": "Phase 0: 参数确认 + 算子分类    (解析输入，判定简单/复杂路径)\nPhase 1: 环境准备 + 工程初始化  (复制算子文件 + 初始化 kernel 工程 + 算子注册)\nPhase 2: 测试用例精简           (ascendc-case-simplifier)\nPhase 3: 设计表达              (分支)\n  ├─ 简单算子: design.md 生成 (ascendc-design-doc-generator)\n  └─ 复杂算子: TileLang 设计  (ascendc-tilelang-designer + 退化检测 + 迭代)\nPhase 4: AscendC 生成与验证    (分支)\n  ├─ 简单算子: 模板代码生成    (ascendc-code-gen + 退化检测 + 迭代)\n  └─ 复杂算子: TileLang→AscendC 转译 (ascendc-translator + 退化检测 + 迭代)\nPhase 5: 性能分析              (ascendc-performance-analyzer)\nPhase 6: 全量用例验证\nPhase 7: Trace 记录            (ascendc-trace-recorder)",
+      "files": 5
+    },
+    {
+      "body_sha256": "45d6ddcce715cb6947572c300e49a013e83748b45ff0381227088095c3f27914",
+      "example": "cudaLLM/liziqi/225_div__sub_ascend-kernel-developer.json",
+      "exact_source_match": false,
+      "outline": "Phase 0: 参数确认 + 算子分类    (解析输入，判定简单/复杂路径)\nPhase 1: 环境准备 + 工程初始化  (复制算子文件 + 初始化 kernel 工程 + 算子注册)\nPhase 2: 测试用例精简           (ascendc-case-simplifier)\nPhase 3: 设计表达              (分支)\n  ├─ 简单算子: design.md 生成 (ascendc-design-doc-generator)\n  └─ 复杂算子: TileLang 设计  (ascendc-tilelang-designer + 退化检测 + 迭代)\nPhase 4: AscendC 生成与验证    (分支)\n  ├─ 简单算子: 模板代码生成    (ascendc-code-gen + 退化检测 + 迭代)\n  └─ 复杂算子: TileLang→AscendC 转译 (ascendc-translator + 退化检测 + 迭代)\nPhase 5: 性能分析              (ascendc-performance-analyzer)\nPhase 6: 全量用例验证\nPhase 7: Trace 记录            (ascendc-trace-recorder)",
+      "files": 5
+    },
+    {
+      "body_sha256": "075699bcbb18384f1b686103096e8594f62eb72f3098c3d449684d13a4488bb8",
+      "example": "cudaLLM/liziqi/66_unbind__sub_ascend-kernel-developer.json",
+      "exact_source_match": false,
+      "outline": "Phase 0: 参数确认 + 算子分类    (解析输入，判定简单/复杂路径)\nPhase 1: 环境准备 + 工程初始化  (复制算子文件 + 初始化 kernel 工程 + 算子注册)\nPhase 2: 测试用例精简           (ascendc-case-simplifier)\nPhase 3: 设计表达              (分支)\n  ├─ 简单算子: design.md 生成 (ascendc-design-doc-generator)\n  └─ 复杂算子: TileLang 设计  (ascendc-tilelang-designer + 退化检测 + 迭代)\nPhase 4: AscendC 生成与验证    (分支)\n  ├─ 简单算子: 模板代码生成    (ascendc-code-gen + 退化检测 + 迭代)\n  └─ 复杂算子: TileLang→AscendC 转译 (ascendc-translator + 退化检测 + 迭代)\nPhase 5: 性能分析              (ascendc-performance-analyzer)\nPhase 6: 全量用例验证\nPhase 7: Trace 记录            (ascendc-trace-recorder)",
+      "files": 5
+    },
+    {
+      "body_sha256": "06d0c3177054468265cd1160538102fdff354b60ffa345b4b3e75fe1192c51f5",
+      "example": "cudaLLM/tyz_0817/101_ne__sub_tilelang2ascendc-kernel-generator.raw.json",
+      "exact_source_match": false,
+      "outline": "Phase 0: 参数确认 + 算子分类    (解析输入，判定简单/复杂路径)\nPhase 1: 环境准备 + 工程初始化  (复制算子文件 + 初始化 kernel 工程 + 算子注册)\nPhase 2: 测试用例精简           (tilelang2ascend-case-simplifier)\nPhase 3: 设计表达              (分支)\n  ├─ 简单算子: 架构设计 + 设计串讲 (ops-direct-invoke: DESIGN.md + PLAN.md + WALKTHROUGH.md)\n  └─ 复杂算子: TileLang 设计  (tilelang2ascend-tilelang-designer + 退化检测 + 迭代)\nPhase 4: AscendC 生成与验证    (分支)\n  ├─ 简单算子: 开发实现 + 代码审查 + 修复循环 (ops-direct-invoke: 渐进式开发 + REVIEW.md + 最多3轮修复)\n  └─ 复杂算子: TileLang→AscendC 转译 (tilelang2ascend-translator + 退化检测 + 迭代)\nPhase 5: 性能分析              (ops-profiling --quick 模式)\nPhase 6: 全量用例验证\nPhase 7: Trace 记录            (tilelang2ascend-trace-recorder)",
+      "files": 5
+    },
+    {
+      "body_sha256": "deeb9e70425bc70b6d057add8a42e0adbb1e510fa1c246ffca5940e66e5bd078",
+      "example": "cudaLLM/tyz_0817/119_feature_alpha_dropout__sub_tilelang2ascendc-kernel-generator.raw.json",
+      "exact_source_match": false,
+      "outline": "Phase 0: 参数确认 + 算子分类    (解析输入，判定简单/复杂路径)\nPhase 1: 环境准备 + 工程初始化  (复制算子文件 + 初始化 kernel 工程 + 算子注册)\nPhase 2: 测试用例精简           (tilelang2ascend-case-simplifier)\nPhase 3: 设计表达              (分支)\n  ├─ 简单算子: 架构设计 + 设计串讲 (ops-direct-invoke: DESIGN.md + PLAN.md + WALKTHROUGH.md)\n  └─ 复杂算子: TileLang 设计  (tilelang2ascend-tilelang-designer + 退化检测 + 迭代)\nPhase 4: AscendC 生成与验证    (分支)\n  ├─ 简单算子: 开发实现 + 代码审查 + 修复循环 (ops-direct-invoke: 渐进式开发 + REVIEW.md + 最多3轮修复)\n  └─ 复杂算子: TileLang→AscendC 转译 (tilelang2ascend-translator + 退化检测 + 迭代)\nPhase 5: 性能分析              (ops-profiling --quick 模式)\nPhase 6: 全量用例验证\nPhase 7: Trace 记录            (tilelang2ascend-trace-recorder)",
+      "files": 5
+    },
+    {
+      "body_sha256": "59cfa3638941ae3d57a8c0c63b3fef25e0cbd8ab3b4c26a8682dda70069113c0",
+      "example": "cudaLLM/tyz_0817/217_bmm__sub_tilelang2ascendc-kernel-generator.raw.json",
+      "exact_source_match": false,
+      "outline": "Phase 0: 参数确认 + 算子分类    (解析输入，判定简单/复杂路径)\nPhase 1: 环境准备 + 工程初始化  (复制算子文件 + 初始化 kernel 工程 + 算子注册)\nPhase 2: 测试用例精简           (tilelang2ascend-case-simplifier)\nPhase 3: 设计表达              (分支)\n  ├─ 简单算子: 架构设计 + 设计串讲 (ops-direct-invoke: DESIGN.md + PLAN.md + WALKTHROUGH.md)\n  └─ 复杂算子: TileLang 设计  (tilelang2ascend-tilelang-designer + 退化检测 + 迭代)\nPhase 4: AscendC 生成与验证    (分支)\n  ├─ 简单算子: 开发实现 + 代码审查 + 修复循环 (ops-direct-invoke: 渐进式开发 + REVIEW.md + 最多3轮修复)\n  └─ 复杂算子: TileLang→AscendC 转译 (tilelang2ascend-translator + 退化检测 + 迭代)\nPhase 5: 性能分析              (ops-profiling --quick 模式)\nPhase 6: 全量用例验证\nPhase 7: Trace 记录            (tilelang2ascend-trace-recorder)",
+      "files": 5
+    },
+    {
+      "body_sha256": "3d258da5d1300f671fd47d02301a4e46689871bf0a867943f147c9b8a3163ace",
+      "example": "level_1/lzq/14_Split__sub_ascend-kernel-developer.json",
+      "exact_source_match": false,
+      "outline": "Phase 0: 参数确认 + 算子分类    (解析输入，判定简单/复杂路径)\nPhase 1: 环境准备 + 工程初始化  (复制算子文件 + 初始化 kernel 工程 + 算子注册)\nPhase 2: 测试用例精简           (ascendc-case-simplifier)\nPhase 3: 设计表达              (分支)\n  ├─ 简单算子: design.md 生成 (ascendc-design-doc-generator)\n  └─ 复杂算子: TileLang 设计  (ascendc-tilelang-designer + 退化检测 + 迭代)\nPhase 4: AscendC 生成与验证    (分支)\n  ├─ 简单算子: 模板代码生成    (ascendc-code-gen + 退化检测 + 迭代)\n  └─ 复杂算子: TileLang→AscendC 转译 (ascendc-translator + 退化检测 + 迭代)\nPhase 5: 性能分析              (ascendc-performance-analyzer)\nPhase 6: 全量用例验证\nPhase 7: Trace 记录            (ascendc-trace-recorder)",
+      "files": 5
+    },
+    {
+      "body_sha256": "065b883cb4a8d95904390d34a11d96a561a768910ae79f1fd4a1b8946baab1a5",
+      "example": "level_2/liziqi/13_InterleaveRope__sub_ascend-kernel-developer.json",
+      "exact_source_match": false,
+      "outline": "Phase 0: 参数确认 + 算子分类    (解析输入，判定简单/复杂路径)\nPhase 1: 环境准备 + 工程初始化  (复制算子文件 + 初始化 kernel 工程 + 算子注册)\nPhase 2: 测试用例精简           (ascendc-case-simplifier)\nPhase 3: 设计表达              (分支)\n  ├─ 简单算子: design.md 生成 (ascendc-design-doc-generator)\n  └─ 复杂算子: TileLang 设计  (ascendc-tilelang-designer + 退化检测 + 迭代)\nPhase 4: AscendC 生成与验证    (分支)\n  ├─ 简单算子: 模板代码生成    (ascendc-code-gen + 退化检测 + 迭代)\n  └─ 复杂算子: TileLang→AscendC 转译 (ascendc-translator + 退化检测 + 迭代)\nPhase 5: 性能分析              (ascendc-performance-analyzer)\nPhase 6: 全量用例验证\nPhase 7: Trace 记录            (ascendc-trace-recorder)",
+      "files": 5
+    },
+    {
+      "body_sha256": "a4227e49e2d171c8349566a91e90e15f98128e22ba7e53606bab932c08002675",
+      "example": "CANN/pass1/124_MSELossV2__sub_ascend-kernel-developer.raw.json",
+      "exact_source_match": false,
+      "outline": "Phase 0: 参数确认 + 算子分类    (解析输入，判定简单/复杂路径)\nPhase 1: 环境准备 + 工程初始化  (复制算子文件 + 初始化 kernel 工程 + 算子注册)\nPhase 2: 测试用例精简           (ascendc-case-simplifier)\nPhase 3: 设计表达              (分支)\n  ├─ 简单算子: design.md 生成 (ascendc-design-doc-generator)\n  └─ 复杂算子: TileLang 设计  (ascendc-tilelang-designer + 退化检测 + 迭代)\nPhase 4: AscendC 生成与验证    (分支)\n  ├─ 简单算子: 模板代码生成    (ascendc-code-gen + 退化检测 + 迭代)\n  └─ 复杂算子: TileLang→AscendC 转译 (ascendc-translator + 退化检测 + 迭代)\nPhase 5: 性能分析              (ascendc-performance-analyzer)\nPhase 6: 全量用例验证\nPhase 7: Trace 记录            (ascendc-trace-recorder)",
+      "files": 4
+    },
+    {
+      "body_sha256": "cf0a41e8e74882a05f1f3ad91241f92bb4141d0b03c2ae86f248d2f734c4e509",
+      "example": "cudaLLM/tyz_0817/289_MultiLabelSoftMarginLoss__sub_ascend-kernel-developer.raw.json",
+      "exact_source_match": false,
+      "outline": "Phase 0: 参数确认 + 算子分类    (解析输入，判定简单/复杂路径)\nPhase 1: 环境准备 + 工程初始化  (复制算子文件 + 初始化 kernel 工程 + 算子注册)\nPhase 2: 测试用例精简           (ascendc-case-simplifier)\nPhase 3: 设计表达              (分支)\n  ├─ 简单算子: design.md 生成 (ascendc-design-doc-generator)\n  └─ 复杂算子: TileLang 设计  (ascendc-tilelang-designer + 退化检测 + 迭代)\nPhase 4: AscendC 生成与验证    (分支)\n  ├─ 简单算子: 模板代码生成    (ascendc-code-gen + 退化检测 + 迭代)\n  └─ 复杂算子: TileLang→AscendC 转译 (ascendc-translator + 退化检测 + 迭代)\nPhase 5: 性能分析              (ascendc-performance-analyzer)\nPhase 6: 全量用例验证\nPhase 7: Trace 记录            (ascendc-trace-recorder)",
+      "files": 4
+    },
+    {
+      "body_sha256": "25e970d3b90b74c57c5b47ae5d0a772f2e672be93b07f220bc4e0fefb121b80b",
+      "example": "level_1/lzq/21_Scatter__sub_ascend-kernel-developer.json",
+      "exact_source_match": false,
+      "outline": "Phase 0: 参数确认 + 算子分类    (解析输入，判定简单/复杂路径)\nPhase 1: 环境准备 + 工程初始化  (复制算子文件 + 初始化 kernel 工程 + 算子注册)\nPhase 2: 测试用例精简           (ascendc-case-simplifier)\nPhase 3: 设计表达              (分支)\n  ├─ 简单算子: design.md 生成 (ascendc-design-doc-generator)\n  └─ 复杂算子: TileLang 设计  (ascendc-tilelang-designer + 退化检测 + 迭代)\nPhase 4: AscendC 生成与验证    (分支)\n  ├─ 简单算子: 模板代码生成    (ascendc-code-gen + 退化检测 + 迭代)\n  └─ 复杂算子: TileLang→AscendC 转译 (ascendc-translator + 退化检测 + 迭代)\nPhase 5: 性能分析              (ascendc-performance-analyzer)\nPhase 6: 全量用例验证\nPhase 7: Trace 记录            (ascendc-trace-recorder)",
+      "files": 4
+    },
+    {
+      "body_sha256": "5c2e232f95cd247fb051a0408d66ec41725e84452161902d8beaaa24f594fda6",
+      "example": "level_1/lzq/3_Add__sub_ascend-kernel-developer.json",
+      "exact_source_match": false,
+      "outline": "Phase 0: 参数确认 + 算子分类    (解析输入，判定简单/复杂路径)\nPhase 1: 环境准备 + 工程初始化  (复制算子文件 + 初始化 kernel 工程 + 算子注册)\nPhase 2: 测试用例精简           (ascendc-case-simplifier)\nPhase 3: 设计表达              (分支)\n  ├─ 简单算子: design.md 生成 (ascendc-design-doc-generator)\n  └─ 复杂算子: TileLang 设计  (ascendc-tilelang-designer + 退化检测 + 迭代)\nPhase 4: AscendC 生成与验证    (分支)\n  ├─ 简单算子: 模板代码生成    (ascendc-code-gen + 退化检测 + 迭代)\n  └─ 复杂算子: TileLang→AscendC 转译 (ascendc-translator + 退化检测 + 迭代)\nPhase 5: 性能分析              (ascendc-performance-analyzer)\nPhase 6: 全量用例验证\nPhase 7: Trace 记录            (ascendc-trace-recorder)",
+      "files": 4
+    },
+    {
+      "body_sha256": "6a2153d5e3b95706bacd09b6a0fa16d85be95f1eaa8b8ce12c50099edd4ea8f6",
+      "example": "level_2/liujinxue/16_Batched2DRopePositionEncodingBackward__sub_ascend-kernel-developer.json",
+      "exact_source_match": false,
+      "outline": "Phase 0: 参数确认 + 算子分类    (解析输入，判定简单/复杂路径)\nPhase 1: 环境准备 + 工程初始化  (复制算子文件 + 初始化 kernel 工程 + 算子注册)\nPhase 2: 测试用例精简           (ascendc-case-simplifier)\nPhase 3: 设计表达              (分支)\n  ├─ 简单算子: design.md 生成 (ascendc-design-doc-generator)\n  └─ 复杂算子: TileLang 设计  (ascendc-tilelang-designer + 退化检测 + 迭代)\nPhase 4: AscendC 生成与验证    (分支)\n  ├─ 简单算子: 模板代码生成    (ascendc-code-gen + 退化检测 + 迭代)\n  └─ 复杂算子: TileLang→AscendC 转译 (ascendc-translator + 退化检测 + 迭代)\nPhase 5: 性能分析              (ascendc-performance-analyzer)\nPhase 6: 全量用例验证\nPhase 7: Trace 记录            (ascendc-trace-recorder)",
+      "files": 4
+    },
+    {
+      "body_sha256": "2702416ea0c26281756e173865c472e435b34931900a608b56d494021e3226ce",
+      "example": "level_2/第一批收集/12_KvRmsnormRopeCache__sub_ascend-kernel-developer.raw.json",
+      "exact_source_match": false,
+      "outline": "Phase 0: 参数确认 + 算子分类    (解析输入，判定简单/复杂路径)\nPhase 1: 环境准备 + 工程初始化  (复制算子文件 + 初始化 kernel 工程 + 算子注册)\nPhase 2: 测试用例精简           (ascendc-case-simplifier)\nPhase 3: 设计表达              (分支)\n  ├─ 简单算子: design.md 生成 (ascendc-design-doc-generator)\n  └─ 复杂算子: TileLang 设计  (ascendc-tilelang-designer + 退化检测 + 迭代)\nPhase 4: AscendC 生成与验证    (分支)\n  ├─ 简单算子: 模板代码生成    (ascendc-code-gen + 退化检测 + 迭代)\n  └─ 复杂算子: TileLang→AscendC 转译 (ascendc-translator + 退化检测 + 迭代)\nPhase 5: 性能分析              (ascendc-performance-analyzer)\nPhase 6: 全量用例验证\nPhase 7: Trace 记录            (ascendc-trace-recorder)",
+      "files": 4
+    },
+    {
+      "body_sha256": "be81bd2f0cff26c7dd48016e248a6e2caa83c87b5b5b8c54de9625f4470e56d9",
+      "example": "CANN/pass1/67_Sqrt__sub_ascend-kernel-developer.raw.json",
+      "exact_source_match": false,
+      "outline": "Phase 0: 参数确认 + 算子分类    (解析输入，判定简单/复杂路径)\nPhase 1: 环境准备 + 工程初始化  (复制算子文件 + 初始化 kernel 工程 + 算子注册)\nPhase 2: 测试用例精简           (ascendc-case-simplifier)\nPhase 3: 设计表达              (分支)\n  ├─ 简单算子: design.md 生成 (ascendc-design-doc-generator)\n  └─ 复杂算子: TileLang 设计  (ascendc-tilelang-designer + 退化检测 + 迭代)\nPhase 4: AscendC 生成与验证    (分支)\n  ├─ 简单算子: 模板代码生成    (ascendc-code-gen + 退化检测 + 迭代)\n  └─ 复杂算子: TileLang→AscendC 转译 (ascendc-translator + 退化检测 + 迭代)\nPhase 5: 性能分析              (ascendc-performance-analyzer)\nPhase 6: 全量用例验证\nPhase 7: Trace 记录            (ascendc-trace-recorder)",
+      "files": 3
+    },
+    {
+      "body_sha256": "c0ef24a05f86ae08c0f99fa07a28f71612f3cecd16ca07ac5a2bae7a8265dd3b",
+      "example": "cudaLLM/liziqi/212_deg2rad__sub_ascend-kernel-developer.raw.json",
+      "exact_source_match": false,
+      "outline": "Phase 0: 参数确认 + 算子分类    (解析输入，判定简单/复杂路径)\nPhase 1: 环境准备 + 工程初始化  (复制算子文件 + 初始化 kernel 工程 + 算子注册)\nPhase 2: 测试用例精简           (ascendc-case-simplifier)\nPhase 3: 设计表达              (分支)\n  ├─ 简单算子: design.md 生成 (ascendc-design-doc-generator)\n  └─ 复杂算子: TileLang 设计  (ascendc-tilelang-designer + 退化检测 + 迭代)\nPhase 4: AscendC 生成与验证    (分支)\n  ├─ 简单算子: 模板代码生成    (ascendc-code-gen + 退化检测 + 迭代)\n  └─ 复杂算子: TileLang→AscendC 转译 (ascendc-translator + 退化检测 + 迭代)\nPhase 5: 性能分析              (ascendc-performance-analyzer)\nPhase 6: 全量用例验证\nPhase 7: Trace 记录            (ascendc-trace-recorder)",
+      "files": 3
+    },
+    {
+      "body_sha256": "1ed85de8fe896dd34d24d7aacd177fd98fce1bd8f03bfcb71d8f70124ff6da6c",
+      "example": "cudaLLM/tyz_0817/135_ormqr__sub_ascend-kernel-developer.raw.json",
+      "exact_source_match": false,
+      "outline": "Phase 0: 参数确认 + 算子分类    (解析输入，判定简单/复杂路径)\nPhase 1: 环境准备 + 工程初始化  (复制算子文件 + 初始化 kernel 工程 + 算子注册)\nPhase 2: 测试用例精简           (ascendc-case-simplifier)\nPhase 3: 设计表达              (分支)\n  ├─ 简单算子: design.md 生成 (ascendc-design-doc-generator)\n  └─ 复杂算子: TileLang 设计  (ascendc-tilelang-designer + 退化检测 + 迭代)\nPhase 4: AscendC 生成与验证    (分支)\n  ├─ 简单算子: 模板代码生成    (ascendc-code-gen + 退化检测 + 迭代)\n  └─ 复杂算子: TileLang→AscendC 转译 (ascendc-translator + 退化检测 + 迭代)\nPhase 5: 性能分析              (ascendc-performance-analyzer)\nPhase 6: 全量用例验证\nPhase 7: Trace 记录            (ascendc-trace-recorder)",
+      "files": 3
+    },
+    {
+      "body_sha256": "e2caf952e0cb27f0fc38bac921caf87edfe767b1c2a1328219059952aba07d39",
+      "example": "cudaLLM/tyz_0817/159_GRU__sub_tilelang2ascendc-kernel-generator.raw.json",
+      "exact_source_match": false,
+      "outline": "Phase 0: 参数确认 + 算子分类    (解析输入，判定简单/复杂路径)\nPhase 1: 环境准备 + 工程初始化  (复制算子文件 + 初始化 kernel 工程 + 算子注册)\nPhase 2: 测试用例精简           (tilelang2ascend-case-simplifier)\nPhase 3: 设计表达              (分支)\n  ├─ 简单算子: 架构设计 + 设计串讲 (ops-direct-invoke: DESIGN.md + PLAN.md + WALKTHROUGH.md)\n  └─ 复杂算子: TileLang 设计  (tilelang2ascend-tilelang-designer + 退化检测 + 迭代)\nPhase 4: AscendC 生成与验证    (分支)\n  ├─ 简单算子: 开发实现 + 代码审查 + 修复循环 (ops-direct-invoke: 渐进式开发 + REVIEW.md + 最多3轮修复)\n  └─ 复杂算子: TileLang→AscendC 转译 (tilelang2ascend-translator + 退化检测 + 迭代)\nPhase 5: 性能分析              (ops-profiling --quick 模式)\nPhase 6: 全量用例验证\nPhase 7: Trace 记录            (tilelang2ascend-trace-recorder)",
+      "files": 3
+    },
+    {
+      "body_sha256": "a2ee63f972ff518b3967630f9cac5abb07a0d0087c189a17967ccc6ab47c4dec",
+      "example": "cudaLLM/tyz_0817/35_nanmedian__sub_ascend-kernel-developer.raw.json",
+      "exact_source_match": false,
+      "outline": "Phase 0: 参数确认 + 算子分类    (解析输入，判定简单/复杂路径)\nPhase 1: 环境准备 + 工程初始化  (复制算子文件 + 初始化 kernel 工程 + 算子注册)\nPhase 2: 测试用例精简           (ascendc-case-simplifier)\nPhase 3: 设计表达              (分支)\n  ├─ 简单算子: design.md 生成 (ascendc-design-doc-generator)\n  └─ 复杂算子: TileLang 设计  (ascendc-tilelang-designer + 退化检测 + 迭代)\nPhase 4: AscendC 生成与验证    (分支)\n  ├─ 简单算子: 模板代码生成    (ascendc-code-gen + 退化检测 + 迭代)\n  └─ 复杂算子: TileLang→AscendC 转译 (ascendc-translator + 退化检测 + 迭代)\nPhase 5: 性能分析              (ascendc-performance-analyzer)\nPhase 6: 全量用例验证\nPhase 7: Trace 记录            (ascendc-trace-recorder)",
+      "files": 3
+    },
+    {
+      "body_sha256": "05de672f7cdf2b1b755cabf2dd06b814d130afb4d60f23e9bc5a73e603c148b2",
+      "example": "cudaLLM/tyz_0817/75_median__sub_ascend-kernel-developer.raw.json",
+      "exact_source_match": false,
+      "outline": "Phase 0: 参数确认 + 算子分类    (解析输入，判定简单/复杂路径)\nPhase 1: 环境准备 + 工程初始化  (复制算子文件 + 初始化 kernel 工程 + 算子注册)\nPhase 2: 测试用例精简           (ascendc-case-simplifier)\nPhase 3: 设计表达              (分支)\n  ├─ 简单算子: design.md 生成 (ascendc-design-doc-generator)\n  └─ 复杂算子: TileLang 设计  (ascendc-tilelang-designer + 退化检测 + 迭代)\nPhase 4: AscendC 生成与验证    (分支)\n  ├─ 简单算子: 模板代码生成    (ascendc-code-gen + 退化检测 + 迭代)\n  └─ 复杂算子: TileLang→AscendC 转译 (ascendc-translator + 退化检测 + 迭代)\nPhase 5: 性能分析              (ascendc-performance-analyzer)\nPhase 6: 全量用例验证\nPhase 7: Trace 记录            (ascendc-trace-recorder)",
+      "files": 3
+    },
+    {
+      "body_sha256": "4972465fcfa4017382d4cd32b47568100ed187c1cf0221391a0051de6992b4f2",
+      "example": "level_1/lvyou/20_Gather__sub_ascend-kernel-developer.json",
+      "exact_source_match": false,
+      "outline": "Phase 0: 参数确认 + 算子分类    (解析输入，判定简单/复杂路径)\nPhase 1: 环境准备 + 工程初始化  (复制算子文件 + 初始化 kernel 工程 + 算子注册)\nPhase 2: 测试用例精简           (ascendc-case-simplifier)\nPhase 3: 设计表达              (分支)\n  ├─ 简单算子: design.md 生成 (ascendc-design-doc-generator)\n  └─ 复杂算子: TileLang 设计  (ascendc-tilelang-designer + 退化检测 + 迭代)\nPhase 4: AscendC 生成与验证    (分支)\n  ├─ 简单算子: 模板代码生成    (ascendc-code-gen + 退化检测 + 迭代)\n  └─ 复杂算子: TileLang→AscendC 转译 (ascendc-translator + 退化检测 + 迭代)\nPhase 5: 性能分析              (ascendc-performance-analyzer)\nPhase 6: 全量用例验证\nPhase 7: Trace 记录            (ascendc-trace-recorder)",
+      "files": 3
+    },
+    {
+      "body_sha256": "e89df24e2efa889dbbc892bd63103a73689da69d69401d81198b1434a001c2a8",
+      "example": "level_1/tianyazhang/12_Permute__sub_ascend-kernel-developer.raw.json",
+      "exact_source_match": false,
+      "outline": "Phase 0: 参数确认 + 算子分类    (解析输入，判定简单/复杂路径)\nPhase 1: 环境准备 + 工程初始化  (复制算子文件 + 初始化 kernel 工程 + 算子注册)\nPhase 2: 测试用例精简           (ascendc-case-simplifier)\nPhase 3: 设计表达              (分支)\n  ├─ 简单算子: design.md 生成 (ascendc-design-doc-generator)\n  └─ 复杂算子: TileLang 设计  (ascendc-tilelang-designer + 退化检测 + 迭代)\nPhase 4: AscendC 生成与验证    (分支)\n  ├─ 简单算子: 模板代码生成    (ascendc-code-gen + 退化检测 + 迭代)\n  └─ 复杂算子: TileLang→AscendC 转译 (ascendc-translator + 退化检测 + 迭代)\nPhase 5: 性能分析              (ascendc-performance-analyzer)\nPhase 6: 全量用例验证\nPhase 7: Trace 记录            (ascendc-trace-recorder)",
+      "files": 3
+    },
+    {
+      "body_sha256": "c03d51a5bdca9408e5b7050968a71bc2cb4dd718ceaf81052a8e0751a6cdc8a1",
+      "example": "level_2/liziqi/12_KvRmsnormRopeCache__sub_ascend-kernel-developer.json",
+      "exact_source_match": false,
+      "outline": "Phase 0: 参数确认 + 算子分类    (解析输入，判定简单/复杂路径)\nPhase 1: 环境准备 + 工程初始化  (复制算子文件 + 初始化 kernel 工程 + 算子注册)\nPhase 2: 测试用例精简           (ascendc-case-simplifier)\nPhase 3: 设计表达              (分支)\n  ├─ 简单算子: design.md 生成 (ascendc-design-doc-generator)\n  └─ 复杂算子: TileLang 设计  (ascendc-tilelang-designer + 退化检测 + 迭代)\nPhase 4: AscendC 生成与验证    (分支)\n  ├─ 简单算子: 模板代码生成    (ascendc-code-gen + 退化检测 + 迭代)\n  └─ 复杂算子: TileLang→AscendC 转译 (ascendc-translator + 退化检测 + 迭代)\nPhase 5: 性能分析              (ascendc-performance-analyzer)\nPhase 6: 全量用例验证\nPhase 7: Trace 记录            (ascendc-trace-recorder)",
+      "files": 3
+    },
+    {
+      "body_sha256": "e97e9ee577fe98523070c517c9ee09385007008c61af5499ff53e5bfb30d9392",
+      "example": "level_2/liziqi/17_EmbeddingWithInitialLayernormBackward__sub_ascend-kernel-developer.json",
+      "exact_source_match": false,
+      "outline": "Phase 0: 参数确认 + 算子分类    (解析输入，判定简单/复杂路径)\nPhase 1: 环境准备 + 工程初始化  (复制算子文件 + 初始化 kernel 工程 + 算子注册)\nPhase 2: 测试用例精简           (ascendc-case-simplifier)\nPhase 3: 设计表达              (分支)\n  ├─ 简单算子: design.md 生成 (ascendc-design-doc-generator)\n  └─ 复杂算子: TileLang 设计  (ascendc-tilelang-designer + 退化检测 + 迭代)\nPhase 4: AscendC 生成与验证    (分支)\n  ├─ 简单算子: 模板代码生成    (ascendc-code-gen + 退化检测 + 迭代)\n  └─ 复杂算子: TileLang→AscendC 转译 (ascendc-translator + 退化检测 + 迭代)\nPhase 5: 性能分析              (ascendc-performance-analyzer)\nPhase 6: 全量用例验证\nPhase 7: Trace 记录            (ascendc-trace-recorder)",
+      "files": 3
+    },
+    {
+      "body_sha256": "0350ed5c70622a98883ffa386a0d335a23577ea821a9390f0287cb03217861a5",
+      "example": "level_2/第一批收集/13_InterleaveRope__sub_ascend-kernel-developer.raw.json",
+      "exact_source_match": false,
+      "outline": "Phase 0: 参数确认 + 算子分类    (解析输入，判定简单/复杂路径)\nPhase 1: 环境准备 + 工程初始化  (复制算子文件 + 初始化 kernel 工程 + 算子注册)\nPhase 2: 测试用例精简           (ascendc-case-simplifier)\nPhase 3: 设计表达              (分支)\n  ├─ 简单算子: design.md 生成 (ascendc-design-doc-generator)\n  └─ 复杂算子: TileLang 设计  (ascendc-tilelang-designer + 退化检测 + 迭代)\nPhase 4: AscendC 生成与验证    (分支)\n  ├─ 简单算子: 模板代码生成    (ascendc-code-gen + 退化检测 + 迭代)\n  └─ 复杂算子: TileLang→AscendC 转译 (ascendc-translator + 退化检测 + 迭代)\nPhase 5: 性能分析              (ascendc-performance-analyzer)\nPhase 6: 全量用例验证\nPhase 7: Trace 记录            (ascendc-trace-recorder)",
+      "files": 3
+    },
+    {
+      "body_sha256": "e4416b40cc18538ddff39511bedde863489bafd6d3d60bb52287c4363183bb92",
+      "example": "CANN/liujinxue_0706/31_MoeTokenPermuteWithEpGrad__sub_ascend-kernel-developer.json",
+      "exact_source_match": false,
+      "outline": "Phase 0: 参数确认 + 算子分类    (解析输入，判定简单/复杂路径)\nPhase 1: 环境准备 + 工程初始化  (复制算子文件 + 初始化 kernel 工程 + 算子注册)\nPhase 2: 测试用例精简           (ascendc-case-simplifier)\nPhase 3: 设计表达              (分支)\n  ├─ 简单算子: design.md 生成 (ascendc-design-doc-generator)\n  └─ 复杂算子: TileLang 设计  (ascendc-tilelang-designer + 退化检测 + 迭代)\nPhase 4: AscendC 生成与验证    (分支)\n  ├─ 简单算子: 模板代码生成    (ascendc-code-gen + 退化检测 + 迭代)\n  └─ 复杂算子: TileLang→AscendC 转译 (ascendc-translator + 退化检测 + 迭代)\nPhase 5: 性能分析              (ascendc-performance-analyzer)\nPhase 6: 全量用例验证\nPhase 7: Trace 记录            (ascendc-trace-recorder)",
+      "files": 2
+    },
+    {
+      "body_sha256": "5048903c88b7000b5eb2973005cbf587ba6e8790f29f101033a16353134cd343",
+      "example": "CANN/pass1/68_Sscal__sub_ascend-kernel-developer.raw.json",
+      "exact_source_match": false,
+      "outline": "Phase 0: 参数确认 + 算子分类    (解析输入，判定简单/复杂路径)\nPhase 1: 环境准备 + 工程初始化  (复制算子文件 + 初始化 kernel 工程 + 算子注册)\nPhase 2: 测试用例精简           (ascendc-case-simplifier)\nPhase 3: 设计表达              (分支)\n  ├─ 简单算子: design.md 生成 (ascendc-design-doc-generator)\n  └─ 复杂算子: TileLang 设计  (ascendc-tilelang-designer + 退化检测 + 迭代)\nPhase 4: AscendC 生成与验证    (分支)\n  ├─ 简单算子: 模板代码生成    (ascendc-code-gen + 退化检测 + 迭代)\n  └─ 复杂算子: TileLang→AscendC 转译 (ascendc-translator + 退化检测 + 迭代)\nPhase 5: 性能分析              (ascendc-performance-analyzer)\nPhase 6: 全量用例验证\nPhase 7: Trace 记录            (ascendc-trace-recorder)",
+      "files": 2
+    },
+    {
+      "body_sha256": "78b1d6534be0aaf6dc3334625b6b3ec30b93185b20d56f6f847f4be92b80e5a4",
+      "example": "CANN/pass1/84_ForeachPowList__sub_ascend-kernel-developer.raw.json",
+      "exact_source_match": false,
+      "outline": "Phase 0: 参数确认 + 算子分类    (解析输入，判定简单/复杂路径)\nPhase 1: 环境准备 + 工程初始化  (复制算子文件 + 初始化 kernel 工程 + 算子注册)\nPhase 2: 测试用例精简           (ascendc-case-simplifier)\nPhase 3: 设计表达              (分支)\n  ├─ 简单算子: design.md 生成 (ascendc-design-doc-generator)\n  └─ 复杂算子: TileLang 设计  (ascendc-tilelang-designer + 退化检测 + 迭代)\nPhase 4: AscendC 生成与验证    (分支)\n  ├─ 简单算子: 模板代码生成    (ascendc-code-gen + 退化检测 + 迭代)\n  └─ 复杂算子: TileLang→AscendC 转译 (ascendc-translator + 退化检测 + 迭代)\nPhase 5: 性能分析              (ascendc-performance-analyzer)\nPhase 6: 全量用例验证\nPhase 7: Trace 记录            (ascendc-trace-recorder)",
+      "files": 2
+    },
+    {
+      "body_sha256": "75d3bb13ba56240bb0a1d60c04b42d5d042b065fc3e8612b24b2c7432dbc2794",
+      "example": "cudaLLM/liziqi/1_diagonal__sub_ascend-kernel-developer.raw.json",
+      "exact_source_match": false,
+      "outline": "Phase 0: 参数确认 + 算子分类    (解析输入，判定简单/复杂路径)\nPhase 1: 环境准备 + 工程初始化  (复制算子文件 + 初始化 kernel 工程 + 算子注册)\nPhase 2: 测试用例精简           (ascendc-case-simplifier)\nPhase 3: 设计表达              (分支)\n  ├─ 简单算子: design.md 生成 (ascendc-design-doc-generator)\n  └─ 复杂算子: TileLang 设计  (ascendc-tilelang-designer + 退化检测 + 迭代)\nPhase 4: AscendC 生成与验证    (分支)\n  ├─ 简单算子: 模板代码生成    (ascendc-code-gen + 退化检测 + 迭代)\n  └─ 复杂算子: TileLang→AscendC 转译 (ascendc-translator + 退化检测 + 迭代)\nPhase 5: 性能分析              (ascendc-performance-analyzer)\nPhase 6: 全量用例验证\nPhase 7: Trace 记录            (ascendc-trace-recorder)",
+      "files": 2
+    },
+    {
+      "body_sha256": "beb6bf201d3cc59366687fb8ec2ff3d1db6950e72fce312b72f3f12056d30735",
+      "example": "cudaLLM/liziqi/272_fmax__sub_ascend-kernel-developer.raw.json",
+      "exact_source_match": false,
+      "outline": "Phase 0: 参数确认 + 算子分类    (解析输入，判定简单/复杂路径)\nPhase 1: 环境准备 + 工程初始化  (复制算子文件 + 初始化 kernel 工程 + 算子注册)\nPhase 2: 测试用例精简           (ascendc-case-simplifier)\nPhase 3: 设计表达              (分支)\n  ├─ 简单算子: design.md 生成 (ascendc-design-doc-generator)\n  └─ 复杂算子: TileLang 设计  (ascendc-tilelang-designer + 退化检测 + 迭代)\nPhase 4: AscendC 生成与验证    (分支)\n  ├─ 简单算子: 模板代码生成    (ascendc-code-gen + 退化检测 + 迭代)\n  └─ 复杂算子: TileLang→AscendC 转译 (ascendc-translator + 退化检测 + 迭代)\nPhase 5: 性能分析              (ascendc-performance-analyzer)\nPhase 6: 全量用例验证\nPhase 7: Trace 记录            (ascendc-trace-recorder)",
+      "files": 2
+    },
+    {
+      "body_sha256": "650a57e7a7fa721f1d90c614d49428e3195daa61f35de14c140d8bb29751a46f",
+      "example": "cudaLLM/liziqi/293_soft_margin_loss__sub_ascend-kernel-developer.json",
+      "exact_source_match": false,
+      "outline": "Phase 0: 参数确认 + 算子分类    (解析输入，判定简单/复杂路径)\nPhase 1: 环境准备 + 工程初始化  (复制算子文件 + 初始化 kernel 工程 + 算子注册)\nPhase 2: 测试用例精简           (ascendc-case-simplifier)\nPhase 3: 设计表达              (分支)\n  ├─ 简单算子: design.md 生成 (ascendc-design-doc-generator)\n  └─ 复杂算子: TileLang 设计  (ascendc-tilelang-designer + 退化检测 + 迭代)\nPhase 4: AscendC 生成与验证    (分支)\n  ├─ 简单算子: 模板代码生成    (ascendc-code-gen + 退化检测 + 迭代)\n  └─ 复杂算子: TileLang→AscendC 转译 (ascendc-translator + 退化检测 + 迭代)\nPhase 5: 性能分析              (ascendc-performance-analyzer)\nPhase 6: 全量用例验证\nPhase 7: Trace 记录            (ascendc-trace-recorder)",
+      "files": 2
+    },
+    {
+      "body_sha256": "672759f0f454c479e971064f5a0025a498248de64b9ad7e6b0311b8531f98c87",
+      "example": "cudaLLM/liziqi/39_multi_margin_loss__sub_ascend-kernel-developer.raw.json",
+      "exact_source_match": false,
+      "outline": "Phase 0: 参数确认 + 算子分类    (解析输入，判定简单/复杂路径)\nPhase 1: 环境准备 + 工程初始化  (复制算子文件 + 初始化 kernel 工程 + 算子注册)\nPhase 2: 测试用例精简           (ascendc-case-simplifier)\nPhase 3: 设计表达              (分支)\n  ├─ 简单算子: design.md 生成 (ascendc-design-doc-generator)\n  └─ 复杂算子: TileLang 设计  (ascendc-tilelang-designer + 退化检测 + 迭代)\nPhase 4: AscendC 生成与验证    (分支)\n  ├─ 简单算子: 模板代码生成    (ascendc-code-gen + 退化检测 + 迭代)\n  └─ 复杂算子: TileLang→AscendC 转译 (ascendc-translator + 退化检测 + 迭代)\nPhase 5: 性能分析              (ascendc-performance-analyzer)\nPhase 6: 全量用例验证\nPhase 7: Trace 记录            (ascendc-trace-recorder)",
+      "files": 2
+    },
+    {
+      "body_sha256": "2434b2a9eaaf768253556d4452bc124b4384190ef9a24dcfbde5cf1928158b59",
+      "example": "cudaLLM/liziqi/67_einsum__sub_ascend-kernel-developer.raw.json",
+      "exact_source_match": false,
+      "outline": "Phase 0: 参数确认 + 算子分类    (解析输入，判定简单/复杂路径)\nPhase 1: 环境准备 + 工程初始化  (复制算子文件 + 初始化 kernel 工程 + 算子注册)\nPhase 2: 测试用例精简           (ascendc-case-simplifier)\nPhase 3: 设计表达              (分支)\n  ├─ 简单算子: design.md 生成 (ascendc-design-doc-generator)\n  └─ 复杂算子: TileLang 设计  (ascendc-tilelang-designer + 退化检测 + 迭代)\nPhase 4: AscendC 生成与验证    (分支)\n  ├─ 简单算子: 模板代码生成    (ascendc-code-gen + 退化检测 + 迭代)\n  └─ 复杂算子: TileLang→AscendC 转译 (ascendc-translator + 退化检测 + 迭代)\nPhase 5: 性能分析              (ascendc-performance-analyzer)\nPhase 6: 全量用例验证\nPhase 7: Trace 记录            (ascendc-trace-recorder)",
+      "files": 2
+    },
+    {
+      "body_sha256": "03e64435c17859be0aa9e78d1f0cb2d73a12bc6bd84c587ce792c9e41e7c1ae9",
+      "example": "cudaLLM/tyz_0817/11_local_response_norm__sub_tilelang2ascendc-kernel-generator.raw.json",
+      "exact_source_match": false,
+      "outline": "Phase 0: 参数确认 + 算子分类    (解析输入，判定简单/复杂路径)\nPhase 1: 环境准备 + 工程初始化  (复制算子文件 + 初始化 kernel 工程 + 算子注册)\nPhase 2: 测试用例精简           (tilelang2ascend-case-simplifier)\nPhase 3: 设计表达              (分支)\n  ├─ 简单算子: 架构设计 + 设计串讲 (ops-direct-invoke: DESIGN.md + PLAN.md + WALKTHROUGH.md)\n  └─ 复杂算子: TileLang 设计  (tilelang2ascend-tilelang-designer + 退化检测 + 迭代)\nPhase 4: AscendC 生成与验证    (分支)\n  ├─ 简单算子: 开发实现 + 代码审查 + 修复循环 (ops-direct-invoke: 渐进式开发 + REVIEW.md + 最多3轮修复)\n  └─ 复杂算子: TileLang→AscendC 转译 (tilelang2ascend-translator + 退化检测 + 迭代)\nPhase 5: 性能分析              (ops-profiling --quick 模式)\nPhase 6: 全量用例验证\nPhase 7: Trace 记录            (tilelang2ascend-trace-recorder)",
+      "files": 2
+    },
+    {
+      "body_sha256": "43f9d62afff8c5b6531b7f28ca3777bf64836d0031e35fc5e1c987673f2ba82a",
+      "example": "cudaLLM/tyz_0817/150_normal__sub_tilelang2ascendc-kernel-generator.raw.json",
+      "exact_source_match": false,
+      "outline": "Phase 0: 参数确认 + 算子分类    (解析输入，判定简单/复杂路径)\nPhase 1: 环境准备 + 工程初始化  (复制算子文件 + 初始化 kernel 工程 + 算子注册)\nPhase 2: 测试用例精简           (tilelang2ascend-case-simplifier)\nPhase 3: 设计表达              (分支)\n  ├─ 简单算子: 架构设计 + 设计串讲 (ops-direct-invoke: DESIGN.md + PLAN.md + WALKTHROUGH.md)\n  └─ 复杂算子: TileLang 设计  (tilelang2ascend-tilelang-designer + 退化检测 + 迭代)\nPhase 4: AscendC 生成与验证    (分支)\n  ├─ 简单算子: 开发实现 + 代码审查 + 修复循环 (ops-direct-invoke: 渐进式开发 + REVIEW.md + 最多3轮修复)\n  └─ 复杂算子: TileLang→AscendC 转译 (tilelang2ascend-translator + 退化检测 + 迭代)\nPhase 5: 性能分析              (ops-profiling --quick 模式)\nPhase 6: 全量用例验证\nPhase 7: Trace 记录            (tilelang2ascend-trace-recorder)",
+      "files": 2
+    },
+    {
+      "body_sha256": "c374e335073151bcfaa564e7a1045c6195b7d432f11c55fa8051444b47b12d38",
+      "example": "cudaLLM/tyz_0817/181_einsum__sub_tilelang2ascendc-kernel-generator.raw.json",
+      "exact_source_match": false,
+      "outline": "Phase 0: 参数确认 + 算子分类    (解析输入，判定简单/复杂路径)\nPhase 1: 环境准备 + 工程初始化  (复制算子文件 + 初始化 kernel 工程 + 算子注册)\nPhase 2: 测试用例精简           (tilelang2ascend-case-simplifier)\nPhase 3: 设计表达              (分支)\n  ├─ 简单算子: 架构设计 + 设计串讲 (ops-direct-invoke: DESIGN.md + PLAN.md + WALKTHROUGH.md)\n  └─ 复杂算子: TileLang 设计  (tilelang2ascend-tilelang-designer + 退化检测 + 迭代)\nPhase 4: AscendC 生成与验证    (分支)\n  ├─ 简单算子: 开发实现 + 代码审查 + 修复循环 (ops-direct-invoke: 渐进式开发 + REVIEW.md + 最多3轮修复)\n  └─ 复杂算子: TileLang→AscendC 转译 (tilelang2ascend-translator + 退化检测 + 迭代)\nPhase 5: 性能分析              (ops-profiling --quick 模式)\nPhase 6: 全量用例验证\nPhase 7: Trace 记录            (tilelang2ascend-trace-recorder)",
+      "files": 2
+    },
+    {
+      "body_sha256": "dbeefe7b85aa1478e65eefe5db4883d756f2c4bfd7e78c974217b24102c4ac2a",
+      "example": "cudaLLM/tyz_0817/237_multilabel_margin_loss__sub_tilelang2ascendc-kernel-generator.raw.json",
+      "exact_source_match": false,
+      "outline": "Phase 0: 参数确认 + 算子分类    (解析输入，判定简单/复杂路径)\nPhase 1: 环境准备 + 工程初始化  (复制算子文件 + 初始化 kernel 工程 + 算子注册)\nPhase 2: 测试用例精简           (tilelang2ascend-case-simplifier)\nPhase 3: 设计表达              (分支)\n  ├─ 简单算子: 架构设计 + 设计串讲 (ops-direct-invoke: DESIGN.md + PLAN.md + WALKTHROUGH.md)\n  └─ 复杂算子: TileLang 设计  (tilelang2ascend-tilelang-designer + 退化检测 + 迭代)\nPhase 4: AscendC 生成与验证    (分支)\n  ├─ 简单算子: 开发实现 + 代码审查 + 修复循环 (ops-direct-invoke: 渐进式开发 + REVIEW.md + 最多3轮修复)\n  └─ 复杂算子: TileLang→AscendC 转译 (tilelang2ascend-translator + 退化检测 + 迭代)\nPhase 5: 性能分析              (ops-profiling --quick 模式)\nPhase 6: 全量用例验证\nPhase 7: Trace 记录            (tilelang2ascend-trace-recorder)",
+      "files": 2
+    },
+    {
+      "body_sha256": "574943935fbfdfac988b90c8cb1dd414b222f03a70f9908a32608971a85d5bf1",
+      "example": "cudaLLM/tyz_0817/313_group_norm__sub_tilelang2ascendc-kernel-generator.raw.json",
+      "exact_source_match": false,
+      "outline": "Phase 0: 参数确认 + 算子分类    (解析输入，判定简单/复杂路径)\nPhase 1: 环境准备 + 工程初始化  (复制算子文件 + 初始化 kernel 工程 + 算子注册)\nPhase 2: 测试用例精简           (tilelang2ascend-case-simplifier)\nPhase 3: 设计表达              (分支)\n  ├─ 简单算子: 架构设计 + 设计串讲 (ops-direct-invoke: DESIGN.md + PLAN.md + WALKTHROUGH.md)\n  └─ 复杂算子: TileLang 设计  (tilelang2ascend-tilelang-designer + 退化检测 + 迭代)\nPhase 4: AscendC 生成与验证    (分支)\n  ├─ 简单算子: 开发实现 + 代码审查 + 修复循环 (ops-direct-invoke: 渐进式开发 + REVIEW.md + 最多3轮修复)\n  └─ 复杂算子: TileLang→AscendC 转译 (tilelang2ascend-translator + 退化检测 + 迭代)\nPhase 5: 性能分析              (ops-profiling --quick 模式)\nPhase 6: 全量用例验证\nPhase 7: Trace 记录            (tilelang2ascend-trace-recorder)",
+      "files": 2
+    },
+    {
+      "body_sha256": "2dcae9beaf6c95ebc92c3b901407605f0f7a25960952c8872567900d662d010d",
+      "example": "cudaLLM/tyz_0817/362_AvgPool3d__sub_tilelang2ascendc-kernel-generator.raw.json",
+      "exact_source_match": false,
+      "outline": "Phase 0: 参数确认 + 算子分类    (解析输入，判定简单/复杂路径)\nPhase 1: 环境准备 + 工程初始化  (复制算子文件 + 初始化 kernel 工程 + 算子注册)\nPhase 2: 测试用例精简           (tilelang2ascend-case-simplifier)\nPhase 3: 设计表达              (分支)\n  ├─ 简单算子: 架构设计 + 设计串讲 (ops-direct-invoke: DESIGN.md + PLAN.md + WALKTHROUGH.md)\n  └─ 复杂算子: TileLang 设计  (tilelang2ascend-tilelang-designer + 退化检测 + 迭代)\nPhase 4: AscendC 生成与验证    (分支)\n  ├─ 简单算子: 开发实现 + 代码审查 + 修复循环 (ops-direct-invoke: 渐进式开发 + REVIEW.md + 最多3轮修复)\n  └─ 复杂算子: TileLang→AscendC 转译 (tilelang2ascend-translator + 退化检测 + 迭代)\nPhase 5: 性能分析              (ops-profiling --quick 模式)\nPhase 6: 全量用例验证\nPhase 7: Trace 记录            (tilelang2ascend-trace-recorder)",
+      "files": 2
+    },
+    {
+      "body_sha256": "18d344e6c53815153ab0b44753ced9cdb9ac49db13ee44f268b6e8f36e78e71b",
+      "example": "level_1/lzq/26_AvgPool3d__sub_ascend-kernel-developer.json",
+      "exact_source_match": false,
+      "outline": "Phase 0: 参数确认 + 算子分类    (解析输入，判定简单/复杂路径)\nPhase 1: 环境准备 + 工程初始化  (复制算子文件 + 初始化 kernel 工程 + 算子注册)\nPhase 2: 测试用例精简           (ascendc-case-simplifier)\nPhase 3: 设计表达              (分支)\n  ├─ 简单算子: design.md 生成 (ascendc-design-doc-generator)\n  └─ 复杂算子: TileLang 设计  (ascendc-tilelang-designer + 退化检测 + 迭代)\nPhase 4: AscendC 生成与验证    (分支)\n  ├─ 简单算子: 模板代码生成    (ascendc-code-gen + 退化检测 + 迭代)\n  └─ 复杂算子: TileLang→AscendC 转译 (ascendc-translator + 退化检测 + 迭代)\nPhase 5: 性能分析              (ascendc-performance-analyzer)\nPhase 6: 全量用例验证\nPhase 7: Trace 记录            (ascendc-trace-recorder)",
+      "files": 2
+    },
+    {
+      "body_sha256": "6a38973beab3ffabcdf38051e7cd4e3f69310cbf89d34627941611f31fd96599",
+      "example": "level_1/tianyazhang/7_Sum__sub_ascend-kernel-developer.raw.json",
+      "exact_source_match": false,
+      "outline": "Phase 0: 参数确认 + 算子分类    (解析输入，判定简单/复杂路径)\nPhase 1: 环境准备 + 工程初始化  (复制算子文件 + 初始化 kernel 工程 + 算子注册)\nPhase 2: 测试用例精简           (ascendc-case-simplifier)\nPhase 3: 设计表达              (分支)\n  ├─ 简单算子: design.md 生成 (ascendc-design-doc-generator)\n  └─ 复杂算子: TileLang 设计  (ascendc-tilelang-designer + 退化检测 + 迭代)\nPhase 4: AscendC 生成与验证    (分支)\n  ├─ 简单算子: 模板代码生成    (ascendc-code-gen + 退化检测 + 迭代)\n  └─ 复杂算子: TileLang→AscendC 转译 (ascendc-translator + 退化检测 + 迭代)\nPhase 5: 性能分析              (ascendc-performance-analyzer)\nPhase 6: 全量用例验证\nPhase 7: Trace 记录            (ascendc-trace-recorder)",
+      "files": 2
+    },
+    {
+      "body_sha256": "5b3b571b858b5de1bf95799e88590e64e09fc52897a33a70f57e614f92b3a258",
+      "example": "level_1/zhouxupeng/21_Scatter__sub_ascend-kernel-developer.json",
+      "exact_source_match": false,
+      "outline": "Phase 0: 参数确认 + 算子分类    (解析输入，判定简单/复杂路径)\nPhase 1: 环境准备 + 工程初始化  (复制算子文件 + 初始化 kernel 工程 + 算子注册)\nPhase 2: 测试用例精简           (ascendc-case-simplifier)\nPhase 3: 设计表达              (分支)\n  ├─ 简单算子: design.md 生成 (ascendc-design-doc-generator)\n  └─ 复杂算子: TileLang 设计  (ascendc-tilelang-designer + 退化检测 + 迭代)\nPhase 4: AscendC 生成与验证    (分支)\n  ├─ 简单算子: 模板代码生成    (ascendc-code-gen + 退化检测 + 迭代)\n  └─ 复杂算子: TileLang→AscendC 转译 (ascendc-translator + 退化检测 + 迭代)\nPhase 5: 性能分析              (ascendc-performance-analyzer)\nPhase 6: 全量用例验证\nPhase 7: Trace 记录            (ascendc-trace-recorder)",
+      "files": 2
+    },
+    {
+      "body_sha256": "1acf94550fbf6318bd602b8ea964c03a7f0fff3a80502498f78a7618ae57cda3",
+      "example": "level_2/liziqi/16_Batched2DRopePositionEncodingBackward__sub_ascend-kernel-developer.json",
+      "exact_source_match": false,
+      "outline": "Phase 0: 参数确认 + 算子分类    (解析输入，判定简单/复杂路径)\nPhase 1: 环境准备 + 工程初始化  (复制算子文件 + 初始化 kernel 工程 + 算子注册)\nPhase 2: 测试用例精简           (ascendc-case-simplifier)\nPhase 3: 设计表达              (分支)\n  ├─ 简单算子: design.md 生成 (ascendc-design-doc-generator)\n  └─ 复杂算子: TileLang 设计  (ascendc-tilelang-designer + 退化检测 + 迭代)\nPhase 4: AscendC 生成与验证    (分支)\n  ├─ 简单算子: 模板代码生成    (ascendc-code-gen + 退化检测 + 迭代)\n  └─ 复杂算子: TileLang→AscendC 转译 (ascendc-translator + 退化检测 + 迭代)\nPhase 5: 性能分析              (ascendc-performance-analyzer)\nPhase 6: 全量用例验证\nPhase 7: Trace 记录            (ascendc-trace-recorder)",
+      "files": 2
+    },
+    {
+      "body_sha256": "2d03bce4ff7235d5ef46cd335db04a3fb9e934d40d35ad0e65055fad99f957e5",
+      "example": "level_2/liziqi/21_GaussianTopkSparseActivation__sub_ascend-kernel-developer.json",
+      "exact_source_match": false,
+      "outline": "Phase 0: 参数确认 + 算子分类    (解析输入，判定简单/复杂路径)\nPhase 1: 环境准备 + 工程初始化  (复制算子文件 + 初始化 kernel 工程 + 算子注册)\nPhase 2: 测试用例精简           (ascendc-case-simplifier)\nPhase 3: 设计表达              (分支)\n  ├─ 简单算子: design.md 生成 (ascendc-design-doc-generator)\n  └─ 复杂算子: TileLang 设计  (ascendc-tilelang-designer + 退化检测 + 迭代)\nPhase 4: AscendC 生成与验证    (分支)\n  ├─ 简单算子: 模板代码生成    (ascendc-code-gen + 退化检测 + 迭代)\n  └─ 复杂算子: TileLang→AscendC 转译 (ascendc-translator + 退化检测 + 迭代)\nPhase 5: 性能分析              (ascendc-performance-analyzer)\nPhase 6: 全量用例验证\nPhase 7: Trace 记录            (ascendc-trace-recorder)",
+      "files": 2
+    },
+    {
+      "body_sha256": "44c74c4271555ba7d589db847f71714b644bfa9f3c131b3a31de5daa0a5eed17",
+      "example": "level_2/liziqi_0706/24_KvCacheUpdateWithRopeBackward__sub_ascend-kernel-developer.json",
+      "exact_source_match": false,
+      "outline": "Phase 0: 参数确认 + 算子分类    (解析输入，判定简单/复杂路径)\nPhase 1: 环境准备 + 工程初始化  (复制算子文件 + 初始化 kernel 工程 + 算子注册)\nPhase 2: 测试用例精简           (ascendc-case-simplifier)\nPhase 3: 设计表达              (分支)\n  ├─ 简单算子: design.md 生成 (ascendc-design-doc-generator)\n  └─ 复杂算子: TileLang 设计  (ascendc-tilelang-designer + 退化检测 + 迭代)\nPhase 4: AscendC 生成与验证    (分支)\n  ├─ 简单算子: 模板代码生成    (ascendc-code-gen + 退化检测 + 迭代)\n  └─ 复杂算子: TileLang→AscendC 转译 (ascendc-translator + 退化检测 + 迭代)\nPhase 5: 性能分析              (ascendc-performance-analyzer)\nPhase 6: 全量用例验证\nPhase 7: Trace 记录            (ascendc-trace-recorder)",
+      "files": 2
+    },
+    {
+      "body_sha256": "d9e56579639f24842c47ab38ce09235ddd9cedbaa7b8a1c0350c571caf0cba38",
+      "example": "level_2/第一批收集/17_EmbeddingWithInitialLayernormBackward__sub_ascend-kernel-developer.raw.json",
+      "exact_source_match": false,
+      "outline": "Phase 0: 参数确认 + 算子分类    (解析输入，判定简单/复杂路径)\nPhase 1: 环境准备 + 工程初始化  (复制算子文件 + 初始化 kernel 工程 + 算子注册)\nPhase 2: 测试用例精简           (ascendc-case-simplifier)\nPhase 3: 设计表达              (分支)\n  ├─ 简单算子: design.md 生成 (ascendc-design-doc-generator)\n  └─ 复杂算子: TileLang 设计  (ascendc-tilelang-designer + 退化检测 + 迭代)\nPhase 4: AscendC 生成与验证    (分支)\n  ├─ 简单算子: 模板代码生成    (ascendc-code-gen + 退化检测 + 迭代)\n  └─ 复杂算子: TileLang→AscendC 转译 (ascendc-translator + 退化检测 + 迭代)\nPhase 5: 性能分析              (ascendc-performance-analyzer)\nPhase 6: 全量用例验证\nPhase 7: Trace 记录            (ascendc-trace-recorder)",
+      "files": 2
+    },
+    {
+      "body_sha256": "640da666d036186553cf128aa75f13a7f13164c767fc796f1fc3818b0180b67e",
+      "example": "CANN/liujinxue_0706/32_MoeTokenUnpermute__sub_ascend-kernel-developer.json",
+      "exact_source_match": false,
+      "outline": "Phase 0: 参数确认 + 算子分类    (解析输入，判定简单/复杂路径)\nPhase 1: 环境准备 + 工程初始化  (复制算子文件 + 初始化 kernel 工程 + 算子注册)\nPhase 2: 测试用例精简           (ascendc-case-simplifier)\nPhase 3: 设计表达              (分支)\n  ├─ 简单算子: design.md 生成 (ascendc-design-doc-generator)\n  └─ 复杂算子: TileLang 设计  (ascendc-tilelang-designer + 退化检测 + 迭代)\nPhase 4: AscendC 生成与验证    (分支)\n  ├─ 简单算子: 模板代码生成    (ascendc-code-gen + 退化检测 + 迭代)\n  └─ 复杂算子: TileLang→AscendC 转译 (ascendc-translator + 退化检测 + 迭代)\nPhase 5: 性能分析              (ascendc-performance-analyzer)\nPhase 6: 全量用例验证\nPhase 7: Trace 记录            (ascendc-trace-recorder)",
+      "files": 1
+    },
+    {
+      "body_sha256": "63d6833ae127c8b54c92dcefffe1f484e88aba9265e62a0e15446ab0387a0e85",
+      "example": "CANN/liujinxue_0706/34_MoeTokenUnpermuteWithEp__sub_ascend-kernel-developer.json",
+      "exact_source_match": false,
+      "outline": "Phase 0: 参数确认 + 算子分类    (解析输入，判定简单/复杂路径)\nPhase 1: 环境准备 + 工程初始化  (复制算子文件 + 初始化 kernel 工程 + 算子注册)\nPhase 2: 测试用例精简           (ascendc-case-simplifier)\nPhase 3: 设计表达              (分支)\n  ├─ 简单算子: design.md 生成 (ascendc-design-doc-generator)\n  └─ 复杂算子: TileLang 设计  (ascendc-tilelang-designer + 退化检测 + 迭代)\nPhase 4: AscendC 生成与验证    (分支)\n  ├─ 简单算子: 模板代码生成    (ascendc-code-gen + 退化检测 + 迭代)\n  └─ 复杂算子: TileLang→AscendC 转译 (ascendc-translator + 退化检测 + 迭代)\nPhase 5: 性能分析              (ascendc-performance-analyzer)\nPhase 6: 全量用例验证\nPhase 7: Trace 记录            (ascendc-trace-recorder)",
+      "files": 1
+    },
+    {
+      "body_sha256": "0f44611a774675887a0221988136f8adbb1280d6d3eca8135c938f5d3754623d",
+      "example": "CANN/liziqi_0706/76_UnfoldGrad__sub_ascend-kernel-developer.json",
+      "exact_source_match": false,
+      "outline": "Phase 0: 参数确认 + 算子分类    (解析输入，判定简单/复杂路径)\nPhase 1: 环境准备 + 工程初始化  (复制算子文件 + 初始化 kernel 工程 + 算子注册)\nPhase 2: 测试用例精简           (ascendc-case-simplifier)\nPhase 3: 设计表达              (分支)\n  ├─ 简单算子: design.md 生成 (ascendc-design-doc-generator)\n  └─ 复杂算子: TileLang 设计  (ascendc-tilelang-designer + 退化检测 + 迭代)\nPhase 4: AscendC 生成与验证    (分支)\n  ├─ 简单算子: 模板代码生成    (ascendc-code-gen + 退化检测 + 迭代)\n  └─ 复杂算子: TileLang→AscendC 转译 (ascendc-translator + 退化检测 + 迭代)\nPhase 5: 性能分析              (ascendc-performance-analyzer)\nPhase 6: 全量用例验证\nPhase 7: Trace 记录            (ascendc-trace-recorder)",
+      "files": 1
+    },
+    {
+      "body_sha256": "0e47e3c5cbd65c2d996470187d7b760a964c385d32f31fa78f2124ac5c3f1fdd",
+      "example": "CANN/pass1/51_PadV3GradReplication__sub_ascend-kernel-developer.raw.json",
+      "exact_source_match": false,
+      "outline": "Phase 0: 参数确认 + 算子分类    (解析输入，判定简单/复杂路径)\nPhase 1: 环境准备 + 工程初始化  (复制算子文件 + 初始化 kernel 工程 + 算子注册)\nPhase 2: 测试用例精简           (ascendc-case-simplifier)\nPhase 3: 设计表达              (分支)\n  ├─ 简单算子: design.md 生成 (ascendc-design-doc-generator)\n  └─ 复杂算子: TileLang 设计  (ascendc-tilelang-designer + 退化检测 + 迭代)\nPhase 4: AscendC 生成与验证    (分支)\n  ├─ 简单算子: 模板代码生成    (ascendc-code-gen + 退化检测 + 迭代)\n  └─ 复杂算子: TileLang→AscendC 转译 (ascendc-translator + 退化检测 + 迭代)\nPhase 5: 性能分析              (ascendc-performance-analyzer)\nPhase 6: 全量用例验证\nPhase 7: Trace 记录            (ascendc-trace-recorder)",
+      "files": 1
+    },
+    {
+      "body_sha256": "c32c082f459376b901fc63d587c35f84341234b2271a416b88f0c189108b838f",
+      "example": "CANN/pass1/79_ForeachMulScalar__sub_ascend-kernel-developer.raw.json",
+      "exact_source_match": false,
+      "outline": "Phase 0: 参数确认 + 算子分类    (解析输入，判定简单/复杂路径)\nPhase 1: 环境准备 + 工程初始化  (复制算子文件 + 初始化 kernel 工程 + 算子注册)\nPhase 2: 测试用例精简           (ascendc-case-simplifier)\nPhase 3: 设计表达              (分支)\n  ├─ 简单算子: design.md 生成 (ascendc-design-doc-generator)\n  └─ 复杂算子: TileLang 设计  (ascendc-tilelang-designer + 退化检测 + 迭代)\nPhase 4: AscendC 生成与验证    (分支)\n  ├─ 简单算子: 模板代码生成    (ascendc-code-gen + 退化检测 + 迭代)\n  └─ 复杂算子: TileLang→AscendC 转译 (ascendc-translator + 退化检测 + 迭代)\nPhase 5: 性能分析              (ascendc-performance-analyzer)\nPhase 6: 全量用例验证\nPhase 7: Trace 记录            (ascendc-trace-recorder)",
+      "files": 1
+    },
+    {
+      "body_sha256": "6826edebdfefa2cea2637c2a2c1e91aed7007da442794b9babe7d8c7bbe3933b",
+      "example": "CANN/pass1/81_ForeachNeg__sub_ascend-kernel-developer.raw.json",
+      "exact_source_match": false,
+      "outline": "Phase 0: 参数确认 + 算子分类    (解析输入，判定简单/复杂路径)\nPhase 1: 环境准备 + 工程初始化  (复制算子文件 + 初始化 kernel 工程 + 算子注册)\nPhase 2: 测试用例精简           (ascendc-case-simplifier)\nPhase 3: 设计表达              (分支)\n  ├─ 简单算子: design.md 生成 (ascendc-design-doc-generator)\n  └─ 复杂算子: TileLang 设计  (ascendc-tilelang-designer + 退化检测 + 迭代)\nPhase 4: AscendC 生成与验证    (分支)\n  ├─ 简单算子: 模板代码生成    (ascendc-code-gen + 退化检测 + 迭代)\n  └─ 复杂算子: TileLang→AscendC 转译 (ascendc-translator + 退化检测 + 迭代)\nPhase 5: 性能分析              (ascendc-performance-analyzer)\nPhase 6: 全量用例验证\nPhase 7: Trace 记录            (ascendc-trace-recorder)",
+      "files": 1
+    },
+    {
+      "body_sha256": "a1f912e3ca2c0e673a6c9252ce74f78bafe63c01cc41ebbedc0d3c180ff01085",
+      "example": "CANN/tianyazhang_0706/102_GeGluV2__sub_ascend-kernel-developer.raw.json",
+      "exact_source_match": false,
+      "outline": "Phase 0: 参数确认 + 算子分类    (解析输入，判定简单/复杂路径)\nPhase 1: 环境准备 + 工程初始化  (复制算子文件 + 初始化 kernel 工程 + 算子注册)\nPhase 2: 测试用例精简           (ascendc-case-simplifier)\nPhase 3: 设计表达              (分支)\n  ├─ 简单算子: design.md 生成 (ascendc-design-doc-generator)\n  └─ 复杂算子: TileLang 设计  (ascendc-tilelang-designer + 退化检测 + 迭代)\nPhase 4: AscendC 生成与验证    (分支)\n  ├─ 简单算子: 模板代码生成    (ascendc-code-gen + 退化检测 + 迭代)\n  └─ 复杂算子: TileLang→AscendC 转译 (ascendc-translator + 退化检测 + 迭代)\nPhase 5: 性能分析              (ascendc-performance-analyzer)\nPhase 6: 全量用例验证\nPhase 7: Trace 记录            (ascendc-trace-recorder)",
+      "files": 1
+    },
+    {
+      "body_sha256": "f728971848bd859ee04e24cf4f3418080080661b61fadf63101b2857c136e9a4",
+      "example": "cudaLLM/liziqi/234_isneginf__sub_ascend-kernel-developer.json",
+      "exact_source_match": false,
+      "outline": "Phase 0: 参数确认 + 算子分类    (解析输入，判定简单/复杂路径)\nPhase 1: 环境准备 + 工程初始化  (复制算子文件 + 初始化 kernel 工程 + 算子注册)\nPhase 2: 测试用例精简           (ascendc-case-simplifier)\nPhase 3: 设计表达              (分支)\n  ├─ 简单算子: design.md 生成 (ascendc-design-doc-generator)\n  └─ 复杂算子: TileLang 设计  (ascendc-tilelang-designer + 退化检测 + 迭代)\nPhase 4: AscendC 生成与验证    (分支)\n  ├─ 简单算子: 模板代码生成    (ascendc-code-gen + 退化检测 + 迭代)\n  └─ 复杂算子: TileLang→AscendC 转译 (ascendc-translator + 退化检测 + 迭代)\nPhase 5: 性能分析              (ascendc-performance-analyzer)\nPhase 6: 全量用例验证\nPhase 7: Trace 记录            (ascendc-trace-recorder)",
+      "files": 1
+    },
+    {
+      "body_sha256": "62a73e91ef3c2b289adc15a841a9833c3cfc3fb84ca37fe72f05c55c75e9e52d",
+      "example": "cudaLLM/liziqi/270_cumsum__sub_ascend-kernel-developer.json",
+      "exact_source_match": false,
+      "outline": "Phase 0: 参数确认 + 算子分类    (解析输入，判定简单/复杂路径)\nPhase 1: 环境准备 + 工程初始化  (复制算子文件 + 初始化 kernel 工程 + 算子注册)\nPhase 2: 测试用例精简           (ascendc-case-simplifier)\nPhase 3: 设计表达              (分支)\n  ├─ 简单算子: design.md 生成 (ascendc-design-doc-generator)\n  └─ 复杂算子: TileLang 设计  (ascendc-tilelang-designer + 退化检测 + 迭代)\nPhase 4: AscendC 生成与验证    (分支)\n  ├─ 简单算子: 模板代码生成    (ascendc-code-gen + 退化检测 + 迭代)\n  └─ 复杂算子: TileLang→AscendC 转译 (ascendc-translator + 退化检测 + 迭代)\nPhase 5: 性能分析              (ascendc-performance-analyzer)\nPhase 6: 全量用例验证\nPhase 7: Trace 记录            (ascendc-trace-recorder)",
+      "files": 1
+    },
+    {
+      "body_sha256": "25f4b362e7cfbd96ab6041bdd43c44946e69bbaa9f9c0f8d6d1062168ecf7424",
+      "example": "cudaLLM/liziqi/274_topk__sub_ascend-kernel-developer.json",
+      "exact_source_match": false,
+      "outline": "Phase 0: 参数确认 + 算子分类    (解析输入，判定简单/复杂路径)\nPhase 1: 环境准备 + 工程初始化  (复制算子文件 + 初始化 kernel 工程 + 算子注册)\nPhase 2: 测试用例精简           (ascendc-case-simplifier)\nPhase 3: 设计表达              (分支)\n  ├─ 简单算子: design.md 生成 (ascendc-design-doc-generator)\n  └─ 复杂算子: TileLang 设计  (ascendc-tilelang-designer + 退化检测 + 迭代)\nPhase 4: AscendC 生成与验证    (分支)\n  ├─ 简单算子: 模板代码生成    (ascendc-code-gen + 退化检测 + 迭代)\n  └─ 复杂算子: TileLang→AscendC 转译 (ascendc-translator + 退化检测 + 迭代)\nPhase 5: 性能分析              (ascendc-performance-analyzer)\nPhase 6: 全量用例验证\nPhase 7: Trace 记录            (ascendc-trace-recorder)",
+      "files": 1
+    },
+    {
+      "body_sha256": "9cb9684b03e24bcf8947cc7b9b943df456f45b9b2b201c1d2ba67af1044f37f2",
+      "example": "cudaLLM/liziqi/282_ReflectionPad3d__sub_ascend-kernel-developer.json",
+      "exact_source_match": false,
+      "outline": "Phase 0: 参数确认 + 算子分类    (解析输入，判定简单/复杂路径)\nPhase 1: 环境准备 + 工程初始化  (复制算子文件 + 初始化 kernel 工程 + 算子注册)\nPhase 2: 测试用例精简           (ascendc-case-simplifier)\nPhase 3: 设计表达              (分支)\n  ├─ 简单算子: design.md 生成 (ascendc-design-doc-generator)\n  └─ 复杂算子: TileLang 设计  (ascendc-tilelang-designer + 退化检测 + 迭代)\nPhase 4: AscendC 生成与验证    (分支)\n  ├─ 简单算子: 模板代码生成    (ascendc-code-gen + 退化检测 + 迭代)\n  └─ 复杂算子: TileLang→AscendC 转译 (ascendc-translator + 退化检测 + 迭代)\nPhase 5: 性能分析              (ascendc-performance-analyzer)\nPhase 6: 全量用例验证\nPhase 7: Trace 记录            (ascendc-trace-recorder)",
+      "files": 1
+    },
+    {
+      "body_sha256": "2c105444281fc131ee2f5db2ae22bfc4b2a4fdabbf8ece1e00b657fd7acf4ebd",
+      "example": "cudaLLM/liziqi/294_ParameterDict__sub_ascend-kernel-developer.json",
+      "exact_source_match": false,
+      "outline": "Phase 0: 参数确认 + 算子分类    (解析输入，判定简单/复杂路径)\nPhase 1: 环境准备 + 工程初始化  (复制算子文件 + 初始化 kernel 工程 + 算子注册)\nPhase 2: 测试用例精简           (ascendc-case-simplifier)\nPhase 3: 设计表达              (分支)\n  ├─ 简单算子: design.md 生成 (ascendc-design-doc-generator)\n  └─ 复杂算子: TileLang 设计  (ascendc-tilelang-designer + 退化检测 + 迭代)\nPhase 4: AscendC 生成与验证    (分支)\n  ├─ 简单算子: 模板代码生成    (ascendc-code-gen + 退化检测 + 迭代)\n  └─ 复杂算子: TileLang→AscendC 转译 (ascendc-translator + 退化检测 + 迭代)\nPhase 5: 性能分析              (ascendc-performance-analyzer)\nPhase 6: 全量用例验证\nPhase 7: Trace 记录            (ascendc-trace-recorder)",
+      "files": 1
+    },
+    {
+      "body_sha256": "78251cf447ecb5711683cfd423d1c9c031dd7337c8362f5ce23d4548e21f648d",
+      "example": "cudaLLM/liziqi/295_roll__sub_ascend-kernel-developer.json",
+      "exact_source_match": false,
+      "outline": "Phase 0: 参数确认 + 算子分类    (解析输入，判定简单/复杂路径)\nPhase 1: 环境准备 + 工程初始化  (复制算子文件 + 初始化 kernel 工程 + 算子注册)\nPhase 2: 测试用例精简           (ascendc-case-simplifier)\nPhase 3: 设计表达              (分支)\n  ├─ 简单算子: design.md 生成 (ascendc-design-doc-generator)\n  └─ 复杂算子: TileLang 设计  (ascendc-tilelang-designer + 退化检测 + 迭代)\nPhase 4: AscendC 生成与验证    (分支)\n  ├─ 简单算子: 模板代码生成    (ascendc-code-gen + 退化检测 + 迭代)\n  └─ 复杂算子: TileLang→AscendC 转译 (ascendc-translator + 退化检测 + 迭代)\nPhase 5: 性能分析              (ascendc-performance-analyzer)\nPhase 6: 全量用例验证\nPhase 7: Trace 记录            (ascendc-trace-recorder)",
+      "files": 1
+    },
+    {
+      "body_sha256": "389a84153d2f34ad0e2063e772dbe4927e5833524972476fbb7da1c47a38e5c2",
+      "example": "cudaLLM/liziqi/49_conj_physical__sub_ascend-kernel-developer.json",
+      "exact_source_match": false,
+      "outline": "Phase 0: 参数确认 + 算子分类    (解析输入，判定简单/复杂路径)\nPhase 1: 环境准备 + 工程初始化  (复制算子文件 + 初始化 kernel 工程 + 算子注册)\nPhase 2: 测试用例精简           (ascendc-case-simplifier)\nPhase 3: 设计表达              (分支)\n  ├─ 简单算子: design.md 生成 (ascendc-design-doc-generator)\n  └─ 复杂算子: TileLang 设计  (ascendc-tilelang-designer + 退化检测 + 迭代)\nPhase 4: AscendC 生成与验证    (分支)\n  ├─ 简单算子: 模板代码生成    (ascendc-code-gen + 退化检测 + 迭代)\n  └─ 复杂算子: TileLang→AscendC 转译 (ascendc-translator + 退化检测 + 迭代)\nPhase 5: 性能分析              (ascendc-performance-analyzer)\nPhase 6: 全量用例验证\nPhase 7: Trace 记录            (ascendc-trace-recorder)",
+      "files": 1
+    },
+    {
+      "body_sha256": "a1c9e062689d60c0c0aedc60c8c55904d208f883f7e369d54027f08f6e8bcde2",
+      "example": "cudaLLM/liziqi/53_rsqrt__sub_ascend-kernel-developer.json",
+      "exact_source_match": false,
+      "outline": "Phase 0: 参数确认 + 算子分类    (解析输入，判定简单/复杂路径)\nPhase 1: 环境准备 + 工程初始化  (复制算子文件 + 初始化 kernel 工程 + 算子注册)\nPhase 2: 测试用例精简           (ascendc-case-simplifier)\nPhase 3: 设计表达              (分支)\n  ├─ 简单算子: design.md 生成 (ascendc-design-doc-generator)\n  └─ 复杂算子: TileLang 设计  (ascendc-tilelang-designer + 退化检测 + 迭代)\nPhase 4: AscendC 生成与验证    (分支)\n  ├─ 简单算子: 模板代码生成    (ascendc-code-gen + 退化检测 + 迭代)\n  └─ 复杂算子: TileLang→AscendC 转译 (ascendc-translator + 退化检测 + 迭代)\nPhase 5: 性能分析              (ascendc-performance-analyzer)\nPhase 6: 全量用例验证\nPhase 7: Trace 记录            (ascendc-trace-recorder)",
+      "files": 1
+    },
+    {
+      "body_sha256": "fe85eae535f060d6414b634b316310387432bfeaa64b2cc85aaa29884f14b7b5",
+      "example": "cudaLLM/liziqi/59_asin__sub_ascend-kernel-developer.raw.json",
+      "exact_source_match": false,
+      "outline": "Phase 0: 参数确认 + 算子分类    (解析输入，判定简单/复杂路径)\nPhase 1: 环境准备 + 工程初始化  (复制算子文件 + 初始化 kernel 工程 + 算子注册)\nPhase 2: 测试用例精简           (ascendc-case-simplifier)\nPhase 3: 设计表达              (分支)\n  ├─ 简单算子: design.md 生成 (ascendc-design-doc-generator)\n  └─ 复杂算子: TileLang 设计  (ascendc-tilelang-designer + 退化检测 + 迭代)\nPhase 4: AscendC 生成与验证    (分支)\n  ├─ 简单算子: 模板代码生成    (ascendc-code-gen + 退化检测 + 迭代)\n  └─ 复杂算子: TileLang→AscendC 转译 (ascendc-translator + 退化检测 + 迭代)\nPhase 5: 性能分析              (ascendc-performance-analyzer)\nPhase 6: 全量用例验证\nPhase 7: Trace 记录            (ascendc-trace-recorder)",
+      "files": 1
+    },
+    {
+      "body_sha256": "c6a6bc66569f531ce7f0f43e5b250ceb9b8b6b94695619c1faa3bca7d704a9fd",
+      "example": "cudaLLM/liziqi/95_scatter_reduce__sub_ascend-kernel-developer.json",
+      "exact_source_match": false,
+      "outline": "Phase 0: 参数确认 + 算子分类    (解析输入，判定简单/复杂路径)\nPhase 1: 环境准备 + 工程初始化  (复制算子文件 + 初始化 kernel 工程 + 算子注册)\nPhase 2: 测试用例精简           (ascendc-case-simplifier)\nPhase 3: 设计表达              (分支)\n  ├─ 简单算子: design.md 生成 (ascendc-design-doc-generator)\n  └─ 复杂算子: TileLang 设计  (ascendc-tilelang-designer + 退化检测 + 迭代)\nPhase 4: AscendC 生成与验证    (分支)\n  ├─ 简单算子: 模板代码生成    (ascendc-code-gen + 退化检测 + 迭代)\n  └─ 复杂算子: TileLang→AscendC 转译 (ascendc-translator + 退化检测 + 迭代)\nPhase 5: 性能分析              (ascendc-performance-analyzer)\nPhase 6: 全量用例验证\nPhase 7: Trace 记录            (ascendc-trace-recorder)",
+      "files": 1
+    },
+    {
+      "body_sha256": "4f2ae35cc4c4fda5c4d0f15d453b141396defcf265b18f5b87ce0ac033ec5e6c",
+      "example": "cudaLLM/liziqi/96_CosineEmbeddingLoss__sub_ascend-kernel-developer.json",
+      "exact_source_match": false,
+      "outline": "Phase 0: 参数确认 + 算子分类    (解析输入，判定简单/复杂路径)\nPhase 1: 环境准备 + 工程初始化  (复制算子文件 + 初始化 kernel 工程 + 算子注册)\nPhase 2: 测试用例精简           (ascendc-case-simplifier)\nPhase 3: 设计表达              (分支)\n  ├─ 简单算子: design.md 生成 (ascendc-design-doc-generator)\n  └─ 复杂算子: TileLang 设计  (ascendc-tilelang-designer + 退化检测 + 迭代)\nPhase 4: AscendC 生成与验证    (分支)\n  ├─ 简单算子: 模板代码生成    (ascendc-code-gen + 退化检测 + 迭代)\n  └─ 复杂算子: TileLang→AscendC 转译 (ascendc-translator + 退化检测 + 迭代)\nPhase 5: 性能分析              (ascendc-performance-analyzer)\nPhase 6: 全量用例验证\nPhase 7: Trace 记录            (ascendc-trace-recorder)",
+      "files": 1
+    },
+    {
+      "body_sha256": "c1a9f646de2d38f131a10c5f390540b848a3c0577a68ab05153b300b7f1b93e1",
+      "example": "cudaLLM/liziqi/97_relu__sub_ascend-kernel-developer.json",
+      "exact_source_match": false,
+      "outline": "Phase 0: 参数确认 + 算子分类    (解析输入，判定简单/复杂路径)\nPhase 1: 环境准备 + 工程初始化  (复制算子文件 + 初始化 kernel 工程 + 算子注册)\nPhase 2: 测试用例精简           (ascendc-case-simplifier)\nPhase 3: 设计表达              (分支)\n  ├─ 简单算子: design.md 生成 (ascendc-design-doc-generator)\n  └─ 复杂算子: TileLang 设计  (ascendc-tilelang-designer + 退化检测 + 迭代)\nPhase 4: AscendC 生成与验证    (分支)\n  ├─ 简单算子: 模板代码生成    (ascendc-code-gen + 退化检测 + 迭代)\n  └─ 复杂算子: TileLang→AscendC 转译 (ascendc-translator + 退化检测 + 迭代)\nPhase 5: 性能分析              (ascendc-performance-analyzer)\nPhase 6: 全量用例验证\nPhase 7: Trace 记录            (ascendc-trace-recorder)",
+      "files": 1
+    },
+    {
+      "body_sha256": "2fdc5beff7ee7a8c59e219053aee056e8fc970ebb9ed0f096a8527773e9da30f",
+      "example": "cudaLLM/tianyazhang/191_PixelShuffle__sub_ascend-kernel-developer.raw.json",
+      "exact_source_match": false,
+      "outline": "Phase 0: 参数确认 + 算子分类    (解析输入，判定简单/复杂路径)\nPhase 1: 环境准备 + 工程初始化  (复制算子文件 + 初始化 kernel 工程 + 算子注册)\nPhase 2: 测试用例精简           (ascendc-case-simplifier)\nPhase 3: 设计表达              (分支)\n  ├─ 简单算子: design.md 生成 (ascendc-design-doc-generator)\n  └─ 复杂算子: TileLang 设计  (ascendc-tilelang-designer + 退化检测 + 迭代)\nPhase 4: AscendC 生成与验证    (分支)\n  ├─ 简单算子: 模板代码生成    (ascendc-code-gen + 退化检测 + 迭代)\n  └─ 复杂算子: TileLang→AscendC 转译 (ascendc-translator + 退化检测 + 迭代)\nPhase 5: 性能分析              (ascendc-performance-analyzer)\nPhase 6: 全量用例验证\nPhase 7: Trace 记录            (ascendc-trace-recorder)",
+      "files": 1
+    },
+    {
+      "body_sha256": "def3e57bca2e1c7df0de19e0dc38ad094675dfd0e357e54bc11ded5e7c5bca0f",
+      "example": "cudaLLM/tianyazhang/332_upsample__sub_ascend-kernel-developer.raw.json",
+      "exact_source_match": false,
+      "outline": "Phase 0: 参数确认 + 算子分类    (解析输入，判定简单/复杂路径)\nPhase 1: 环境准备 + 工程初始化  (复制算子文件 + 初始化 kernel 工程 + 算子注册)\nPhase 2: 测试用例精简           (ascendc-case-simplifier)\nPhase 3: 设计表达              (分支)\n  ├─ 简单算子: design.md 生成 (ascendc-design-doc-generator)\n  └─ 复杂算子: TileLang 设计  (ascendc-tilelang-designer + 退化检测 + 迭代)\nPhase 4: AscendC 生成与验证    (分支)\n  ├─ 简单算子: 模板代码生成    (ascendc-code-gen + 退化检测 + 迭代)\n  └─ 复杂算子: TileLang→AscendC 转译 (ascendc-translator + 退化检测 + 迭代)\nPhase 5: 性能分析              (ascendc-performance-analyzer)\nPhase 6: 全量用例验证\nPhase 7: Trace 记录            (ascendc-trace-recorder)",
+      "files": 1
+    },
+    {
+      "body_sha256": "7032c981330cdc82dcaf6de2a2f23eb9b7caa2b145c9b34c24e5b4b21c7e7655",
+      "example": "cudaLLM/tianyazhang/368_arcsinh__sub_ascend-kernel-developer.raw.json",
+      "exact_source_match": false,
+      "outline": "Phase 0: 参数确认 + 算子分类    (解析输入，判定简单/复杂路径)\nPhase 1: 环境准备 + 工程初始化  (复制算子文件 + 初始化 kernel 工程 + 算子注册)\nPhase 2: 测试用例精简           (ascendc-case-simplifier)\nPhase 3: 设计表达              (分支)\n  ├─ 简单算子: design.md 生成 (ascendc-design-doc-generator)\n  └─ 复杂算子: TileLang 设计  (ascendc-tilelang-designer + 退化检测 + 迭代)\nPhase 4: AscendC 生成与验证    (分支)\n  ├─ 简单算子: 模板代码生成    (ascendc-code-gen + 退化检测 + 迭代)\n  └─ 复杂算子: TileLang→AscendC 转译 (ascendc-translator + 退化检测 + 迭代)\nPhase 5: 性能分析              (ascendc-performance-analyzer)\nPhase 6: 全量用例验证\nPhase 7: Trace 记录            (ascendc-trace-recorder)",
+      "files": 1
+    },
+    {
+      "body_sha256": "f8cb85eff2cf1e4a4dfca3a8a0df68938e95e385b8ddac21b8093a6be9c72be3",
+      "example": "cudaLLM/tianyazhang/370_pixel_unshuffle__sub_ascend-kernel-developer.raw.json",
+      "exact_source_match": false,
+      "outline": "Phase 0: 参数确认 + 算子分类    (解析输入，判定简单/复杂路径)\nPhase 1: 环境准备 + 工程初始化  (复制算子文件 + 初始化 kernel 工程 + 算子注册)\nPhase 2: 测试用例精简           (ascendc-case-simplifier)\nPhase 3: 设计表达              (分支)\n  ├─ 简单算子: design.md 生成 (ascendc-design-doc-generator)\n  └─ 复杂算子: TileLang 设计  (ascendc-tilelang-designer + 退化检测 + 迭代)\nPhase 4: AscendC 生成与验证    (分支)\n  ├─ 简单算子: 模板代码生成    (ascendc-code-gen + 退化检测 + 迭代)\n  └─ 复杂算子: TileLang→AscendC 转译 (ascendc-translator + 退化检测 + 迭代)\nPhase 5: 性能分析              (ascendc-performance-analyzer)\nPhase 6: 全量用例验证\nPhase 7: Trace 记录            (ascendc-trace-recorder)",
+      "files": 1
+    },
+    {
+      "body_sha256": "43c810e4150d707b65871c1b12eb8b2e86cb4e14a0da00badfcab8c02b7304ff",
+      "example": "cudaLLM/tianyazhang/382_Identity__sub_ascend-kernel-developer.raw.json",
+      "exact_source_match": false,
+      "outline": "Phase 0: 参数确认 + 算子分类    (解析输入，判定简单/复杂路径)\nPhase 1: 环境准备 + 工程初始化  (复制算子文件 + 初始化 kernel 工程 + 算子注册)\nPhase 2: 测试用例精简           (ascendc-case-simplifier)\nPhase 3: 设计表达              (分支)\n  ├─ 简单算子: design.md 生成 (ascendc-design-doc-generator)\n  └─ 复杂算子: TileLang 设计  (ascendc-tilelang-designer + 退化检测 + 迭代)\nPhase 4: AscendC 生成与验证    (分支)\n  ├─ 简单算子: 模板代码生成    (ascendc-code-gen + 退化检测 + 迭代)\n  └─ 复杂算子: TileLang→AscendC 转译 (ascendc-translator + 退化检测 + 迭代)\nPhase 5: 性能分析              (ascendc-performance-analyzer)\nPhase 6: 全量用例验证\nPhase 7: Trace 记录            (ascendc-trace-recorder)",
+      "files": 1
+    },
+    {
+      "body_sha256": "b51c7d70bc229043204a9964a93bce5c67739bf826e76917c1613727298c248c",
+      "example": "cudaLLM/tianyazhang/416_ChannelShuffle__sub_ascend-kernel-developer.raw.json",
+      "exact_source_match": false,
+      "outline": "Phase 0: 参数确认 + 算子分类    (解析输入，判定简单/复杂路径)\nPhase 1: 环境准备 + 工程初始化  (复制算子文件 + 初始化 kernel 工程 + 算子注册)\nPhase 2: 测试用例精简           (ascendc-case-simplifier)\nPhase 3: 设计表达              (分支)\n  ├─ 简单算子: design.md 生成 (ascendc-design-doc-generator)\n  └─ 复杂算子: TileLang 设计  (ascendc-tilelang-designer + 退化检测 + 迭代)\nPhase 4: AscendC 生成与验证    (分支)\n  ├─ 简单算子: 模板代码生成    (ascendc-code-gen + 退化检测 + 迭代)\n  └─ 复杂算子: TileLang→AscendC 转译 (ascendc-translator + 退化检测 + 迭代)\nPhase 5: 性能分析              (ascendc-performance-analyzer)\nPhase 6: 全量用例验证\nPhase 7: Trace 记录            (ascendc-trace-recorder)",
+      "files": 1
+    },
+    {
+      "body_sha256": "2eab9a0197ce6776999a9465e9fbe1ceea49935dad9d25a77335d686cc5a8bd1",
+      "example": "cudaLLM/tyz_0817/157_upsample_bilinear__sub_ascend-kernel-developer.raw.json",
+      "exact_source_match": false,
+      "outline": "Phase 0: 参数确认 + 算子分类    (解析输入，判定简单/复杂路径)\nPhase 1: 环境准备 + 工程初始化  (复制算子文件 + 初始化 kernel 工程 + 算子注册)\nPhase 2: 测试用例精简           (ascendc-case-simplifier)\nPhase 3: 设计表达              (分支)\n  ├─ 简单算子: design.md 生成 (ascendc-design-doc-generator)\n  └─ 复杂算子: TileLang 设计  (ascendc-tilelang-designer + 退化检测 + 迭代)\nPhase 4: AscendC 生成与验证    (分支)\n  ├─ 简单算子: 模板代码生成    (ascendc-code-gen + 退化检测 + 迭代)\n  └─ 复杂算子: TileLang→AscendC 转译 (ascendc-translator + 退化检测 + 迭代)\nPhase 5: 性能分析              (ascendc-performance-analyzer)\nPhase 6: 全量用例验证\nPhase 7: Trace 记录            (ascendc-trace-recorder)",
+      "files": 1
+    },
+    {
+      "body_sha256": "3e9ac407359ba9fb8fbcd47e398ae9eb72d71bf24235cb907cd0081b66afc7e1",
+      "example": "cudaLLM/tyz_0817/196_CosineSimilarity__sub_tilelang2ascendc-kernel-generator.raw.json",
+      "exact_source_match": false,
+      "outline": "Phase 0: 参数确认 + 算子分类    (解析输入，判定简单/复杂路径)\nPhase 1: 环境准备 + 工程初始化  (复制算子文件 + 初始化 kernel 工程 + 算子注册)\nPhase 2: 测试用例精简           (tilelang2ascend-case-simplifier)\nPhase 3: 设计表达              (分支)\n  ├─ 简单算子: 架构设计 + 设计串讲 (ops-direct-invoke: DESIGN.md + PLAN.md + WALKTHROUGH.md)\n  └─ 复杂算子: TileLang 设计  (tilelang2ascend-tilelang-designer + 退化检测 + 迭代)\nPhase 4: AscendC 生成与验证    (分支)\n  ├─ 简单算子: 开发实现 + 代码审查 + 修复循环 (ops-direct-invoke: 渐进式开发 + REVIEW.md + 最多3轮修复)\n  └─ 复杂算子: TileLang→AscendC 转译 (tilelang2ascend-translator + 退化检测 + 迭代)\nPhase 5: 性能分析              (ops-profiling --quick 模式)\nPhase 6: 全量用例验证\nPhase 7: Trace 记录            (tilelang2ascend-trace-recorder)",
+      "files": 1
+    },
+    {
+      "body_sha256": "e782b2fc37f4f82d6dad2d95993b37ff353b80f0a4c1b1874087d650703c321f",
+      "example": "cudaLLM/tyz_0817/211_LazyConvTranspose1d__sub_ascend-kernel-developer.raw.json",
+      "exact_source_match": false,
+      "outline": "Phase 0: 参数确认 + 算子分类    (解析输入，判定简单/复杂路径)\nPhase 1: 环境准备 + 工程初始化  (复制算子文件 + 初始化 kernel 工程 + 算子注册)\nPhase 2: 测试用例精简           (ascendc-case-simplifier)\nPhase 3: 设计表达              (分支)\n  ├─ 简单算子: design.md 生成 (ascendc-design-doc-generator)\n  └─ 复杂算子: TileLang 设计  (ascendc-tilelang-designer + 退化检测 + 迭代)\nPhase 4: AscendC 生成与验证    (分支)\n  ├─ 简单算子: 模板代码生成    (ascendc-code-gen + 退化检测 + 迭代)\n  └─ 复杂算子: TileLang→AscendC 转译 (ascendc-translator + 退化检测 + 迭代)\nPhase 5: 性能分析              (ascendc-performance-analyzer)\nPhase 6: 全量用例验证\nPhase 7: Trace 记录            (ascendc-trace-recorder)",
+      "files": 1
+    },
+    {
+      "body_sha256": "267a51c36cae18b191af95cb2b94a5f991db6f10c1746ebbb522ff358284f741",
+      "example": "cudaLLM/tyz_0817/21_digamma__sub_tilelang2ascendc-kernel-generator.raw.json",
+      "exact_source_match": false,
+      "outline": "Phase 0: 参数确认 + 算子分类    (解析输入，判定简单/复杂路径)\nPhase 1: 环境准备 + 工程初始化  (复制算子文件 + 初始化 kernel 工程 + 算子注册)\nPhase 2: 测试用例精简           (tilelang2ascend-case-simplifier)\nPhase 3: 设计表达              (分支)\n  ├─ 简单算子: 架构设计 + 设计串讲 (ops-direct-invoke: DESIGN.md + PLAN.md + WALKTHROUGH.md)\n  └─ 复杂算子: TileLang 设计  (tilelang2ascend-tilelang-designer + 退化检测 + 迭代)\nPhase 4: AscendC 生成与验证    (分支)\n  ├─ 简单算子: 开发实现 + 代码审查 + 修复循环 (ops-direct-invoke: 渐进式开发 + REVIEW.md + 最多3轮修复)\n  └─ 复杂算子: TileLang→AscendC 转译 (tilelang2ascend-translator + 退化检测 + 迭代)\nPhase 5: 性能分析              (ops-profiling --quick 模式)\nPhase 6: 全量用例验证\nPhase 7: Trace 记录            (tilelang2ascend-trace-recorder)",
+      "files": 1
+    },
+    {
+      "body_sha256": "78b2cd788e18b42e931d630a338c7e6c1c6e7e79c329849c9e65a0d0993f76ca",
+      "example": "cudaLLM/tyz_0817/224_AdaptiveAvgPool3d__sub_tilelang2ascendc-kernel-generator.raw.json",
+      "exact_source_match": false,
+      "outline": "Phase 0: 参数确认 + 算子分类    (解析输入，判定简单/复杂路径)\nPhase 1: 环境准备 + 工程初始化  (复制算子文件 + 初始化 kernel 工程 + 算子注册)\nPhase 2: 测试用例精简           (tilelang2ascend-case-simplifier)\nPhase 3: 设计表达              (分支)\n  ├─ 简单算子: 架构设计 + 设计串讲 (ops-direct-invoke: DESIGN.md + PLAN.md + WALKTHROUGH.md)\n  └─ 复杂算子: TileLang 设计  (tilelang2ascend-tilelang-designer + 退化检测 + 迭代)\nPhase 4: AscendC 生成与验证    (分支)\n  ├─ 简单算子: 开发实现 + 代码审查 + 修复循环 (ops-direct-invoke: 渐进式开发 + REVIEW.md + 最多3轮修复)\n  └─ 复杂算子: TileLang→AscendC 转译 (tilelang2ascend-translator + 退化检测 + 迭代)\nPhase 5: 性能分析              (ops-profiling --quick 模式)\nPhase 6: 全量用例验证\nPhase 7: Trace 记录            (tilelang2ascend-trace-recorder)",
+      "files": 1
+    },
+    {
+      "body_sha256": "8173b2d23d76eed236ce77cd24f59ca4f3519e542c62d31f572a52192246deeb",
+      "example": "cudaLLM/tyz_0817/241_ReflectionPad1d__sub_ascend-kernel-developer.raw.json",
+      "exact_source_match": false,
+      "outline": "Phase 0: 参数确认 + 算子分类    (解析输入，判定简单/复杂路径)\nPhase 1: 环境准备 + 工程初始化  (复制算子文件 + 初始化 kernel 工程 + 算子注册)\nPhase 2: 测试用例精简           (ascendc-case-simplifier)\nPhase 3: 设计表达              (分支)\n  ├─ 简单算子: design.md 生成 (ascendc-design-doc-generator)\n  └─ 复杂算子: TileLang 设计  (ascendc-tilelang-designer + 退化检测 + 迭代)\nPhase 4: AscendC 生成与验证    (分支)\n  ├─ 简单算子: 模板代码生成    (ascendc-code-gen + 退化检测 + 迭代)\n  └─ 复杂算子: TileLang→AscendC 转译 (ascendc-translator + 退化检测 + 迭代)\nPhase 5: 性能分析              (ascendc-performance-analyzer)\nPhase 6: 全量用例验证\nPhase 7: Trace 记录            (ascendc-trace-recorder)",
+      "files": 1
+    },
+    {
+      "body_sha256": "7e5c9ec547193f913dce6d5e187ea3b05983e86cce01759938256d023a8be00d",
+      "example": "cudaLLM/tyz_0817/283_ZeroPad1d__sub_ascend-kernel-developer.raw.json",
+      "exact_source_match": false,
+      "outline": "Phase 0: 参数确认 + 算子分类    (解析输入，判定简单/复杂路径)\nPhase 1: 环境准备 + 工程初始化  (复制算子文件 + 初始化 kernel 工程 + 算子注册)\nPhase 2: 测试用例精简           (ascendc-case-simplifier)\nPhase 3: 设计表达              (分支)\n  ├─ 简单算子: design.md 生成 (ascendc-design-doc-generator)\n  └─ 复杂算子: TileLang 设计  (ascendc-tilelang-designer + 退化检测 + 迭代)\nPhase 4: AscendC 生成与验证    (分支)\n  ├─ 简单算子: 模板代码生成    (ascendc-code-gen + 退化检测 + 迭代)\n  └─ 复杂算子: TileLang→AscendC 转译 (ascendc-translator + 退化检测 + 迭代)\nPhase 5: 性能分析              (ascendc-performance-analyzer)\nPhase 6: 全量用例验证\nPhase 7: Trace 记录            (ascendc-trace-recorder)",
+      "files": 1
+    },
+    {
+      "body_sha256": "c23e06a1fb58987f1a762d8b6d008a515669c0e0fdd4b2651e78b8d975661cc2",
+      "example": "cudaLLM/tyz_0817/284_max_pool1d_with_indices__sub_ascend-kernel-developer.raw.json",
+      "exact_source_match": false,
+      "outline": "Phase 0: 参数确认 + 算子分类    (解析输入，判定简单/复杂路径)\nPhase 1: 环境准备 + 工程初始化  (复制算子文件 + 初始化 kernel 工程 + 算子注册)\nPhase 2: 测试用例精简           (ascendc-case-simplifier)\nPhase 3: 设计表达              (分支)\n  ├─ 简单算子: design.md 生成 (ascendc-design-doc-generator)\n  └─ 复杂算子: TileLang 设计  (ascendc-tilelang-designer + 退化检测 + 迭代)\nPhase 4: AscendC 生成与验证    (分支)\n  ├─ 简单算子: 模板代码生成    (ascendc-code-gen + 退化检测 + 迭代)\n  └─ 复杂算子: TileLang→AscendC 转译 (ascendc-translator + 退化检测 + 迭代)\nPhase 5: 性能分析              (ascendc-performance-analyzer)\nPhase 6: 全量用例验证\nPhase 7: Trace 记录            (ascendc-trace-recorder)",
+      "files": 1
+    },
+    {
+      "body_sha256": "bda58af2a413e9beb202c9aa48d26762925fe769b1de2f9f69d8418e44d5a537",
+      "example": "cudaLLM/tyz_0817/319_MaxPool3d__sub_ascend-kernel-developer.raw.json",
+      "exact_source_match": false,
+      "outline": "Phase 0: 参数确认 + 算子分类    (解析输入，判定简单/复杂路径)\nPhase 1: 环境准备 + 工程初始化  (复制算子文件 + 初始化 kernel 工程 + 算子注册)\nPhase 2: 测试用例精简           (ascendc-case-simplifier)\nPhase 3: 设计表达              (分支)\n  ├─ 简单算子: design.md 生成 (ascendc-design-doc-generator)\n  └─ 复杂算子: TileLang 设计  (ascendc-tilelang-designer + 退化检测 + 迭代)\nPhase 4: AscendC 生成与验证    (分支)\n  ├─ 简单算子: 模板代码生成    (ascendc-code-gen + 退化检测 + 迭代)\n  └─ 复杂算子: TileLang→AscendC 转译 (ascendc-translator + 退化检测 + 迭代)\nPhase 5: 性能分析              (ascendc-performance-analyzer)\nPhase 6: 全量用例验证\nPhase 7: Trace 记录            (ascendc-trace-recorder)",
+      "files": 1
+    },
+    {
+      "body_sha256": "96fd660ee1875a833751d93ddab13e464e26bc58ec40d22b9d9fef61883f396e",
+      "example": "cudaLLM/tyz_0817/32_AvgPool3d__sub_tilelang2ascendc-kernel-generator.raw.json",
+      "exact_source_match": false,
+      "outline": "Phase 0: 参数确认 + 算子分类    (解析输入，判定简单/复杂路径)\nPhase 1: 环境准备 + 工程初始化  (复制算子文件 + 初始化 kernel 工程 + 算子注册)\nPhase 2: 测试用例精简           (tilelang2ascend-case-simplifier)\nPhase 3: 设计表达              (分支)\n  ├─ 简单算子: 架构设计 + 设计串讲 (ops-direct-invoke: DESIGN.md + PLAN.md + WALKTHROUGH.md)\n  └─ 复杂算子: TileLang 设计  (tilelang2ascend-tilelang-designer + 退化检测 + 迭代)\nPhase 4: AscendC 生成与验证    (分支)\n  ├─ 简单算子: 开发实现 + 代码审查 + 修复循环 (ops-direct-invoke: 渐进式开发 + REVIEW.md + 最多3轮修复)\n  └─ 复杂算子: TileLang→AscendC 转译 (tilelang2ascend-translator + 退化检测 + 迭代)\nPhase 5: 性能分析              (ops-profiling --quick 模式)\nPhase 6: 全量用例验证\nPhase 7: Trace 记录            (tilelang2ascend-trace-recorder)",
+      "files": 1
+    },
+    {
+      "body_sha256": "866ad450e897addc9291f5a9dae01c78524b7343bda5063015dddb2c02fb474e",
+      "example": "cudaLLM/tyz_0817/391_bitwise_or__sub_tilelang2ascendc-kernel-generator.raw.json",
+      "exact_source_match": false,
+      "outline": "Phase 0: 参数确认 + 算子分类    (解析输入，判定简单/复杂路径)\nPhase 1: 环境准备 + 工程初始化  (复制算子文件 + 初始化 kernel 工程 + 算子注册)\nPhase 2: 测试用例精简           (tilelang2ascend-case-simplifier)\nPhase 3: 设计表达              (分支)\n  ├─ 简单算子: 架构设计 + 设计串讲 (ops-direct-invoke: DESIGN.md + PLAN.md + WALKTHROUGH.md)\n  └─ 复杂算子: TileLang 设计  (tilelang2ascend-tilelang-designer + 退化检测 + 迭代)\nPhase 4: AscendC 生成与验证    (分支)\n  ├─ 简单算子: 开发实现 + 代码审查 + 修复循环 (ops-direct-invoke: 渐进式开发 + REVIEW.md + 最多3轮修复)\n  └─ 复杂算子: TileLang→AscendC 转译 (tilelang2ascend-translator + 退化检测 + 迭代)\nPhase 5: 性能分析              (ops-profiling --quick 模式)\nPhase 6: 全量用例验证\nPhase 7: Trace 记录            (tilelang2ascend-trace-recorder)",
+      "files": 1
+    },
+    {
+      "body_sha256": "d2cd3f8f3b421f4e032236981c047feb93bcdda14c88d3bb5a48f088b3a89ab5",
+      "example": "cudaLLM/tyz_0817/401_bitwise_and__sub_tilelang2ascendc-kernel-generator.raw.json",
+      "exact_source_match": false,
+      "outline": "Phase 0: 参数确认 + 算子分类    (解析输入，判定简单/复杂路径)\nPhase 1: 环境准备 + 工程初始化  (复制算子文件 + 初始化 kernel 工程 + 算子注册)\nPhase 2: 测试用例精简           (tilelang2ascend-case-simplifier)\nPhase 3: 设计表达              (分支)\n  ├─ 简单算子: 架构设计 + 设计串讲 (ops-direct-invoke: DESIGN.md + PLAN.md + WALKTHROUGH.md)\n  └─ 复杂算子: TileLang 设计  (tilelang2ascend-tilelang-designer + 退化检测 + 迭代)\nPhase 4: AscendC 生成与验证    (分支)\n  ├─ 简单算子: 开发实现 + 代码审查 + 修复循环 (ops-direct-invoke: 渐进式开发 + REVIEW.md + 最多3轮修复)\n  └─ 复杂算子: TileLang→AscendC 转译 (tilelang2ascend-translator + 退化检测 + 迭代)\nPhase 5: 性能分析              (ops-profiling --quick 模式)\nPhase 6: 全量用例验证\nPhase 7: Trace 记录            (tilelang2ascend-trace-recorder)",
+      "files": 1
+    },
+    {
+      "body_sha256": "c9ff69e0e448c22bc6a8dbb5fb89d5c67f54be85e85a3048032c8c4289c1221d",
+      "example": "cudaLLM/tyz_0817/71_TransformerDecoder__sub_tilelang2ascendc-kernel-generator.raw.json",
+      "exact_source_match": false,
+      "outline": "Phase 0: 参数确认 + 算子分类    (解析输入，判定简单/复杂路径)\nPhase 1: 环境准备 + 工程初始化  (复制算子文件 + 初始化 kernel 工程 + 算子注册)\nPhase 2: 测试用例精简           (tilelang2ascend-case-simplifier)\nPhase 3: 设计表达              (分支)\n  ├─ 简单算子: 架构设计 + 设计串讲 (ops-direct-invoke: DESIGN.md + PLAN.md + WALKTHROUGH.md)\n  └─ 复杂算子: TileLang 设计  (tilelang2ascend-tilelang-designer + 退化检测 + 迭代)\nPhase 4: AscendC 生成与验证    (分支)\n  ├─ 简单算子: 开发实现 + 代码审查 + 修复循环 (ops-direct-invoke: 渐进式开发 + REVIEW.md + 最多3轮修复)\n  └─ 复杂算子: TileLang→AscendC 转译 (tilelang2ascend-translator + 退化检测 + 迭代)\nPhase 5: 性能分析              (ops-profiling --quick 模式)\nPhase 6: 全量用例验证\nPhase 7: Trace 记录            (tilelang2ascend-trace-recorder)",
+      "files": 1
+    },
+    {
+      "body_sha256": "45c1b0c25d98f365d8d70439677b9ca60106ae0e2867b2b7a961202dbcd0e3b2",
+      "example": "level_0/10_Relu__sub_ascend-kernel-developer.raw.json",
+      "exact_source_match": false,
+      "outline": "Phase 0: 参数确认 + 算子分类    (解析输入，判定简单/复杂路径)\nPhase 1: 环境准备 + 工程初始化  (复制算子文件 + 初始化 kernel 工程 + 算子注册)\nPhase 2: 测试用例精简           (ascendc-case-simplifier)\nPhase 3: 设计表达              (分支)\n  ├─ 简单算子: design.md 生成 (ascendc-design-doc-generator)\n  └─ 复杂算子: TileLang 设计  (ascendc-tilelang-designer + 退化检测 + 迭代)\nPhase 4: AscendC 生成与验证    (分支)\n  ├─ 简单算子: 模板代码生成    (ascendc-code-gen + 退化检测 + 迭代)\n  └─ 复杂算子: TileLang→AscendC 转译 (ascendc-translator + 退化检测 + 迭代)\nPhase 5: 性能分析              (ascendc-performance-analyzer)\nPhase 6: 全量用例验证\nPhase 7: Trace 记录            (ascendc-trace-recorder)",
+      "files": 1
+    },
+    {
+      "body_sha256": "817ea6d338d9e73dbd2ef3df57100cbc0331cee62cc0e6cb3d1b2890bed1f550",
+      "example": "level_0/17_LogAddExp__sub_ascend-kernel-developer.raw.json",
+      "exact_source_match": false,
+      "outline": "Phase 0: 参数确认 + 算子分类    (解析输入，判定简单/复杂路径)\nPhase 1: 环境准备 + 工程初始化  (复制算子文件 + 初始化 kernel 工程 + 算子注册)\nPhase 2: 测试用例精简           (ascendc-case-simplifier)\nPhase 3: 设计表达              (分支)\n  ├─ 简单算子: design.md 生成 (ascendc-design-doc-generator)\n  └─ 复杂算子: TileLang 设计  (ascendc-tilelang-designer + 退化检测 + 迭代)\nPhase 4: AscendC 生成与验证    (分支)\n  ├─ 简单算子: 模板代码生成    (ascendc-code-gen + 退化检测 + 迭代)\n  └─ 复杂算子: TileLang→AscendC 转译 (ascendc-translator + 退化检测 + 迭代)\nPhase 5: 性能分析              (ascendc-performance-analyzer)\nPhase 6: 全量用例验证\nPhase 7: Trace 记录            (ascendc-trace-recorder)",
+      "files": 1
+    },
+    {
+      "body_sha256": "059fa9ac8ecb63e64763dd8d8b6f4d8caaababdc9b4d37bf8697c7e31f33dfc1",
+      "example": "level_1/lzq/12_Permute__sub_ascend-kernel-developer.json",
+      "exact_source_match": false,
+      "outline": "Phase 0: 参数确认 + 算子分类    (解析输入，判定简单/复杂路径)\nPhase 1: 环境准备 + 工程初始化  (复制算子文件 + 初始化 kernel 工程 + 算子注册)\nPhase 2: 测试用例精简           (ascendc-case-simplifier)\nPhase 3: 设计表达              (分支)\n  ├─ 简单算子: design.md 生成 (ascendc-design-doc-generator)\n  └─ 复杂算子: TileLang 设计  (ascendc-tilelang-designer + 退化检测 + 迭代)\nPhase 4: AscendC 生成与验证    (分支)\n  ├─ 简单算子: 模板代码生成    (ascendc-code-gen + 退化检测 + 迭代)\n  └─ 复杂算子: TileLang→AscendC 转译 (ascendc-translator + 退化检测 + 迭代)\nPhase 5: 性能分析              (ascendc-performance-analyzer)\nPhase 6: 全量用例验证\nPhase 7: Trace 记录            (ascendc-trace-recorder)",
+      "files": 1
+    },
+    {
+      "body_sha256": "75bc01b1876de84b1a4ead767e5da5ec592418a39afd44f7b850bd0adcda7ba7",
+      "example": "level_1/lzq/16_Repeat__sub_ascend-kernel-developer.json",
+      "exact_source_match": false,
+      "outline": "Phase 0: 参数确认 + 算子分类    (解析输入，判定简单/复杂路径)\nPhase 1: 环境准备 + 工程初始化  (复制算子文件 + 初始化 kernel 工程 + 算子注册)\nPhase 2: 测试用例精简           (ascendc-case-simplifier)\nPhase 3: 设计表达              (分支)\n  ├─ 简单算子: design.md 生成 (ascendc-design-doc-generator)\n  └─ 复杂算子: TileLang 设计  (ascendc-tilelang-designer + 退化检测 + 迭代)\nPhase 4: AscendC 生成与验证    (分支)\n  ├─ 简单算子: 模板代码生成    (ascendc-code-gen + 退化检测 + 迭代)\n  └─ 复杂算子: TileLang→AscendC 转译 (ascendc-translator + 退化检测 + 迭代)\nPhase 5: 性能分析              (ascendc-performance-analyzer)\nPhase 6: 全量用例验证\nPhase 7: Trace 记录            (ascendc-trace-recorder)",
+      "files": 1
+    },
+    {
+      "body_sha256": "62d224fdc2519f9843aa05000e59124e76219ada0718d09fec3963880942cb4c",
+      "example": "level_1/lzq/24_EmbeddingDenseBackward__sub_ascend-kernel-developer.json",
+      "exact_source_match": false,
+      "outline": "Phase 0: 参数确认 + 算子分类    (解析输入，判定简单/复杂路径)\nPhase 1: 环境准备 + 工程初始化  (复制算子文件 + 初始化 kernel 工程 + 算子注册)\nPhase 2: 测试用例精简           (ascendc-case-simplifier)\nPhase 3: 设计表达              (分支)\n  ├─ 简单算子: design.md 生成 (ascendc-design-doc-generator)\n  └─ 复杂算子: TileLang 设计  (ascendc-tilelang-designer + 退化检测 + 迭代)\nPhase 4: AscendC 生成与验证    (分支)\n  ├─ 简单算子: 模板代码生成    (ascendc-code-gen + 退化检测 + 迭代)\n  └─ 复杂算子: TileLang→AscendC 转译 (ascendc-translator + 退化检测 + 迭代)\nPhase 5: 性能分析              (ascendc-performance-analyzer)\nPhase 6: 全量用例验证\nPhase 7: Trace 记录            (ascendc-trace-recorder)",
+      "files": 1
+    },
+    {
+      "body_sha256": "cb3b695b2a07a08435aa2e7901154519c0bf9547a4ecca548669d8c8b1613031",
+      "example": "level_1/sft第一次的成功结果/18_Index__sub_ascend-kernel-developer.json",
+      "exact_source_match": false,
+      "outline": "Phase 0: 参数确认 + 算子分类    (解析输入，判定简单/复杂路径)\nPhase 1: 环境准备 + 工程初始化  (复制算子文件 + 初始化 kernel 工程 + 算子注册)\nPhase 2: 测试用例精简           (ascendc-case-simplifier)\nPhase 3: 设计表达              (分支)\n  ├─ 简单算子: design.md 生成 (ascendc-design-doc-generator)\n  └─ 复杂算子: TileLang 设计  (ascendc-tilelang-designer + 退化检测 + 迭代)\nPhase 4: AscendC 生成与验证    (分支)\n  ├─ 简单算子: 模板代码生成    (ascendc-code-gen + 退化检测 + 迭代)\n  └─ 复杂算子: TileLang→AscendC 转译 (ascendc-translator + 退化检测 + 迭代)\nPhase 5: 性能分析              (ascendc-performance-analyzer)\nPhase 6: 全量用例验证\nPhase 7: Trace 记录            (ascendc-trace-recorder)",
+      "files": 1
+    },
+    {
+      "body_sha256": "d1ca6bd51cd69df009e0d958e1069a34c032437be8d26aa9c7e1237c45980bf2",
+      "example": "level_1/tianyazhang/13_Cat__sub_ascend-kernel-developer.raw.json",
+      "exact_source_match": false,
+      "outline": "Phase 0: 参数确认 + 算子分类    (解析输入，判定简单/复杂路径)\nPhase 1: 环境准备 + 工程初始化  (复制算子文件 + 初始化 kernel 工程 + 算子注册)\nPhase 2: 测试用例精简           (ascendc-case-simplifier)\nPhase 3: 设计表达              (分支)\n  ├─ 简单算子: design.md 生成 (ascendc-design-doc-generator)\n  └─ 复杂算子: TileLang 设计  (ascendc-tilelang-designer + 退化检测 + 迭代)\nPhase 4: AscendC 生成与验证    (分支)\n  ├─ 简单算子: 模板代码生成    (ascendc-code-gen + 退化检测 + 迭代)\n  └─ 复杂算子: TileLang→AscendC 转译 (ascendc-translator + 退化检测 + 迭代)\nPhase 5: 性能分析              (ascendc-performance-analyzer)\nPhase 6: 全量用例验证\nPhase 7: Trace 记录            (ascendc-trace-recorder)",
+      "files": 1
+    },
+    {
+      "body_sha256": "6193f3d641e73d26d3eeef4717d928973495c85f44c30dcb2e58f6e805abd0c2",
+      "example": "level_1/tianyazhang/15_Pad__sub_ascend-kernel-developer.raw.json",
+      "exact_source_match": false,
+      "outline": "Phase 0: 参数确认 + 算子分类    (解析输入，判定简单/复杂路径)\nPhase 1: 环境准备 + 工程初始化  (复制算子文件 + 初始化 kernel 工程 + 算子注册)\nPhase 2: 测试用例精简           (ascendc-case-simplifier)\nPhase 3: 设计表达              (分支)\n  ├─ 简单算子: design.md 生成 (ascendc-design-doc-generator)\n  └─ 复杂算子: TileLang 设计  (ascendc-tilelang-designer + 退化检测 + 迭代)\nPhase 4: AscendC 生成与验证    (分支)\n  ├─ 简单算子: 模板代码生成    (ascendc-code-gen + 退化检测 + 迭代)\n  └─ 复杂算子: TileLang→AscendC 转译 (ascendc-translator + 退化检测 + 迭代)\nPhase 5: 性能分析              (ascendc-performance-analyzer)\nPhase 6: 全量用例验证\nPhase 7: Trace 记录            (ascendc-trace-recorder)",
+      "files": 1
+    },
+    {
+      "body_sha256": "779741a9008f4bd9fb631dc86b018c0fbf5bb16d70bfb647700ad4a2c5999d71",
+      "example": "level_1/tianyazhang/1_GELU__sub_ascend-kernel-developer.raw.json",
+      "exact_source_match": false,
+      "outline": "Phase 0: 参数确认 + 算子分类    (解析输入，判定简单/复杂路径)\nPhase 1: 环境准备 + 工程初始化  (复制算子文件 + 初始化 kernel 工程 + 算子注册)\nPhase 2: 测试用例精简           (ascendc-case-simplifier)\nPhase 3: 设计表达              (分支)\n  ├─ 简单算子: design.md 生成 (ascendc-design-doc-generator)\n  └─ 复杂算子: TileLang 设计  (ascendc-tilelang-designer + 退化检测 + 迭代)\nPhase 4: AscendC 生成与验证    (分支)\n  ├─ 简单算子: 模板代码生成    (ascendc-code-gen + 退化检测 + 迭代)\n  └─ 复杂算子: TileLang→AscendC 转译 (ascendc-translator + 退化检测 + 迭代)\nPhase 5: 性能分析              (ascendc-performance-analyzer)\nPhase 6: 全量用例验证\nPhase 7: Trace 记录            (ascendc-trace-recorder)",
+      "files": 1
+    },
+    {
+      "body_sha256": "ac0f025dd89929bdd3e0020cc6bd8ee9cb3d23aae5b18b3e3bc06540fa4dde98",
+      "example": "level_1/tianyazhang/20_Gather__sub_ascend-kernel-developer.raw.json",
+      "exact_source_match": false,
+      "outline": "Phase 0: 参数确认 + 算子分类    (解析输入，判定简单/复杂路径)\nPhase 1: 环境准备 + 工程初始化  (复制算子文件 + 初始化 kernel 工程 + 算子注册)\nPhase 2: 测试用例精简           (ascendc-case-simplifier)\nPhase 3: 设计表达              (分支)\n  ├─ 简单算子: design.md 生成 (ascendc-design-doc-generator)\n  └─ 复杂算子: TileLang 设计  (ascendc-tilelang-designer + 退化检测 + 迭代)\nPhase 4: AscendC 生成与验证    (分支)\n  ├─ 简单算子: 模板代码生成    (ascendc-code-gen + 退化检测 + 迭代)\n  └─ 复杂算子: TileLang→AscendC 转译 (ascendc-translator + 退化检测 + 迭代)\nPhase 5: 性能分析              (ascendc-performance-analyzer)\nPhase 6: 全量用例验证\nPhase 7: Trace 记录            (ascendc-trace-recorder)",
+      "files": 1
+    },
+    {
+      "body_sha256": "1b3dcc89a027476c986f5e0b31f1f76414dccab2a4936f13f892d2e551c37604",
+      "example": "level_1/tianyazhang/21_Scatter__sub_ascend-kernel-developer.raw.json",
+      "exact_source_match": false,
+      "outline": "Phase 0: 参数确认 + 算子分类    (解析输入，判定简单/复杂路径)\nPhase 1: 环境准备 + 工程初始化  (复制算子文件 + 初始化 kernel 工程 + 算子注册)\nPhase 2: 测试用例精简           (ascendc-case-simplifier)\nPhase 3: 设计表达              (分支)\n  ├─ 简单算子: design.md 生成 (ascendc-design-doc-generator)\n  └─ 复杂算子: TileLang 设计  (ascendc-tilelang-designer + 退化检测 + 迭代)\nPhase 4: AscendC 生成与验证    (分支)\n  ├─ 简单算子: 模板代码生成    (ascendc-code-gen + 退化检测 + 迭代)\n  └─ 复杂算子: TileLang→AscendC 转译 (ascendc-translator + 退化检测 + 迭代)\nPhase 5: 性能分析              (ascendc-performance-analyzer)\nPhase 6: 全量用例验证\nPhase 7: Trace 记录            (ascendc-trace-recorder)",
+      "files": 1
+    },
+    {
+      "body_sha256": "99df4748310dbf8e821b134b4b4cc75459519221f0330b661e88c72dffaa0ea7",
+      "example": "level_1/tianyazhang/30_NMS__sub_ascend-kernel-developer.raw.json",
+      "exact_source_match": false,
+      "outline": "Phase 0: 参数确认 + 算子分类    (解析输入，判定简单/复杂路径)\nPhase 1: 环境准备 + 工程初始化  (复制算子文件 + 初始化 kernel 工程 + 算子注册)\nPhase 2: 测试用例精简           (ascendc-case-simplifier)\nPhase 3: 设计表达              (分支)\n  ├─ 简单算子: design.md 生成 (ascendc-design-doc-generator)\n  └─ 复杂算子: TileLang 设计  (ascendc-tilelang-designer + 退化检测 + 迭代)\nPhase 4: AscendC 生成与验证    (分支)\n  ├─ 简单算子: 模板代码生成    (ascendc-code-gen + 退化检测 + 迭代)\n  └─ 复杂算子: TileLang→AscendC 转译 (ascendc-translator + 退化检测 + 迭代)\nPhase 5: 性能分析              (ascendc-performance-analyzer)\nPhase 6: 全量用例验证\nPhase 7: Trace 记录            (ascendc-trace-recorder)",
+      "files": 1
+    },
+    {
+      "body_sha256": "2cf6e1120b7becda99cc7e8076c68728389ad7df6010bc03d736a47b08a53fc2",
+      "example": "level_1/tianyazhang/31_IOU__sub_ascend-kernel-developer.raw.json",
+      "exact_source_match": false,
+      "outline": "Phase 0: 参数确认 + 算子分类    (解析输入，判定简单/复杂路径)\nPhase 1: 环境准备 + 工程初始化  (复制算子文件 + 初始化 kernel 工程 + 算子注册)\nPhase 2: 测试用例精简           (ascendc-case-simplifier)\nPhase 3: 设计表达              (分支)\n  ├─ 简单算子: design.md 生成 (ascendc-design-doc-generator)\n  └─ 复杂算子: TileLang 设计  (ascendc-tilelang-designer + 退化检测 + 迭代)\nPhase 4: AscendC 生成与验证    (分支)\n  ├─ 简单算子: 模板代码生成    (ascendc-code-gen + 退化检测 + 迭代)\n  └─ 复杂算子: TileLang→AscendC 转译 (ascendc-translator + 退化检测 + 迭代)\nPhase 5: 性能分析              (ascendc-performance-analyzer)\nPhase 6: 全量用例验证\nPhase 7: Trace 记录            (ascendc-trace-recorder)",
+      "files": 1
+    },
+    {
+      "body_sha256": "040ef4055ac73a0ec2d783626ba05de9ae3dabcccd65fb0e41f2781eca93917d",
+      "example": "level_1/tianyazhang/4_Abs__sub_ascend-kernel-developer.raw.json",
+      "exact_source_match": false,
+      "outline": "Phase 0: 参数确认 + 算子分类    (解析输入，判定简单/复杂路径)\nPhase 1: 环境准备 + 工程初始化  (复制算子文件 + 初始化 kernel 工程 + 算子注册)\nPhase 2: 测试用例精简           (ascendc-case-simplifier)\nPhase 3: 设计表达              (分支)\n  ├─ 简单算子: design.md 生成 (ascendc-design-doc-generator)\n  └─ 复杂算子: TileLang 设计  (ascendc-tilelang-designer + 退化检测 + 迭代)\nPhase 4: AscendC 生成与验证    (分支)\n  ├─ 简单算子: 模板代码生成    (ascendc-code-gen + 退化检测 + 迭代)\n  └─ 复杂算子: TileLang→AscendC 转译 (ascendc-translator + 退化检测 + 迭代)\nPhase 5: 性能分析              (ascendc-performance-analyzer)\nPhase 6: 全量用例验证\nPhase 7: Trace 记录            (ascendc-trace-recorder)",
+      "files": 1
+    },
+    {
+      "body_sha256": "ea98be40ffaded7533f02befcb80578b57784123be4b4c47270414fcd2ed6e53",
+      "example": "level_1/tianyazhang/5_Cumsum__sub_ascend-kernel-developer.raw.json",
+      "exact_source_match": false,
+      "outline": "Phase 0: 参数确认 + 算子分类    (解析输入，判定简单/复杂路径)\nPhase 1: 环境准备 + 工程初始化  (复制算子文件 + 初始化 kernel 工程 + 算子注册)\nPhase 2: 测试用例精简           (ascendc-case-simplifier)\nPhase 3: 设计表达              (分支)\n  ├─ 简单算子: design.md 生成 (ascendc-design-doc-generator)\n  └─ 复杂算子: TileLang 设计  (ascendc-tilelang-designer + 退化检测 + 迭代)\nPhase 4: AscendC 生成与验证    (分支)\n  ├─ 简单算子: 模板代码生成    (ascendc-code-gen + 退化检测 + 迭代)\n  └─ 复杂算子: TileLang→AscendC 转译 (ascendc-translator + 退化检测 + 迭代)\nPhase 5: 性能分析              (ascendc-performance-analyzer)\nPhase 6: 全量用例验证\nPhase 7: Trace 记录            (ascendc-trace-recorder)",
+      "files": 1
+    },
+    {
+      "body_sha256": "2891a89764687f13923c22a44054af190a417266922fc0d2346f90ba12cdd9bd",
+      "example": "level_1/第一批收集/23_RepeatInterleave__sub_ascend-kernel-developer.raw.json",
+      "exact_source_match": false,
+      "outline": "Phase 0: 参数确认 + 算子分类    (解析输入，判定简单/复杂路径)\nPhase 1: 环境准备 + 工程初始化  (复制算子文件 + 初始化 kernel 工程 + 算子注册)\nPhase 2: 测试用例精简           (ascendc-case-simplifier)\nPhase 3: 设计表达              (分支)\n  ├─ 简单算子: design.md 生成 (ascendc-design-doc-generator)\n  └─ 复杂算子: TileLang 设计  (ascendc-tilelang-designer + 退化检测 + 迭代)\nPhase 4: AscendC 生成与验证    (分支)\n  ├─ 简单算子: 模板代码生成    (ascendc-code-gen + 退化检测 + 迭代)\n  └─ 复杂算子: TileLang→AscendC 转译 (ascendc-translator + 退化检测 + 迭代)\nPhase 5: 性能分析              (ascendc-performance-analyzer)\nPhase 6: 全量用例验证\nPhase 7: Trace 记录            (ascendc-trace-recorder)",
+      "files": 1
+    },
+    {
+      "body_sha256": "2ff7560df99c55b57970ffb8b057fdfec6cdb41c7040f27708bedf746b98697e",
+      "example": "level_1/第一批收集/9_TopK__sub_ascend-kernel-developer.raw.json",
+      "exact_source_match": false,
+      "outline": "Phase 0: 参数确认 + 算子分类    (解析输入，判定简单/复杂路径)\nPhase 1: 环境准备 + 工程初始化  (复制算子文件 + 初始化 kernel 工程 + 算子注册)\nPhase 2: 测试用例精简           (ascendc-case-simplifier)\nPhase 3: 设计表达              (分支)\n  ├─ 简单算子: design.md 生成 (ascendc-design-doc-generator)\n  └─ 复杂算子: TileLang 设计  (ascendc-tilelang-designer + 退化检测 + 迭代)\nPhase 4: AscendC 生成与验证    (分支)\n  ├─ 简单算子: 模板代码生成    (ascendc-code-gen + 退化检测 + 迭代)\n  └─ 复杂算子: TileLang→AscendC 转译 (ascendc-translator + 退化检测 + 迭代)\nPhase 5: 性能分析              (ascendc-performance-analyzer)\nPhase 6: 全量用例验证\nPhase 7: Trace 记录            (ascendc-trace-recorder)",
+      "files": 1
+    },
+    {
+      "body_sha256": "7c637e72812a521ee0fc4130228690388881b7d04120dea6ae0636af22a3828c",
+      "example": "level_2/liziqi/1_RotaryMul__sub_ascend-kernel-developer.json",
+      "exact_source_match": false,
+      "outline": "Phase 0: 参数确认 + 算子分类    (解析输入，判定简单/复杂路径)\nPhase 1: 环境准备 + 工程初始化  (复制算子文件 + 初始化 kernel 工程 + 算子注册)\nPhase 2: 测试用例精简           (ascendc-case-simplifier)\nPhase 3: 设计表达              (分支)\n  ├─ 简单算子: design.md 生成 (ascendc-design-doc-generator)\n  └─ 复杂算子: TileLang 设计  (ascendc-tilelang-designer + 退化检测 + 迭代)\nPhase 4: AscendC 生成与验证    (分支)\n  ├─ 简单算子: 模板代码生成    (ascendc-code-gen + 退化检测 + 迭代)\n  └─ 复杂算子: TileLang→AscendC 转译 (ascendc-translator + 退化检测 + 迭代)\nPhase 5: 性能分析              (ascendc-performance-analyzer)\nPhase 6: 全量用例验证\nPhase 7: Trace 记录            (ascendc-trace-recorder)",
+      "files": 1
+    },
+    {
+      "body_sha256": "d337c9f810ef9364112908683284b53108fe2b0af7e48522acdde3db1e6b8263",
+      "example": "level_2/liziqi/27_MultiMaskAttentionAggregation__sub_ascend-kernel-developer.json",
+      "exact_source_match": false,
+      "outline": "Phase 0: 参数确认 + 算子分类    (解析输入，判定简单/复杂路径)\nPhase 1: 环境准备 + 工程初始化  (复制算子文件 + 初始化 kernel 工程 + 算子注册)\nPhase 2: 测试用例精简           (ascendc-case-simplifier)\nPhase 3: 设计表达              (分支)\n  ├─ 简单算子: design.md 生成 (ascendc-design-doc-generator)\n  └─ 复杂算子: TileLang 设计  (ascendc-tilelang-designer + 退化检测 + 迭代)\nPhase 4: AscendC 生成与验证    (分支)\n  ├─ 简单算子: 模板代码生成    (ascendc-code-gen + 退化检测 + 迭代)\n  └─ 复杂算子: TileLang→AscendC 转译 (ascendc-translator + 退化检测 + 迭代)\nPhase 5: 性能分析              (ascendc-performance-analyzer)\nPhase 6: 全量用例验证\nPhase 7: Trace 记录            (ascendc-trace-recorder)",
+      "files": 1
+    },
+    {
+      "body_sha256": "c67b54b2ee9f5b0d7bfd15ddd86e50d41d04569db6413e7d5cbd68ce2c9d6b71",
+      "example": "level_2/liziqi/29_TanhGatedResidualAddBackward__sub_ascend-kernel-developer.json",
+      "exact_source_match": false,
+      "outline": "Phase 0: 参数确认 + 算子分类    (解析输入，判定简单/复杂路径)\nPhase 1: 环境准备 + 工程初始化  (复制算子文件 + 初始化 kernel 工程 + 算子注册)\nPhase 2: 测试用例精简           (ascendc-case-simplifier)\nPhase 3: 设计表达              (分支)\n  ├─ 简单算子: design.md 生成 (ascendc-design-doc-generator)\n  └─ 复杂算子: TileLang 设计  (ascendc-tilelang-designer + 退化检测 + 迭代)\nPhase 4: AscendC 生成与验证    (分支)\n  ├─ 简单算子: 模板代码生成    (ascendc-code-gen + 退化检测 + 迭代)\n  └─ 复杂算子: TileLang→AscendC 转译 (ascendc-translator + 退化检测 + 迭代)\nPhase 5: 性能分析              (ascendc-performance-analyzer)\nPhase 6: 全量用例验证\nPhase 7: Trace 记录            (ascendc-trace-recorder)",
+      "files": 1
+    },
+    {
+      "body_sha256": "aa9d799696a9e253074c5a70f364fc83911fc2034589fd25a5b2c09844959511",
+      "example": "level_2/liziqi/30_TimeDecayExponentialStabilization__sub_ascend-kernel-developer.json",
+      "exact_source_match": false,
+      "outline": "Phase 0: 参数确认 + 算子分类    (解析输入，判定简单/复杂路径)\nPhase 1: 环境准备 + 工程初始化  (复制算子文件 + 初始化 kernel 工程 + 算子注册)\nPhase 2: 测试用例精简           (ascendc-case-simplifier)\nPhase 3: 设计表达              (分支)\n  ├─ 简单算子: design.md 生成 (ascendc-design-doc-generator)\n  └─ 复杂算子: TileLang 设计  (ascendc-tilelang-designer + 退化检测 + 迭代)\nPhase 4: AscendC 生成与验证    (分支)\n  ├─ 简单算子: 模板代码生成    (ascendc-code-gen + 退化检测 + 迭代)\n  └─ 复杂算子: TileLang→AscendC 转译 (ascendc-translator + 退化检测 + 迭代)\nPhase 5: 性能分析              (ascendc-performance-analyzer)\nPhase 6: 全量用例验证\nPhase 7: Trace 记录            (ascendc-trace-recorder)",
+      "files": 1
+    },
+    {
+      "body_sha256": "960eec05ed2ac6b5e654a9a25b86bd2830d445d7abc82bc50455f81269d33c97",
+      "example": "level_2/zhouxupeng/27_MultiMaskAttentionAggregation__sub_ascend-kernel-developer.json",
+      "exact_source_match": false,
+      "outline": "Phase 0: 参数确认 + 算子分类    (解析输入，判定简单/复杂路径)\nPhase 1: 环境准备 + 工程初始化  (复制算子文件 + 初始化 kernel 工程 + 算子注册)\nPhase 2: 测试用例精简           (ascendc-case-simplifier)\nPhase 3: 设计表达              (分支)\n  ├─ 简单算子: design.md 生成 (ascendc-design-doc-generator)\n  └─ 复杂算子: TileLang 设计  (ascendc-tilelang-designer + 退化检测 + 迭代)\nPhase 4: AscendC 生成与验证    (分支)\n  ├─ 简单算子: 模板代码生成    (ascendc-code-gen + 退化检测 + 迭代)\n  └─ 复杂算子: TileLang→AscendC 转译 (ascendc-translator + 退化检测 + 迭代)\nPhase 5: 性能分析              (ascendc-performance-analyzer)\nPhase 6: 全量用例验证\nPhase 7: Trace 记录            (ascendc-trace-recorder)",
+      "files": 1
+    }
+  ]
+}
