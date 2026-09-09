@@ -18,11 +18,12 @@ argument-hint: >
 - `{output_dir}/model.py` — 唯一语义参考
 - `{output_dir}/kernel/` 与 `{output_dir}/model_new_ascendc.py` — Polar prepare 预生成骨架
 
-若 `op_type == "complex"`，还必须存在：
+若 `op_type == "complex"` 且 TileLang AST 已通过，还应参考：
 - `{output_dir}/design/tile_level/` — TileLang tile-level 设计，作为转译输入
 - `{output_dir}/model_new_tilelang.py` — TileLang 绑定层/设计表达，可参考但不作为正确性依据
 
 若 `op_type == "simple"`，不要求也不要为了满足本 skill 而新建 TileLang 产物。
+复杂路径达到 CLAUDE.md 规定的 AST 回退条件时，同样只以 reference 和骨架继续；不重建失败的中间产物。
 
 ## 关键限制
 - 必须将核心计算融合成单个算子实现，不要拆分成多个独立算子。
@@ -33,7 +34,8 @@ argument-hint: >
   `$ASC_DEVKIT_DIR`，用于查阅当前 CANN 环境配套的官方文档、示例和实现参考。
   禁止读取其他工作区外路径。
 - 禁止读取 `.claude/skills/tilelang2ascend-translator/references/TileLangAscendProgrammingGuide.md`；该文档是 TileLang 编程指南，仅供 TileLang 阶段使用，与本阶段无关。
-- 预生成骨架是唯一工程契约。禁止调用项目初始化 skill、复制其他任务或模板、重建整个工程。
+- 预生成骨架是唯一工程起点，不是算子语义契约。禁止调用项目初始化 skill、复制其他任务或模板重建整个工程。
+- `empty_like`、dtype/连续性检查、单输出与恒等拷贝均是占位；输出、分支、参数与布局以原始 reference 为准，不能只补 Compute 而保留不适用的 host/kernel 假设。
 - `kernel/CMakeLists.txt`、`kernel/setup.py`、`kernel/utils/` 和 `model_new_ascendc.py` 的双路径 loader 属于机制件，默认原样保留。
 - 如果 reference 的真实接口要求变化，允许同步修改 `model_new_ascendc.py` 调用、`register.cpp` schema、`ops.h` 声明和 `op_host` 实现；禁止只改其中一处造成签名断链。
 - 严格按照算子描述生成kernel，ascend c kernel的功能应该和标杆完全一致，不能出现部分功能使用ascend c，部分使用torch算子的情况
@@ -68,6 +70,9 @@ argument-hint: >
 
 ## Skill 参考资料
 本 skill 提供以下参考资料：
+- `.claude/workflows/templates/design-template.md` — cannbot 原有设计模板，按下方「内嵌设计与审查」读取相关章节，不要求填写整份文档
+- `.claude/skills/ascendc-tiling-design/SKILL.md` — cannbot 原有 tiling 场景索引与设计要素
+- `.claude/skills/ascendc-api-best-practices/SKILL.md` — cannbot 原有 API 场景索引；按本题操作读取相关 references，不另造 API 对照表
 - `.claude/skills/tilelang2ascend-translator/references/dsl2Ascendc.md` — TileLang 转 AscendC 指南
 - `.claude/skills/tilelang2ascend-translator/references/TileLang-AscendC-API-Mapping.md` — TileLang 与 AscendC API 映射表
 - `.claude/skills/tilelang2ascend-translator/references/AscendCVerification.md` — AscendC 验证指南
@@ -170,7 +175,10 @@ find "$ASC_DEVKIT_DIR/docs/zh/api" -type f -name "${APIName}*.md"
         find "$ASC_DEVKIT_DIR/docs/zh/api" -type f -name "${APIName}*.md"
 
     如果返回多个同名变体，必须按实际调用形式逐个核对，不得凭数字后缀猜测版本。
-    ⚠️ 每个 API 必须确认: ① 模板参数（类型/非类型）② 函数参数（个数/类型）③ dtype 支持矩阵 ④ work buffer 需求。
+    按已有 design-template.md §1.2.1「API 语义验证」核对本题布局与调用形式，而非只证明“读过文档”。
+    ⚠️ 对本轮使用/修改的 API 确认: ① 完整模板/函数签名与 LocalTensor/GlobalTensor/标量类型
+    ② 当前 SOC 的输入/输出 dtype ③ buffer 尺寸、对齐与生命周期 ④ 对应该调用形式的完整示例。
+    同名但不同重载、平台或布局的示例不能直接套用；找不到匹配证据时标明未知，继续查官方示例/实现，不猜调用。
     **禁止凭记忆或猜测 API 签名**。
 
     ── 数据搬运 ──
@@ -211,6 +219,7 @@ find "$ASC_DEVKIT_DIR/docs/zh/api" -type f -name "${APIName}*.md"
     - 完整函数参数名和类型
     - work buffer 需求 (需要/不需要, 如需要则列出 GetXxxMaxMinTmpSize 的查阅结果)
     - dtype 约束
+    - 支持当前调用形式的文档/示例实际路径与关键约束（复用已读证据，不抄全文）
 
 0.4 查阅 TBuf 用法:
     查找并阅读 `$ASC_DEVKIT_DIR/docs/zh/api/TBuf*.md`
@@ -293,16 +302,31 @@ find "$ASC_DEVKIT_DIR/docs/zh/api" -type f -name "${APIName}*.md"
 ## 流程
 首次实现前完成 **步骤 0-A（如触发）、步骤 0-B 和步骤 0-C（如触发）**；后续迭代按错误与改动范围只重读相关部分。
 
-### 简单路径的内嵌设计与审查
+### 内嵌设计与审查（复用 cannbot，简单路径也执行）
 
-当 `op_type == "simple"` 时，不调用额外 Agent，也不生成只为流程服务的 DESIGN / PLAN /
-WALKTHROUGH / REVIEW 文档；在当前上下文中完成下面两次结构检查：
+来源：cannbot-skills `13b2ae5652c75fe83a3e4114552a6477d3a01f3d` 的
+`plugins-community/tilelang2ascendc-ops-generator/agents/tilelang2ascendc-kernel-generator.md`
+Phase 3-S（设计与串讲）。复用其 `plugins-official/ops-direct-invoke/workflows/templates/design-template.md`
+及 `ops/ascendc-tiling-design`、`ops/ascendc-api-best-practices`；这些资料已在上方本地路径中，
+不要搜索或调用原插件。这里只把设计与自审放回当前主轨迹，不引入子代理和 DESIGN / PLAN /
+WALKTHROUGH / REVIEW 文件，也不执行模板中的用例生成、独立构建或评测命令。
+
+首次实现时 Read 上方设计模板 §0.2、§1.1–1.5、§2 与 tiling/API 索引，按实际计算图只读
+命中的 references。已有 TileLang 设计时核对并复用已有结论；AST 回退时回到 reference，
+不把退化 wrapper 当依据。文档中的硬件数值只是示例，以当前 SOC 和平台 API 为准。
 
 **实现前**：
-- 从 `model.py` 确认完整接口、输入输出布局、dtype、shape、广播/索引维度和边界行为。
+- 依模板 §0.2 保留原始需求：读原始 reference 的 `__init__`、完整 `forward`、辅助逻辑与
+  原版用例，标明依据位置。不能用算子名、骨架或历史答案替代它，不能省略子模块/参数和分支。
+- 将模板设计要点在主轨迹中简短核对六项，每项一两句；不适用写原因，不必复制整张表：
+  1. **核/tile 划分**：多核切分、UB 分块和 buffer 总量（模板 §1.5、§2.1–2.2）。
+  2. **归约/扫描轴**：逻辑轴与实际布局如何对应，跨 tile 依赖如何处理（§1.1、§1.3–1.4、§2.4）。
+  3. **非连续输入**：stride、广播/重排与访存映射，不能默认各输入同 shape/连续（§1.2.1、§2.3）。
+  4. **尾块**：有效长度与对齐长度分别用于哪里，GM 不得按 padding 长度越界读写（§1.4、§2.3）。
+  5. **累加 dtype**：输入、中间、累加和输出类型及舍入语义；以 reference 为准，不机械套用升精度（§1.1–1.2、§2.3 与 API precision 文档）。
+  6. **输出分配回写**：完整返回结构、各输出 shape/dtype、索引和回写范围（§1.1、§1.3、§1.5）。
 - 明确 Host 只负责校验、输出分配、tiling 和启动，所有 tensor 计算都在 kernel 内完成。
-- 明确多核切分、UB 分配、32B 对齐和尾块处理；核数与 UB 容量必须动态获取。
-- 对计划使用的 AscendC API 逐个查官方文档，不能凭记忆写签名。
+- API 选择按步骤 0-B 与模板 §1.2.1 核对布局、能力与限制；后续小修只更新受影响项，不重跑整份设计。
 
 **实现后、首次评测前**：
 - 核对 `model_new_ascendc.py → register.cpp → ops.h → op_host → op_kernel` 的参数顺序、类型、返回值完全一致。
@@ -358,7 +382,7 @@ WALKTHROUGH / REVIEW 文档；在当前上下文中完成下面两次结构检�
 - template class `Kernel<OpName>` 含 Init/Process/CopyIn/Compute/CopyOut
 - BUFFER_NUM = 2 (double buffer)；如算子需要在循环中同时持有多个 queue tensor，需相应增大 BUFFER_NUM
 - DataCopyPad 用于 GM↔UB 搬运
-- FP16/BF16 升精度到 FP32 计算
+- FP16/BF16 按 reference 的计算与舍入语义选择升精度策略，不能一律改为 FP32 累加
 - 整核/尾核偏移和尾块对齐处理
 
    **ops.h** 模式：

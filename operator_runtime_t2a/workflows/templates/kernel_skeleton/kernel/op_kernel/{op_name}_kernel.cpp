@@ -1,6 +1,7 @@
 // {op_name} device kernel — elementwise 骨架(dtype 分发 + 尾块 + 32B 对齐 + 双 buffer)
 // 数学在 Compute() 里,默认是 DataCopy 恒等拷贝(能编过、能注册、能跑通打包链路)。
-// 把 Compute() 的循环体换成你的算子数学即可,其余(tiling/双 buffer/dtype 分发)别动。
+// 必须按本题改写 tiling、buffer、尾块有效长度和全部输出,不能只替换 Compute。
+// dtypeSize==2 仅是 half 占位,不代表支持 BF16;整数/混合 dtype 须显式接线,不能只删 host 检查。
 #include "kernel_operator.h"
 
 constexpr int32_t BUFFER_NUM = 2;

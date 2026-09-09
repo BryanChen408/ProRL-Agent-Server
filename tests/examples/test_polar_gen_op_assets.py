@@ -244,3 +244,46 @@ def test_refresh_operator_task_prompts_can_emit_legacy_prompt(tmp_path: Path):
     assert "tools/triton_eval_pipeline.sh" in prompt
     assert "Small read-only probes" in prompt
     assert "第一次 Write/Edit/MultiEdit" not in prompt
+
+
+def test_refresh_t2a_only_changes_prompt_content_and_is_idempotent(tmp_path: Path):
+    refresh = _load_refresh_module()
+    path = tmp_path / "tasks.jsonl"
+    rows = [
+        {"prompt": [{"role": "user", "content": "old", "extra": "keep"}],
+         "label": f"label-{op}", "metadata": {"op_name": op, "operator_backend": "ascendc"},
+         "extra": [1, {"keep": True}]}
+        for op in ("second", "first")
+    ]
+    path.write_text("\n".join(json.dumps(r) for r in rows) + "\n")
+    path.chmod(0o640)
+    before = path.read_bytes()
+    result = refresh.refresh_prompts(path, workflow="t2a")
+    assert path.stat().st_mode & 0o777 == 0o640
+    assert result["changed"] == 2
+    assert Path(result["backup"]).read_bytes() == before
+    after = [json.loads(line) for line in path.read_text().splitlines()]
+    for original, updated in zip(rows, after):
+        text = updated["prompt"][0]["content"]
+        assert f"input/{original['metadata']['op_name']}.py" in text
+        assert "pre-generated project directory" in text
+        assert "ops-direct-invoke" not in text
+        updated["prompt"][0]["content"] = original["prompt"][0]["content"]
+        assert updated == original
+    assert refresh.refresh_prompts(path, backup=False, workflow="t2a")["changed"] == 0
+
+
+def test_refresh_t2a_rejects_mixed_backend_without_partial_write(tmp_path: Path):
+    refresh = _load_refresh_module()
+    path = tmp_path / "tasks.jsonl"
+    rows = [
+        {"prompt": [{"role": "user", "content": "old"}],
+         "metadata": {"op_name": "op", "operator_backend": backend}}
+        for backend in ("ascendc", "triton")
+    ]
+    path.write_text("\n".join(json.dumps(r) for r in rows) + "\n")
+    before = path.read_bytes()
+    with pytest.raises(RuntimeError, match="requires metadata.operator_backend=ascendc"):
+        refresh.refresh_prompts(path, backup=False, workflow="t2a")
+    assert path.read_bytes() == before
+    assert not list(tmp_path.glob("*.tmp"))

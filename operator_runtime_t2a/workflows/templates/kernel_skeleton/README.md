@@ -1,4 +1,4 @@
-# AscendC 算子打包骨架（自包含，可复制即用)
+# AscendC 算子打包骨架（由 Polar prepare 实例化）
 
 > **注意（签名生成化之后）**：骨架目录里的 `model_new_ascendc.py` / `register.cpp` /
 > `ops.h` / `op_host/{op_name}.cpp` / `op_kernel/{op_name}_kernel.cpp` 这 5 个**签名件**
@@ -10,16 +10,15 @@
 
 这份骨架是**和判分链路（`ascendc_eval_pipeline.sh` + `build_ascendc.py` +
 `verification_ascendc.py`）实测兼容的打包契约**，结构取自已跑通的
-`archive_tasks/rms_norm` 与 output1 的 67 个算子。把它整份复制成你的算子目录，
-只改标了 `{op_name}` / `{{ ... }}` 的地方和 kernel 数学,**打包相关的四件套
-（CMakeLists.txt / register.cpp / setup.py / model_new_ascendc.py 顶部）原样保留**。
+`archive_tasks/rms_norm` 与 output1 的 67 个算子。它是工程起点，**不是本题的正确实现**。
+保留 CMakeLists.txt / setup.py / utils / wrapper loader；按原始 reference 实现数学、
+输出与布局。接口变化时同步 wrapper 调用、register.cpp、ops.h 和 op_host。
 
 ## 用法
 
-```bash
-cp -r .claude/workflows/templates/kernel_skeleton {op_name}
-# 然后把 {op_name} 换成你的算子名(和数据集 op_name 一字不差),填 kernel 数学
-```
+Polar prepare 已生成工作目录顶层的 `{op_name}/`，直接原位开发，不要再次复制模板或
+另建工程。设计复用 `.claude/workflows/templates/design-template.md` 和本地 tiling/API
+知识文件，执行方式服从 `CLAUDE.md` 与 translator 的内嵌设计指引。
 
 ## 三条硬规则（违反必判 op_not_registered / 编译失败）
 
@@ -47,7 +46,7 @@ cp -r .claude/workflows/templates/kernel_skeleton {op_name}
 
 ```
 {op_name}/
-├── model_new_ascendc.py        # 入口;顶部加载逻辑别动,只写 ModelNew.forward
+├── model_new_ascendc.py        # 入口;保留 loader，按 reference 补全 init/forward 与接线
 ├── model.py                    # 可不交(judge 会注入 golden 覆盖)
 └── kernel/
     ├── CMakeLists.txt          # 编译配方;只改 {op_name}
@@ -60,4 +59,6 @@ cp -r .claude/workflows/templates/kernel_skeleton {op_name}
 ```
 
 kernel 的 `Compute()` 里默认是 `DataCopy`（恒等拷贝，能编过、能注册）。
-**把它换成你算子的真实数学** —— 那是你唯一该动的计算逻辑。
+**不只改 Compute**：`empty_like`、fp16/fp32 限制、按 dtypeSize 分发、连续性要求、
+输入偏移、单输出接线、buffer 与尾块都是 elementwise 占位假设，需要按本题核对改写。
+BF16/整数支持不能只删除 host 检查；完整输出结构、类型与舍入行为均以原始 reference 为准。

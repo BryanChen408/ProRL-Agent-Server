@@ -17,12 +17,14 @@ from typing import Any
 
 ROOT = Path(__file__).resolve().parents[1]
 GEN_OP_ASSETS = ROOT / "gen_op_assets.py"
+GEN_ASCENDC_TASKS = ROOT / "gen_ascendc_tasks.py"
 
 
-def _load_gen_module() -> Any:
-    spec = importlib.util.spec_from_file_location("polar_gen_op_assets", GEN_OP_ASSETS)
+def _load_gen_module(workflow: str = "cannbot") -> Any:
+    source = GEN_ASCENDC_TASKS if workflow == "t2a" else GEN_OP_ASSETS
+    spec = importlib.util.spec_from_file_location("polar_task_prompt_generator", source)
     if spec is None or spec.loader is None:
-        raise RuntimeError(f"cannot load {GEN_OP_ASSETS}")
+        raise RuntimeError(f"cannot load {source}")
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
@@ -33,7 +35,7 @@ def _sha256(path: Path) -> str:
 
 
 def refresh_prompts(path: Path, *, backup: bool = True, workflow: str = "cannbot") -> dict[str, Any]:
-    module = _load_gen_module()
+    module = _load_gen_module(workflow)
     old_hash = _sha256(path)
     backup_path = None
     if backup:
@@ -54,6 +56,8 @@ def refresh_prompts(path: Path, *, backup: bool = True, workflow: str = "cannbot
                 op = meta.get("op_name") or rec.get("label")
                 if not isinstance(op, str) or not op:
                     raise RuntimeError(f"line {lineno}: missing metadata.op_name/label")
+                if workflow == "t2a" and meta.get("operator_backend") != "ascendc":
+                    raise RuntimeError(f"line {lineno}: t2a requires metadata.operator_backend=ascendc")
                 prompt = rec.get("prompt")
                 if not isinstance(prompt, list) or not prompt:
                     prompt = [{"role": "user"}]
@@ -62,12 +66,16 @@ def refresh_prompts(path: Path, *, backup: bool = True, workflow: str = "cannbot
                     prompt[0] = {"role": "user"}
                 prompt[0]["role"] = prompt[0].get("role") or "user"
                 before = prompt[0].get("content")
-                after = module._instruction(op, workflow=workflow)
+                after = (
+                    module._instruction(op, f"input/{op}.py")
+                    if workflow == "t2a" else module._instruction(op, workflow=workflow)
+                )
                 if before != after:
                     changed += 1
                 prompt[0]["content"] = after
                 out.write(json.dumps(rec, ensure_ascii=False, separators=(",", ":")) + "\n")
                 rows += 1
+        shutil.copymode(path, tmp_name)
         os.replace(tmp_name, path)
     except Exception:
         try:
@@ -91,7 +99,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("jsonl", type=Path, help="Existing operator_tasks.jsonl to rewrite in place.")
     parser.add_argument("--no-backup", action="store_true")
-    parser.add_argument("--workflow", choices=("cannbot", "legacy"), default="cannbot")
+    parser.add_argument("--workflow", choices=("cannbot", "legacy", "t2a"), default="cannbot")
     args = parser.parse_args(argv)
     result = refresh_prompts(args.jsonl, backup=not args.no_backup, workflow=args.workflow)
     print(json.dumps(result, ensure_ascii=False, indent=2))

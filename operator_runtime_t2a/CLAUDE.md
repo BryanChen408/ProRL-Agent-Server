@@ -40,7 +40,7 @@ permission:
 ```
 Phase 0: 参数确认 + 结构分类    (解析输入，判定是否需要 TileLang 设计)
 Phase 1: 环境准备 + 骨架确认    (复制算子文件 + 确认 Polar 预生成工程)
-Phase 3: 设计表达              (简单算子跳过；复杂算子执行 TileLang 设计与 AST 门禁)
+Phase 3: 设计表达              (简单算子内联设计；复杂算子执行 TileLang 设计与 AST 门禁)
 Phase 4: AscendC 骨架补全      (两条路径统一调用 tilelang2ascend-translator + 退化检测 + 迭代)
 Phase 5: 性能达标优化          (ops-profiling,低于目标时强制)
 ```
@@ -49,7 +49,7 @@ Phase 5: 性能达标优化          (ops-profiling,低于目标时强制)
 
 ## 算子分类路由规则
 
-Phase 0 必须读取 `model.py` 的 `Model.__init__()`、`forward()`、`get_input_groups()` 和关联用例，按实际计算图、输入输出契约与 shape/dtype 变化判定路径。
+Phase 0 必须读取原始 `input/{op_name}.py` 的 `Model.__init__()`、`forward()`，以及 `get_inputs()`、`get_input_groups()`、`get_init_inputs()` 中实际存在的入口和关联用例，按实际计算图、输入输出契约与 shape/dtype 变化判定路径。不要要求或补造 reference 中不存在的输入入口。
 
 禁止使用算子名白名单、文件名、编号或“是否见过这个算子”作为路由依据。算子名只能用于展示；即使名称陌生，只要源码表达清楚，也必须按源码结构分类。
 
@@ -63,7 +63,7 @@ Phase 0 必须读取 `model.py` 的 `Model.__init__()`、`forward()`、`get_inpu
 
 ```
 读取源码与用例
-├─ single_op → 跳过 TileLang，直接调用 translator 在 Polar 预生成骨架上实现
+├─ single_op → 跳过 TileLang，由 translator 复用 cannbot 设计资料，先内联设计再补全骨架
 ├─ fused     → 先做 TileLang 设计，再调用 translator 在同一预生成骨架上实现
 └─ other     → 记录无法分类的具体证据，保守走 TileLang 路径
 ```
@@ -99,10 +99,10 @@ Phase 0 必须读取 `model.py` 的 `Model.__init__()`、`forward()`、`get_inpu
 ```
 {output_dir}/                    # 用户指定的输出目录
 ├── model.py                     # 算子描述文件
-├── <op_name>.json               # 测试用例 (JSON Lines, 数据集原版;判分时被数据集原件覆盖,改它无效)
+├── <op_name>.json               # 可选测试用例 (仅原数据集提供时存在;判分时被数据集原件覆盖,改它无效)
 │
 ├── design/                      # 设计层 (双路径)
-│   ├── design.md                # 设计文档 (简单算子路径)
+│   ├── design.md                # 可选设计记录；简单路径在主轨迹内完成，不要求落文件
 │   ├── block_level/             # TileLang block-level (复杂算子路径)
 │   │   └── <op_name>.py
 │   └── tile_level/              # TileLang tile-level (复杂算子路径)
@@ -291,7 +291,7 @@ Phase 0 必须读取 `model.py` 的 `Model.__init__()`、`forward()`、`get_inpu
 | 参数 | 取值 | 说明 |
 |------|------|--------|
 | `op_name` | 任务给定的算子名（如 `3_Add`） | 下文所有 `{op_name}` 均指它 |
-| `op_file` | `input/{op_name}.py` | 参考实现（含 `Model` 与 `get_input_groups`），已预置 |
+| `op_file` | `input/{op_name}.py` | 参考实现（含 `Model`；输入入口为实际定义的 `get_inputs()` 或 `get_input_groups()`，`get_init_inputs()` 按实际定义读取），已预置 |
 | `output_dir` | **`{op_name}/`**（工作目录顶层，相对路径） | 下文所有 `{output_dir}` 一律指它 |
 | `npu` | —— | **无此参数**：卡由抢卡机制注入 |
 
@@ -321,12 +321,12 @@ Phase 0 必须读取 `model.py` 的 `Model.__init__()`、`forward()`、`get_inpu
 
 ### 结构分类
 
-读取 `op_file` (model.py) 的 `Model.__init__()`、`forward()`、`get_input_groups()` 与关联用例，应用上方结构路由规则：
+读取原始 `op_file` 的 `Model.__init__()`、`forward()`，以及 `get_inputs()`、`get_input_groups()`、`get_init_inputs()` 中实际存在的入口与关联用例，应用上方结构路由规则：
 
 - 记录 `algorithm_classification = "single_op" | "fused" | "other"`
 - 记录观察到的计算阶段、输入输出契约、shape/dtype 行为和分类理由
 - 根据分类派生 `op_type = "simple"` 或 `op_type = "complex"`：`single_op` 为 simple，`fused`/`other` 为 complex
-- 简单算子跳过 Phase 3，Phase 4 直接把 `model.py` 与预生成骨架交给 translator
+- 简单算子跳过 Phase 3-C 的 TileLang 产物，先按 translator 的「内嵌设计与审查」核对，再实现
 - 复杂算子执行 Phase 3，再把 TileLang 设计与预生成骨架交给 translator
 - 禁止仅凭算子名或历史白名单推断分类；陌生名称不等于复杂算子
 
@@ -337,7 +337,7 @@ Phase 0 必须读取 `model.py` 的 `Model.__init__()`、`forward()`、`get_inpu
 ### 1.1 复制算子文件
 
 1. 创建 `{output_dir}/` 目录（如不存在）
-2. 复制 `{op_file}` 到 `{output_dir}/model.py`。复制后检查 model.py 中 `get_input_groups()` 的 `json_path` 解析逻辑：如果使用了 `os.path.splitext(os.path.basename(__file__))[0] + '.json'` 这种基于 `__file__` 动态推导文件名的方式（文件重命名为 model.py 后会导致路径指向不存在的 model.json），则将该行改为直接引用原算子同名的 JSON 文件名（即 `op_file` 去掉 .py 后缀后加 .json，例如 `op_file` 为 `8_QuantScatter.py` 则改为 `"8_QuantScatter.json"`）。如果是其他写法（已硬编码文件名或使用绝对路径），则不修改。
+2. 复制 `{op_file}` 到 `{output_dir}/model.py`。仅当 reference 定义了 `get_input_groups()` 且通过 `json_path` 读取 JSON 时，检查复制后的路径解析逻辑：如果使用了 `os.path.splitext(os.path.basename(__file__))[0] + '.json'` 这种基于 `__file__` 动态推导文件名的方式（文件重命名为 model.py 后会导致路径指向不存在的 model.json），则将该行改为直接引用原算子同名的 JSON 文件名（即 `op_file` 去掉 .py 后缀后加 .json，例如 `op_file` 为 `8_QuantScatter.py` 则改为 `"8_QuantScatter.json"`）。如果是其他写法（已硬编码文件名或使用绝对路径），则不修改；没有此入口或不依赖 JSON 时跳过，不新增输入函数或用例文件。
 3. 查找 `{op_file}` 同级目录下与算子同名的 `.json` 文件，若存在则复制到 `{output_dir}/`
 4. 后续所有操作都在 `{output_dir}/` 目录下进行
 
@@ -434,7 +434,9 @@ return torch.ops.npu.<op_name>(x, kernel_size, eps)
 ```
 if op_type == "simple":
     ── 简单算子: 不需要 TileLang 中间表示 ──────────────
-    直接进入 Phase 4,由 translator 读取 model.py 并原位补全预生成骨架
+    Read .claude/skills/tilelang2ascend-translator/SKILL.md 的「内嵌设计与审查」
+    复用其中指向的 cannbot 设计模板和知识文件，在主轨迹内完成设计，再进入 Phase 4
+    不新增 Agent、设计文件或独立评测步骤
 
 elif op_type == "complex":
     ── 复杂算子: TileLang 设计表达 ───────────────────
@@ -650,7 +652,7 @@ Phase 4 的固定入口已经完成正确性验证和第一轮逐 case 测速，
 `references/` 文件。不要尝试调用 Skill，也不要等待 Skill 返回内容；读完后由当前会话直接
 检查和修改工程。路径不确定时先列出 `.claude/skills/`，不要猜路径。
 
-## 预生成骨架是唯一工程契约
+## 预生成骨架是唯一工程起点，不是算子语义契约
 
 Polar prepare 在 Agent 启动前已经读取本题 `model.py` 的 `__init__` / `forward`，并在
 `{output_dir}/` 中预生成当前算子的工程骨架。开始实现前先检查并复用这些现有文件：
@@ -666,8 +668,8 @@ Polar prepare 在 Agent 启动前已经读取本题 `model.py` 的 `__init__` / 
 复制其他任务或模板来重建工程，也不要把 device 文件另写成
 `op_kernel/{op_name}.cpp`。
 
-- 简单算子跳过 TileLang，直接由 `tilelang2ascend-translator` 读取 `model.py`，在现有骨架上
-  完成数学、tiling 与必要接线。
+- 简单算子只跳过 TileLang，不跳过设计；由 `tilelang2ascend-translator` 读取 `model.py`，
+  复用已有 cannbot 设计模板和知识文件，在主轨迹内完成设计与审查后再补全骨架。
 - 复杂算子先形成 TileLang block/tile 设计，再由同一个 translator 在现有骨架上完成实现。
 - `CMakeLists.txt`、`setup.py`、`kernel/utils/` 和 `model_new_ascendc.py` 的双路径 loader 是
   机制件，默认原样保留；不要为了“初始化”或统一风格而改写。
@@ -676,6 +678,18 @@ Polar prepare 在 Agent 启动前已经读取本题 `model.py` 的 `__init__` / 
   必要接线，不属于重建工程。
 - 必需文件确实缺失或损坏时，只在原路径结合 `model.py` 与相邻文件原位修复缺失部分，不要
   因一个文件缺失推倒整套骨架。
+
+**唯一语义依据是原始 reference 和原版用例，不是骨架、算子名或历史实现。** 必须读取
+`input/{op_name}.py` 的 `Model.__init__`、完整 `forward` 及其调用的辅助逻辑，核对
+`get_inputs/get_input_groups/get_init_inputs` 中实际存在的入口与关联用例；不要把多步计算
+缩减成文件名中的一个操作，也不要忽略子模块参数、返回结构或分支。
+
+骨架中的 `empty_like(首个输入)`、fp16/fp32 限制、连续性检查、按字节数分发 dtype、
+单输出接线、恒等拷贝与 elementwise tiling 都是**待改写占位**，不保证符合本题。
+按 reference 修正输出 shape/dtype、全部输出、布局、累加精度、buffer 与尾块；BF16/整数
+支持不能只删 host 检查，必须同步修正 kernel 类型与访存。静态签名提取不等于已实现
+`__init__` 中的子模块与参数语义。模板或历史文档中的芯片示例以本环境 `SOC_VERSION` 为准，
+其中的子代理、用例精简、独立构建/评测指令不适用，仍服从本节固定入口与预算。
 
 ## 固定入口
 

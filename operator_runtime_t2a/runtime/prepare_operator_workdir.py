@@ -81,7 +81,7 @@ def _camel(name: str) -> str:
 #
 # 机制件(CMakeLists/setup.py/utils)从模板目录静态铺;签名件(model_new/register.cpp/
 # ops.h/op_host/op_kernel)按 model.py 的 __init__/forward 静态解析生成 —— 签名本来就是
-# 任务书的一部分,生成只是机械转写,agent 要写的仍只有 kernel 数学与 tiling。
+# 任务书的一部分,生成只是机械转写,不推断输出 shape/dtype 或实现子模块语义。
 #
 # 原则:解析不了的特征一律放宽降级(*args 收纳 / 参数不进 op 签名 + 显式 TODO),
 # 不报错、不排除算子,给 agent 留发挥空间。唯一硬约束是 harness 契约:
@@ -469,8 +469,9 @@ def _render_model_new(op: str, sig: _OpSig) -> str:
         "",
         "",
         "class ModelNew(nn.Module):",
-        "    # 签名由 prepare 按 model.py 生成(与 register.cpp/ops.h/op_host 自洽),一般不用动;",
-        "    # kernel 接口确需变化时,上述三处 + 本文件调用行要同步改。",
+        "    # 签名由 prepare 静态提取,不代表已实现 reference 的 __init__/forward 语义;",
+        "    # 子模块、参数/状态与完整返回结构须对照原始 reference 补全,loader 原样保留。",
+        "    # kernel 接口确需变化时,register.cpp/ops.h/op_host + 本文件调用行要同步改。",
     ]
     if sig.init_storage == "args_kwargs":
         lines += [
@@ -587,8 +588,9 @@ def _render_op_host_cpp(op: str, sig: _OpSig, ordered: list[_Param], cpp_args: s
     a = lines.append
     a(f"// {op} op_host — 校验 + tiling + EXEC_KERNEL_CMD 启动")
     a("// 签名由 prepare 按 model.py 生成(与 register.cpp/ops.h/model_new 自洽);")
-    a("// tiling 壳取自已验证的 elementwise 模板:核间划分 + UB 感知 tileLength + 32B 对齐。")
-    a("// 要改签名请四处同步;tiling/启动参数按你的算子调。")
+    a("// elementwise 占位不是本题语义契约:按原始 reference 核对完整计算、输出与分支。")
+    a("// empty_like、fp16/fp32/连续性限制、单输出接线与 tiling 均需按本题改写,不只改 Compute。")
+    a("// 要改签名请四处同步;构建/loader 机制不重建,设计复用 CLAUDE.md 指向的 cannbot 资料。")
     a("#include <algorithm>")
     a("#include <cstdint>")
     a("#include <tuple>")
@@ -725,7 +727,9 @@ def _render_op_kernel_cpp(op: str, camel: str, sig: _OpSig, ordered: list[_Param
     a = lines.append
     a(f"// {op} device kernel — elementwise 骨架({n_inputs} 输入;dtype 分发 + 尾块 + 32B 对齐 + 双 buffer)")
     a("// 数学在 Compute() 里,默认把第 1 个输入恒等拷贝到输出(能编过、能注册、跑通打包链路,")
-    a("// 对拍必然不过 —— 把 Compute() 换成你的算子数学)。多输入已各自建好 queue/GM。")
+    a("// 不代表实现了 reference)。多输入各自有 queue/GM,但不保证同 shape/dtype 或相同偏移。")
+    a("// 必须按本题改写 tiling、buffer、尾块有效长度和全部输出,不能只替换 Compute。")
+    a("// dtypeSize==2 仅是 half 占位,不代表支持 BF16;整数/混合 dtype 须显式接线,不能只删 host 检查。")
     a('#include "kernel_operator.h"')
     a("")
     a("constexpr int32_t BUFFER_NUM = 2;")

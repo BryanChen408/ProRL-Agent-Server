@@ -1,6 +1,7 @@
 // {op_name} op_host — 校验 + tiling + EXEC_KERNEL_CMD 启动
-// 结构取自已验证的 elementwise 模板:正确的核间划分 + UB 感知 tileLength + 32B 对齐,
-// 没有 blockLength=0 / 尾块未处理这类坑。
+// elementwise 占位不是本题语义契约:按原始 reference 核对完整计算、输出与分支。
+// empty_like、fp16/fp32/连续性限制、单输出接线与 tiling 均需按本题改写,不只改 Compute。
+// 构建/loader 机制不重建;接口变化须同步 wrapper/register.cpp/ops.h/op_host。
 #include <algorithm>
 #include <cstdint>
 

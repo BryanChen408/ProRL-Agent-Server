@@ -126,9 +126,3 @@ int32_t main() {
     return 0;
 }
 ```
-
----
-
-## 4. 相关文档
-
-- **代码审查检查项**：[code-review-checklist.md](../../ascendc-kernel-develop-workflow/references/code-review-checklist.md) §0.2.1

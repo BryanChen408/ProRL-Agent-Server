@@ -531,3 +531,73 @@ def test_real_datasets_schemas_all_parse():
             except Exception as exc:  # noqa: BLE001
                 bad.append(f"{p.name}: {schema}  <- {exc}")
     assert not bad, "\n".join(bad[:20])
+
+
+@pytest.mark.parametrize("source,dtype", [
+    (SINGLE, "float16"),
+    (SINGLE, "bfloat16"),
+    (INIT_INT, "int64"),
+    (TUPLE_RET, "float32"),
+    (CONV_LIKE, "float32"),  # 输出 shape 不同于输入，不能把 empty_like 当契约
+    (SCALAR_ONLY, "float32"),
+    ("# no Model: use fallback skeleton\n", "float32"),
+])
+def test_skeleton_labels_semantic_placeholders_without_rewriting_reference(tmp_path, source, dtype):
+    task, js = _write_model(tmp_path, source, {"inputs": [
+        {"name": "x", "type": "tensor", "dtype": dtype, "shape": [4]},
+    ]})
+    originals = task.read_bytes(), js.read_bytes()
+    out = _instantiate(tmp_path, task, js)
+    assert (task.read_bytes(), js.read_bytes()) == originals
+    host = (out / "kernel/op_host/my_op.cpp").read_text()
+    kernel = (out / "kernel/op_kernel/my_op_kernel.cpp").read_text()
+    assert "elementwise 占位不是本题语义契约" in host
+    assert "empty_like、fp16/fp32/连续性限制、单输出接线与 tiling" in host
+    assert "不能只替换 Compute" in kernel
+    assert "不代表支持 BF16" in kernel
+    assert "其余(tiling/双 buffer/dtype 分发)别动" not in kernel
+
+
+@pytest.mark.parametrize("agent_side", [True, False])
+def test_prepare_carries_existing_cannbot_design_resources_without_new_wiring(
+    tmp_path, monkeypatch, agent_side,
+):
+    import json
+
+    task, js = _write_model(tmp_path, LAYERNORM_LIKE, LAYERNORM_CASE)
+    originals = task.read_bytes(), js.read_bytes()
+    workdir = tmp_path / "session"
+    monkeypatch.setattr(prep.shutil, "which", lambda name: "/unused/claude")
+    args = ["--backend", "ascendc", "--op-name", "my_op",
+            "--canonical-root", str(CANONICAL), "--workdir", str(workdir),
+            "--task-path", str(task), "--only-project-skills"]
+    if agent_side:
+        args.append("--require-claude")
+    assert prep.main(args) == 0
+    assert (task.read_bytes(), js.read_bytes()) == originals
+    assert (workdir / "input/my_op.py").read_bytes() == originals[0]
+    assert (workdir / "input/my_op.json").read_bytes() == originals[1]
+    for relative in (
+        "workflows/templates/design-template.md",
+        "skills/ascendc-tiling-design/SKILL.md",
+        "skills/ascendc-tiling-design/references/reduction/patterns.md",
+        "skills/ascendc-api-best-practices/SKILL.md",
+        "skills/ascendc-api-best-practices/references/api-precision.md",
+        "skills/tilelang2ascend-translator/SKILL.md",
+    ):
+        assert (workdir / ".claude" / relative).read_bytes() == (CANONICAL / relative).read_bytes()
+    assert (workdir / "CLAUDE.md").read_bytes() == (CANONICAL / "CLAUDE.md").read_bytes()
+    workflow = (workdir / "CLAUDE.md").read_text()
+    translator = (workdir / ".claude/skills/tilelang2ascend-translator/SKILL.md").read_text()
+    assert "简单算子只跳过 TileLang，不跳过设计" in workflow
+    assert "简单算子跳过 Phase 3，" not in workflow
+    for relative in ("workflows/templates/design-template.md",
+                     "skills/ascendc-tiling-design/SKILL.md",
+                     "skills/ascendc-api-best-practices/SKILL.md"):
+        assert f".claude/{relative}" in translator
+    assert not (workdir / ".claude/agents").exists()
+    assert (workdir / "my_op/kernel").exists() == agent_side
+    assert not (workdir / "output/submission").exists()
+    assert not (workdir / "judge_out/metrics.json").exists()
+    settings = json.loads((workdir / ".claude/settings.json").read_text())
+    assert set(settings.get("hooks", {})) == ({"Stop"} if agent_side else set())
