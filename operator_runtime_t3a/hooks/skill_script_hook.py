@@ -322,9 +322,9 @@ def _lease_wrap_command(command: str) -> str:
             lock_dir = os.environ.get("POLAR_NPU_LOCK_DIR", "/dev/shm/npu-locks")
             return (
                 f"python3 {_shlex.quote(cand)} --pool {_shlex.quote(pool)} "
-                f"--lock-dir {_shlex.quote(lock_dir)} -- {command}"
+                f"--lock-dir {_shlex.quote(lock_dir)} -- bash -c {_shlex.quote(command)}"
             )
-    return command
+    raise FileNotFoundError("NPU lease configured but tools/npu_lease_exec.py is missing")
 
 
 def execute_intercepted(command: str) -> None:
