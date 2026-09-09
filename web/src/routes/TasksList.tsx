@@ -6,6 +6,8 @@ import { RewardChart } from "../components/RewardChart";
 import { relativeTime, shortId, formatMs, formatReward } from "../utils";
 
 const STATUS_OPTIONS = ["all", "running", "completed", "failed"];
+type SortKey = "reward" | "session_time";
+type SortDirection = "asc" | "desc";
 
 export function TasksList() {
   const navigate = useNavigate();
@@ -14,6 +16,8 @@ export function TasksList() {
   const [harnessFilter, setHarnessFilter] = useState("all");
   const [search, setSearch] = useState("");
   const [compareIds, setCompareIds] = useState<string[]>([]);
+  const [sortKey, setSortKey] = useState<SortKey | null>(null);
+  const [sortDirection, setSortDirection] = useState<SortDirection>("desc");
 
   const tasks = data?.tasks ?? [];
   const harnessOptions = useMemo(() => {
@@ -23,13 +27,52 @@ export function TasksList() {
   }, [tasks]);
 
   const filtered = useMemo(() => {
-    return tasks.filter((t) => {
+    const matching = tasks.filter((t) => {
       if (statusFilter !== "all" && t.status !== statusFilter) return false;
       if (harnessFilter !== "all" && t.harness !== harnessFilter) return false;
       if (search && !t.task_id.toLowerCase().includes(search.toLowerCase())) return false;
       return true;
     });
-  }, [tasks, statusFilter, harnessFilter, search]);
+
+    if (sortKey === null) return matching;
+
+    return [...matching].sort((left, right) => {
+      const leftValue =
+        sortKey === "reward" ? left.mean_reward : left.session_time_ms;
+      const rightValue =
+        sortKey === "reward" ? right.mean_reward : right.session_time_ms;
+      const leftMissing = leftValue == null || !Number.isFinite(leftValue);
+      const rightMissing = rightValue == null || !Number.isFinite(rightValue);
+
+      // Keep unavailable metrics at the bottom in both sort directions.
+      if (leftMissing && rightMissing) return 0;
+      if (leftMissing) return 1;
+      if (rightMissing) return -1;
+      if (leftValue === rightValue) return 0;
+
+      const comparison = leftValue < rightValue ? -1 : 1;
+      return sortDirection === "asc" ? comparison : -comparison;
+    });
+  }, [tasks, statusFilter, harnessFilter, search, sortKey, sortDirection]);
+
+  const toggleSort = (key: SortKey) => {
+    if (sortKey === key) {
+      setSortDirection((current) => (current === "desc" ? "asc" : "desc"));
+      return;
+    }
+    setSortKey(key);
+    setSortDirection("desc");
+  };
+
+  const sortIndicator = (key: SortKey) => {
+    if (sortKey !== key) return "↕";
+    return sortDirection === "desc" ? "↓" : "↑";
+  };
+
+  const ariaSort = (key: SortKey): "none" | "ascending" | "descending" => {
+    if (sortKey !== key) return "none";
+    return sortDirection === "desc" ? "descending" : "ascending";
+  };
 
   const toggleCompare = (taskId: string) => {
     setCompareIds((prev) =>
@@ -120,13 +163,32 @@ export function TasksList() {
                 <th className="px-3 py-2">status</th>
                 <th className="px-3 py-2">harness</th>
                 <th className="px-3 py-2">model</th>
-                <th className="px-3 py-2">reward</th>
+                <th className="px-3 py-2" aria-sort={ariaSort("reward")}>
+                  <button
+                    type="button"
+                    className="inline-flex items-center gap-1 hover:text-slate-800"
+                    onClick={() => toggleSort("reward")}
+                    title="Sort by reward (descending first)"
+                  >
+                    reward
+                    <span aria-hidden="true">{sortIndicator("reward")}</span>
+                  </button>
+                </th>
                 <th className="px-3 py-2">sessions</th>
                 <th
                   className="px-3 py-2"
                   title="Wall-clock execution time for single-session tasks"
+                  aria-sort={ariaSort("session_time")}
                 >
-                  session_time
+                  <button
+                    type="button"
+                    className="inline-flex items-center gap-1 hover:text-slate-800"
+                    onClick={() => toggleSort("session_time")}
+                    title="Sort by session execution time (descending first)"
+                  >
+                    session_time
+                    <span aria-hidden="true">{sortIndicator("session_time")}</span>
+                  </button>
                 </th>
                 <th className="px-3 py-2">updated</th>
               </tr>
