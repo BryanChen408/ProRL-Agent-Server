@@ -883,3 +883,24 @@ if __name__ == "__main__":
                     print(f"  [XX] {name}.{mname}: {type(e).__name__}: {e}")
     print(f"\n{total - failed}/{total} passed")
     sys.exit(1 if failed else 0)
+
+
+def test_background_read_feedback_reaches_training_attempt(monkeypatch):
+    from polar.trajectory.builder.prefix_merging import _prepare_attempt_span_state
+    monkeypatch.setenv('POLAR_T3A_ATTEMPT_SPANS', '0')
+    read = [{'id': 'read_result', 'type': 'function', 'function': {
+        'name': 'Read', 'arguments': json.dumps({'file_path': '/tmp/bg_123.output'})}}]
+    records = [
+        _record('00', [1], [2, EOT], finish_reason='tool_calls',
+                tool_calls=_tool_calls('Bash', 'evaluate', _PIPELINE_CMD)),
+        _record('01', [1, 2, EOT, 3], [4, EOT], finish_reason='tool_calls', tool_calls=read,
+                prompt_messages=[{'role': 'tool', 'tool_call_id': 'evaluate', 'content':
+                    'Command running in background with ID: bg_123. Output is being written to: /tmp/bg_123.output'}]),
+        _record('02', [1, 2, EOT, 3, 4, EOT, 5], [6, EOT],
+                prompt_messages=[{'role': 'tool', 'tool_call_id': 'read_result', 'content': _VERDICT_TASK_PENDING}]),
+    ]
+    state = _prepare_attempt_span_state(records)
+    assert attempt_spans.parse_verdict(state['verdict_by_call_id']['evaluate'])['success'] is True
+    # Reads provide feedback only: they must not become extra evaluation attempts.
+    assert len(state['ordinal_by_completion_id']) == 1
+    assert attempt_spans.pipeline_tool_call_id({'role': 'assistant', 'tool_calls': read}) is None

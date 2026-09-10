@@ -29,6 +29,9 @@ class EvaluatorSpec(BaseModel):
     env: dict[str, str] = Field(default_factory=dict)
     refresh_runtime: bool = False
     runtime: RuntimeSpec | None = None
+    # When set, agent execution and postprocessing/build/judge have separate budgets.
+    # None preserves the shared session deadline used by existing profiles.
+    postrun_timeout_seconds: float | None = Field(default=None, gt=0, allow_inf_nan=False)
 
 
 # ---------------------------------------------------------------------------

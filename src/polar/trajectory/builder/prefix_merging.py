@@ -143,7 +143,7 @@ def _prepare_attempt_span_state(kept: list[CompletionRecord]) -> dict[str, Any]:
         prev_ordinal_by_completion_id[completion.completion_id] = next_ordinal - 1
         for message in trace.response_messages:
             calls_in_order.extend(
-                (cid, cmd) for cid, cmd in _attempt_spans.bash_calls(message) if cid
+                (cid, cmd) for cid, cmd in _attempt_spans.bash_calls(message, include_output_reads=True) if cid
             )
         call_id = _pipeline_call_id(trace.response_messages)
         if call_id:
@@ -416,33 +416,6 @@ class _FinalizedChain:
     break_reason: str | None = None
 
 
-def _chain_system_key(chain: list[CompletionRecord]) -> str | None:
-    """链的 system 指纹:取链首请求的第一条 system 消息内容做角色判定。
-
-    主链与其 compaction 续段共享同一 system prompt(判同角色);Skill/Agent
-    派发的子会话 system 不同(判 sub)。没有 system 消息时取第一条消息内容;
-    消息为空返回 None(不参与角色判定,链按 sub 处理)。
-    """
-    if not chain:
-        return None
-    messages = build_trace_from_completion(chain[0]).prompt_messages or []
-    if not messages:
-        return None
-    first = messages[0] if isinstance(messages[0], dict) else {}
-    content = first.get("content")
-    if isinstance(content, list):
-        content = "".join(str(b.get("text", "")) for b in content if isinstance(b, dict))
-    if content:
-        return f"{first.get('role')}::{len(str(content))}::{hash(str(content))}"
-    if len(messages) > 1 and isinstance(messages[1], dict):
-        c2 = messages[1].get("content")
-        if isinstance(c2, list):
-            c2 = "".join(str(b.get("text", "")) for b in c2 if isinstance(b, dict))
-        if c2:
-            return f"{messages[1].get('role')}::{len(str(c2))}::{hash(str(c2))}"
-    return None
-
-
 class PrefixMergingBuilder(BaseTrajectoryBuilder):
     """Rebuild a chain's merged token stream using raw + canonical-interstitial.
 
@@ -504,15 +477,25 @@ class PrefixMergingBuilder(BaseTrajectoryBuilder):
         # sub-conversations are 31% of splits, and 17% of multi-chain sessions
         # interleave — masking those by session time order alone is wrong.
         chain_continues: list[bool] = []
+        chain_identities: list[tuple] = []
 
         for completion in filter_result.kept:
             prompt_ids = build_trace_from_completion(completion).prompt_ids
-            chain_idx = self._find_extendable_chain(prompt_ids, chain_tips)
+            identity = tuple(completion.metadata.get(key) for key in (
+                "chain_role_source", "chain_role", "agent_chain_id",
+            ))
+            # Identical prompts from different agents are independent conversations.
+            matching_tips = [
+                tip if known == identity else []
+                for tip, known in zip(chain_tips, chain_identities)
+            ]
+            chain_idx = self._find_extendable_chain(prompt_ids, matching_tips)
             if chain_idx is None:
                 chain_idx = len(chains)
                 chains.append([])
                 chain_tips.append([])
-                chain_continues.append(self._continues_existing(prompt_ids, chain_tips))
+                chain_continues.append(self._continues_existing(prompt_ids, matching_tips))
+                chain_identities.append(identity)
             chains[chain_idx].append(completion)
             chain_tips[chain_idx] = prompt_ids
 
@@ -527,11 +510,6 @@ class PrefixMergingBuilder(BaseTrajectoryBuilder):
             "completions_dropped": 0,
             "break_reasons": {},
         }
-        # chain_role:主链角色判定。以会话首链的 system 消息为基准,system 相同
-        # 的链视为同一「主」角色(compaction 续段与主链共享 system,自然归入);
-        # 不同 system 的链 = 独立子会话(Skill/Agent 派发)。只写 metadata,
-        # 是否按角色掩码由下游 adapter 决定(默认不动)。
-        main_system_key = _chain_system_key(chains[0]) if chains else None
         final_traces: list[Trace] = []
         # P3 stage-2: session-wide attempt-span state (env-gated,默认开;
         # POLAR_ATTEMPT_CREDIT=0 关). Created ONCE per trajectory and shared by
@@ -546,11 +524,7 @@ class PrefixMergingBuilder(BaseTrajectoryBuilder):
             start = 0
             segment_index = 0
             chain_had_break = False
-            chain_role = (
-                "main" if main_system_key is not None
-                and _chain_system_key(chain) == main_system_key
-                else "sub"
-            )
+            chain_role = chain[0].metadata.get("chain_role", "unknown")
             while start < len(chain):
                 finalized = self._finalize_chain(
                     chain[start:],
@@ -769,7 +743,7 @@ class PrefixMergingBuilder(BaseTrajectoryBuilder):
         segment_start: int,
         span_state: dict | None = None,
         chain_continues: bool = False,
-        chain_role: str = "sub",
+        chain_role: str = "unknown",
     ) -> _FinalizedChain:
         # Everything in C_1.prompt_ids is the non-trainable
         # prompt; C_1.response_ids plus every subsequent raw response +

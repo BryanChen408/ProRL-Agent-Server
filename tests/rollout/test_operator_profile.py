@@ -35,6 +35,7 @@ rollout:
       evaluator:
         strategy: operator_judge
         refresh_runtime: true
+        postrun_timeout_seconds: 54
         config:
           op_name: "{{op_name}}"
           judge_command: "bash tools/triton_eval_pipeline.sh --op_name {{op_name}}"
@@ -74,6 +75,7 @@ gateway:
     assert task_request.runtime.prepare[0].source == f"{tmp_path}/op.py"
     assert task_request.agent.harness == "claude_code"
     assert task_request.evaluator is not None
+    assert task_request.evaluator.postrun_timeout_seconds == 54
     assert task_request.evaluator.config["op_name"] == "op"
     assert task_request.metadata["operator_profile"] == "operator_npu"
     assert task_request.metadata["op_name"] == "op"

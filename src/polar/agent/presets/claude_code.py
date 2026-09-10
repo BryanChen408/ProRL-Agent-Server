@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import json
 import shlex
+from pathlib import Path
 
 from polar.agent.base import BaseHarness
 from polar.agent.models import AgentSpec
 from polar.runtime.base import BaseRuntime, RUNTIME_AGENT_LOG_DIR, RUNTIME_SESSION_DIR
 from polar.runtime.models import ExecInput
+from polar.trajectory.models import CompletionSession
 
 
 class ClaudeCodeHarness(BaseHarness):
@@ -122,9 +124,63 @@ class ClaudeCodeHarness(BaseHarness):
         return [
             ExecInput(
                 command=(
-                    f"claude {flags_str}{model_flag} -p {escaped} "
+                    f"set -o pipefail; claude {flags_str}{model_flag} -p {escaped} "
                     f"2>&1 | tee {RUNTIME_AGENT_LOG_DIR}/claude-code.txt"
                 ),
                 env=env,
             )
         ]
+
+
+def annotate_completion_roles(session: CompletionSession, session_dir: Path) -> None:
+    """Join native Claude identities to captured completions by message ID.
+
+    Transcripts survive compaction and include subagents' full messages. The CLI
+    stream is a fallback for a transcript tail not yet flushed at timeout.
+    Missing or conflicting identities remain unknown; never infer a role from text.
+    """
+    identities: dict[str, tuple[str, str | None]] = {}
+    projects = session_dir / ".claude" / "projects"
+    paths = [*sorted(projects.rglob("*.jsonl")), session_dir / "logs/agent/claude-code.txt"]
+    for path in paths:
+        try:
+            stream = path.open(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        with stream:
+            for line in stream:
+                try:
+                    event = json.loads(line)
+                except (ValueError, TypeError):
+                    continue
+                if not isinstance(event, dict) or event.get("type") != "assistant":
+                    continue
+                message = event.get("message")
+                message_id = message.get("id") if isinstance(message, dict) else None
+                if not isinstance(message_id, str) or not message_id:
+                    continue
+                native_transcript = type(event.get("isSidechain")) is bool
+                if native_transcript:
+                    role = "sub" if event["isSidechain"] else "main"
+                    actor = str(event.get("agentId") or path.relative_to(session_dir)) if role == "sub" else "main"
+                elif "parent_tool_use_id" in event:
+                    parent = event["parent_tool_use_id"]
+                    if parent is not None and (not isinstance(parent, str) or not parent):
+                        continue
+                    role, actor = ("sub", parent) if parent is not None else ("main", "main")
+                else:
+                    continue
+                previous = identities.get(message_id)
+                if previous is None:
+                    identities[message_id] = (role, actor)
+                elif previous[0] != role or (native_transcript and previous[1] != actor):
+                    identities[message_id] = ("unknown", None)
+
+    for completion in session.completions:
+        response_id = completion.response.get("id")
+        role, actor = identities.get(f"msg_{response_id}", ("unknown", None))
+        completion.metadata.update({
+            "chain_role": role,
+            "chain_role_source": "claude_native" if role != "unknown" else "unresolved",
+            "agent_chain_id": actor,
+        })

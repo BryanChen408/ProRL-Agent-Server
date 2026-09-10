@@ -75,6 +75,7 @@ class ManagedSession:
     cancel_reason: str | None = None
     cancel_event: asyncio.Event = field(default_factory=asyncio.Event)
     execution_deadline: float | None = None
+    postrun_deadline: float | None = None
     stage: SessionStage = SessionStage.INIT
     inflight: bool = False
 

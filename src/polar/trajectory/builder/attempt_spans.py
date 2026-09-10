@@ -204,14 +204,15 @@ def _as_float_or_none(tok: str | None) -> float | None:
         return None
 
 
-def bash_calls(assistant_msg: dict[str, Any]) -> list[tuple[str, str]]:
-    """``[(tool_call_id, command)]`` for every Bash call in an assistant message."""
+def bash_calls(assistant_msg: dict[str, Any], *, include_output_reads: bool = False) -> list[tuple[str, str]]:
+    """Bash commands; optionally include native background-output read handles."""
     if not isinstance(assistant_msg, dict) or assistant_msg.get("role") != "assistant":
         return []
     out: list[tuple[str, str]] = []
     for tc in assistant_msg.get("tool_calls") or []:
         fn = (tc or {}).get("function") or {}
-        if fn.get("name") != "Bash":
+        name = fn.get("name")
+        if name != "Bash" and not (include_output_reads and name in {"Read", "TaskOutput"}):
             continue
         args = fn.get("arguments")
         if isinstance(args, str):
@@ -219,7 +220,8 @@ def bash_calls(assistant_msg: dict[str, Any]) -> list[tuple[str, str]]:
                 args = json.loads(args)
             except ValueError:
                 continue
-        command = (args or {}).get("command", "") if isinstance(args, dict) else ""
+        key = {"Read": "file_path", "TaskOutput": "task_id"}.get(name, "command")
+        command = (args or {}).get(key, "") if isinstance(args, dict) else ""
         out.append((tc.get("id"), str(command)))
     return out
 

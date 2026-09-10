@@ -2,16 +2,20 @@ from __future__ import annotations
 
 import asyncio
 import json
+import shlex
 from pathlib import Path
+
+import pytest
 
 from polar.agent.models import AgentRunResult, AgentSpec
 from polar.gateway.dispatcher import ManagedSession
-from polar.gateway.node import GatewayNodeManager
+from polar.gateway.node import GatewayExecutionTimeout, GatewayNodeManager
+from polar.gateway.session import SessionRegistry
 from polar.rollout.models import SessionDispatchRequest
 from polar.rollout.timer import StageTimer
 from polar.runtime.base import BaseRuntime
 from polar.runtime.models import ExecInput, ExecResult, PrepareAction, RuntimeSpec
-from polar.trajectory.models import EvaluatorSpec, Trajectory
+from polar.trajectory.models import EvaluatorSpec, Trace, Trajectory
 from polar.trajectory.registry import default_evaluator_registry
 
 
@@ -204,6 +208,164 @@ async def _run_agent_success(runtime, steps, env, managed):
 
 async def _ready_runtime(runtime: BaseRuntime) -> BaseRuntime:
     return runtime
+
+
+@pytest.mark.parametrize("lazy", [True, False])
+@pytest.mark.parametrize("builder_status", ["COMPLETED", "ERROR"])
+def test_expired_solving_budget_still_builds_and_scores_with_fresh_budget(
+    monkeypatch, tmp_path, lazy, builder_status,
+):
+    events = []
+    request = _request(lazy=lazy)
+    request.evaluator.postrun_timeout_seconds = 30
+    request.evaluator.config["judge_timeout"] = 25
+    agent = FakeRuntime("agent", events, tmp_path / "agent", files={f"{WORKDIR}/{SUB}": "# best"})
+    judge = FakeRuntime("judge", events, tmp_path / "judge", files={
+        f"{WORKDIR}/{METRICS}": json.dumps({"success": True, "perf_data": {"speedup_vs_torch": 2.0}}),
+    })
+    manager = _run_manager()
+    # Exercise real deadline enforcement, building and evaluator dispatch.
+    del manager._await_with_budget, manager._remaining_budget
+    manager.node_id = "node-test"
+    manager.session_registry = SessionRegistry()
+    manager.session_registry.register("s", task_id="t")
+    manager.evaluators = default_evaluator_registry()
+    manager._build_trajectory = lambda request, session_dir: Trajectory(
+        status=builder_status,
+        error="mixed policy versions" if builder_status == "ERROR" else None,
+        traces=[Trace(prompt_ids=[1], response_ids=[2], loss_mask=[1],
+                      response_logprobs=[-0.1], metadata={"attempt_index": 0})],
+        metadata={"policy_version": 7},
+    )
+    monkeypatch.setattr("polar.gateway.node.create_runtime", lambda *args: judge)
+    managed = _managed(request, agent, tmp_path)
+
+    async def timed_out_agent(runtime, steps, env, managed):
+        managed.execution_deadline = asyncio.get_running_loop().time() - 0.1
+        return AgentRunResult(status="timeout", return_code=-1, error="solving budget exhausted")
+
+    manager._run_exec_inputs = timed_out_agent
+
+    async def run():
+        managed.execution_deadline = asyncio.get_running_loop().time() + 10
+        await manager._handle_run(managed)
+        deadline = managed.postrun_deadline
+        assert 29 < manager._remaining_budget(managed) <= 30
+        manager._start_postrun_deadline(managed)
+        assert managed.postrun_deadline == deadline  # no reset for queueing/retries
+        return await manager._build_session_result(managed)
+
+    result = asyncio.run(run())
+    assert result.trajectory.traces[0].reward == 0.9
+    assert result.trajectory.traces[0].response_logprobs == [-0.1]
+    assert result.trajectory.traces[0].metadata["attempt_index"] == 0
+    assert result.trajectory.metadata["policy_version"] == 7
+    if builder_status == "COMPLETED":
+        assert result.status == "COMPLETED"
+        assert result.error is None
+        assert result.trajectory.metadata["termination_reason"] == "agent_time_budget_exceeded"
+    else:
+        assert result.status != "COMPLETED"
+    judge_call = next(call for call in judge.exec_calls if call["command"] == "bash pipeline.sh")
+    assert judge_call["timeout_sec"] == 25
+    if lazy:
+        assert events.index("agent.stop") < events.index("judge.start")
+
+
+def test_postrun_budget_does_not_extend_expired_sessions_or_policy_cutoffs(tmp_path):
+    manager = GatewayNodeManager.__new__(GatewayNodeManager)
+    managed = _managed(_request(lazy=True), FakeRuntime("agent", [], tmp_path), tmp_path)
+
+    async def run():
+        managed.execution_deadline = asyncio.get_running_loop().time() - 1
+        manager._start_postrun_deadline(managed)
+        assert managed.postrun_deadline is None  # legacy shared-budget profile
+        with pytest.raises(GatewayExecutionTimeout):
+            manager._remaining_budget(managed)
+        managed.request.evaluator.postrun_timeout_seconds = 0.1
+        managed.cancel_reason = "policy_cutoff"
+        manager._start_postrun_deadline(managed)
+        assert managed.postrun_deadline is None
+        managed.cancel_reason = None
+        manager._start_postrun_deadline(managed)
+        with pytest.raises(GatewayExecutionTimeout):
+            manager._remaining_budget(managed)  # late postrun queue cannot renew budget
+
+    asyncio.run(run())
+
+
+def test_judge_preparation_is_bounded_and_preserves_built_traces(tmp_path):
+    manager = GatewayNodeManager.__new__(GatewayNodeManager)
+    manager.node_id = "node-test"
+    manager.session_registry = SessionRegistry()
+    manager.session_registry.register("s", task_id="t")
+    manager._build_trajectory = lambda request, session_dir: Trajectory(
+        status="COMPLETED", traces=[Trace(response_ids=[2], loss_mask=[1])],
+    )
+    managed = _managed(_request(lazy=True), FakeRuntime("agent", [], tmp_path), tmp_path)
+    managed.request.evaluator.postrun_timeout_seconds = 0.05
+    managed.agent_result = AgentRunResult(status="completed", return_code=0)
+    cancelled = []
+
+    async def hanging_eval(*args, **kwargs):
+        try:
+            await asyncio.Event().wait()
+        finally:
+            cancelled.append(True)
+
+    manager._run_eval = hanging_eval
+
+    async def run():
+        manager._start_postrun_deadline(managed)
+        return await manager._build_session_result(managed)
+
+    result = asyncio.run(run())
+    assert result.status == "TIMEOUT"
+    assert result.trajectory.traces[0].response_ids == [2]
+    assert cancelled == [True]
+
+
+def test_solving_timeout_kills_tool_process_group(tmp_path):
+    marker = tmp_path / "should-not-be-written"
+
+    class LocalRuntime(FakeRuntime):
+        async def exec(self, command, *, cwd=None, env=None, timeout_sec=None):
+            rc, stdout, stderr = await self._run_local_command(
+                "bash", "-lc", command, timeout=timeout_sec, capture=True,
+            )
+            return ExecResult(return_code=rc, stdout=stdout, stderr=stderr)
+
+    runtime = LocalRuntime("agent", [], tmp_path)
+    managed = _managed(_request(lazy=True), runtime, tmp_path)
+    managed.request.evaluator.postrun_timeout_seconds = 30
+    manager = GatewayNodeManager.__new__(GatewayNodeManager)
+
+    async def run():
+        managed.execution_deadline = asyncio.get_running_loop().time() + 0.1
+        result = await manager._run_exec_inputs(
+            runtime, [ExecInput(command=f"sleep 0.3; touch {shlex.quote(str(marker))}")], {}, managed,
+        )
+        await asyncio.sleep(0.35)
+        return result
+
+    result = asyncio.run(run())
+    assert result.status == "timeout"
+    assert not marker.exists()
+
+
+@pytest.mark.parametrize("return_code", [124, 137])
+def test_early_agent_failure_is_not_treated_as_budget_exhaustion(tmp_path, return_code):
+    runtime = FakeRuntime("agent", [], tmp_path)
+
+    async def failed_exec(*args, **kwargs):
+        return ExecResult(return_code=return_code)
+
+    runtime.exec = failed_exec
+    managed = _managed(_request(lazy=True), runtime, tmp_path)
+    managed.request.evaluator.postrun_timeout_seconds = 30
+    manager = GatewayNodeManager.__new__(GatewayNodeManager)
+    result = asyncio.run(manager._run_exec_inputs(runtime, [ExecInput(command="agent")], {}, managed))
+    assert result.status == "failed"
 
 
 def test_lazy_refresh_runtime_skips_run_stage_eval_prewarm(tmp_path: Path) -> None:

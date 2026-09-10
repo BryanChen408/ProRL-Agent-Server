@@ -82,6 +82,10 @@ class AnthropicStreamState:
         events: list[dict[str, Any]] = []
 
         if is_first:
+            if chunk.get("id"):
+                # Match the non-streaming ID and persisted upstream completion,
+                # so native Claude transcripts can identify the actual agent.
+                self.message_id = f"msg_{chunk['id']}"
             events.append(
                 {
                     "type": "message_start",

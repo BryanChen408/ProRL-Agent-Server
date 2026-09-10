@@ -6,6 +6,7 @@ import asyncio
 import logging
 import os
 import posixpath
+import shlex
 import shutil
 from contextlib import suppress
 from pathlib import Path
@@ -26,6 +27,7 @@ from polar.gateway.storage import SessionStore
 from polar.agent.base import BaseHarness
 from polar.agent.factory import create_harness
 from polar.agent.models import AgentRunResult
+from polar.agent.presets.claude_code import annotate_completion_roles
 from polar.run_namespace import run_dir_name, run_id_from_metadata
 from polar.rollout.models import (
     NodeHeartbeatRequest,
@@ -429,6 +431,7 @@ class GatewayNodeManager:
             env = self._runtime_env(request, managed, include_agent_env=True)
             agent_result = await self._run_exec_inputs(runtime, steps, env, managed)
 
+            self._start_postrun_deadline(managed)
             # Postprocess always runs so harnesses can collect artifacts from
             # failed or timed-out agent runs before post-run evaluation.
             await self._await_with_budget(harness.postprocess(runtime, agent_result), managed)
@@ -451,6 +454,7 @@ class GatewayNodeManager:
                     f"agent execution failed: {exc}",
                 )
         finally:
+            self._start_postrun_deadline(managed)
             if harness is not None:
                 managed.postrun_steps = harness.postrun_steps()
             managed.timer.mark("run", "finished")
@@ -475,16 +479,32 @@ class GatewayNodeManager:
                     status="failed", return_code=-1, error="cancelled"
                 )
             merged_env = {**env, **(step.env or {})}
+            timeout = self._remaining_budget(managed)
+            command = step.command
+            separate_budget = (
+                managed.request.evaluator is not None
+                and managed.request.evaluator.postrun_timeout_seconds is not None
+            )
+            if separate_budget:
+                # Kill the command's process group INSIDE the container. Killing
+                # only the host docker-exec client leaves the agent/tools running.
+                command = f"timeout --kill-after=5s {timeout}s bash -lc {shlex.quote(command)}"
             result = await runtime.exec(
-                step.command,
+                command,
                 cwd=step.cwd,
                 env=merged_env,
-                timeout_sec=self._remaining_budget(managed),
+                timeout_sec=timeout + 10.0 if separate_budget else timeout,
             )
             self._write_exec_log(
                 log_dir, f"step.{i:02d}", result.stdout, result.stderr
             )
-            if result.return_code == -1:
+            budget_expired = (
+                separate_budget
+                and result.return_code in (124, 137)
+                and managed.execution_deadline is not None
+                and asyncio.get_running_loop().time() >= managed.execution_deadline
+            )
+            if result.return_code == -1 or budget_expired:
                 return AgentRunResult(
                     status="timeout",
                     return_code=-1,
@@ -712,6 +732,7 @@ class GatewayNodeManager:
     async def _handle_postrun(self, managed: ManagedSession) -> None:
         request = managed.request
         result: SessionResult | None = managed.final_result
+        self._start_postrun_deadline(managed)
         managed.timer.mark("postrun", "started")
         try:
             if result is None:
@@ -833,7 +854,7 @@ class GatewayNodeManager:
         managed.timer.mark("build", "started")
         try:
             trajectory = await self._await_with_budget(
-                asyncio.to_thread(self._build_trajectory, request),
+                asyncio.to_thread(self._build_trajectory, request, managed.session_dir),
                 managed,
             )
         finally:
@@ -841,9 +862,25 @@ class GatewayNodeManager:
 
         error = trajectory.error
         if agent_result.status == "timeout":
-            trajectory = trajectory.model_copy(
-                update={"status": "TIMEOUT", "error": agent_result.error or error}
-            )
+            if (
+                managed.postrun_deadline is not None
+                and not managed.cancel_requested
+                and trajectory.status == "COMPLETED"
+                and trajectory.traces
+            ):
+                # Budget exhaustion is a normal end to solving. Preserve valid
+                # traces for RL; builder errors and policy cutoffs stay errors.
+                trajectory = trajectory.model_copy(update={
+                    "metadata": {
+                        **trajectory.metadata,
+                        "termination_reason": "agent_time_budget_exceeded",
+                        "agent_error": agent_result.error,
+                    },
+                })
+            else:
+                trajectory = trajectory.model_copy(
+                    update={"status": "TIMEOUT", "error": agent_result.error or error}
+                )
         elif agent_result.status == "failed":
             trajectory = trajectory.model_copy(
                 update={"status": "ERROR", "error": agent_result.error or error}
@@ -853,11 +890,16 @@ class GatewayNodeManager:
         try:
             if request.evaluator is not None:
                 self.session_registry.set_status(request.session_id, SessionStatus.EVALUATING)
-                trajectory = await self._run_eval(
+                evaluation = self._run_eval(
                     request,
                     trajectory,
                     agent_result=agent_result,
                     managed=managed,
+                )
+                trajectory = (
+                    await self._await_with_budget(evaluation, managed)
+                    if managed.postrun_deadline is not None
+                    else await evaluation
                 )
         except GatewayExecutionTimeout as exc:
             # Preserve the built trajectory even when eval times out.
@@ -932,8 +974,10 @@ class GatewayNodeManager:
             }
         )
 
-    def _build_trajectory(self, request: SessionDispatchRequest) -> Trajectory:
+    def _build_trajectory(self, request: SessionDispatchRequest, session_dir: Path | None = None) -> Trajectory:
         completion_session = self.storage.load_completion_session(request.session_id)
+        if request.agent.harness == "claude_code" and session_dir is not None:
+            annotate_completion_roles(completion_session, session_dir)
         builder = self.builders.create(request.builder)
         result = builder.build(completion_session)
         if asyncio.iscoroutine(result):
@@ -1505,7 +1549,11 @@ class GatewayNodeManager:
         )
 
     def _remaining_budget(self, managed: ManagedSession) -> float:
-        deadline = managed.execution_deadline
+        deadline = (
+            managed.postrun_deadline
+            if managed.postrun_deadline is not None
+            else managed.execution_deadline
+        )
         if deadline is None:
             raise RuntimeError("session execution deadline was not initialized")
         remaining = deadline - asyncio.get_running_loop().time()
@@ -1513,15 +1561,40 @@ class GatewayNodeManager:
             raise GatewayExecutionTimeout("session execution timeout")
         return remaining
 
+    @staticmethod
+    def _start_postrun_deadline(managed: ManagedSession) -> None:
+        evaluator = managed.request.evaluator
+        if (
+            managed.postrun_deadline is not None
+            or evaluator is None
+            or evaluator.postrun_timeout_seconds is None
+            or managed.cancel_reason == "policy_cutoff"
+        ):
+            return
+        now = asyncio.get_running_loop().time()
+        # Late cleanup/queueing must not extend the rollout's total wait window.
+        started = (
+            min(now, managed.execution_deadline)
+            if managed.execution_deadline is not None
+            else now
+        )
+        managed.postrun_deadline = started + evaluator.postrun_timeout_seconds
+
     async def _await_with_budget(
         self,
         awaitable,
         managed: ManagedSession,
     ):
         try:
+            timeout = self._remaining_budget(managed)
+        except GatewayExecutionTimeout:
+            if asyncio.iscoroutine(awaitable):
+                awaitable.close()
+            raise
+        try:
             return await asyncio.wait_for(
                 awaitable,
-                timeout=self._remaining_budget(managed),
+                timeout=timeout,
             )
         except asyncio.TimeoutError as exc:
             raise GatewayExecutionTimeout("session execution timeout") from exc

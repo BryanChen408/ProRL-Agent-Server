@@ -441,7 +441,9 @@ class Pipeline:
         return remaining
 
     def _callback_deadline_monotonic(self, session: SessionContext) -> float:
-        return session.deadline_monotonic + self.callback_grace_seconds
+        evaluator = session.request.evaluator
+        postrun_timeout = evaluator.postrun_timeout_seconds if evaluator is not None else None
+        return session.deadline_monotonic + (postrun_timeout or 0.0) + self.callback_grace_seconds
 
     def _remaining_callback_window_seconds(self, session: SessionContext) -> float:
         remaining = self._callback_deadline_monotonic(session) - time.monotonic()
