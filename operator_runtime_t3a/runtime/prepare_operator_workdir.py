@@ -3,6 +3,7 @@
 
 与 t2a 的 prepare 是两条独立路径——t3a 不生成骨架、不写 skillOverrides、不装 stop_guard、
 不做基准注入(那些是我方 t2a 的机制;判分接线 R5 在 judge 侧,不进 agent workdir)。
+T3A Stop 仅检查现有 AscendC 候选与 trace,不使用 t2a task_state,不执行额外验证。
 
 CLI 与 t2a 的 prepare 保持同形(topology 只需切 paths.operator_runtime_dir):
   --op-name / --workdir / --canonical-root / --task-path / --backend(忽略,恒 ascendc)
@@ -25,6 +26,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import runpy
 import shutil
 import stat
 import subprocess
@@ -156,6 +158,22 @@ def main() -> int:
     _copy_tree(canonical / "hooks", claude_dir / "hooks")
     _copy_tree(canonical / "workflows", claude_dir / "workflows")
     _copy_file(canonical / "CLAUDE.md", workdir / "CLAUDE.md")
+
+    # Build the effective task at prepare time. This also updates dispatches
+    # when a long-running trainer is still sending an older dataset prompt.
+    case_file = workdir / "input" / f"{op}.json"
+    case_count = sum(bool(line.strip()) for line in case_file.read_text().splitlines()) if case_file.is_file() else 0
+    case_mode = "simple" if op.startswith("npukernelbench_") and case_count == 5 else "full"
+    convert = runpy.run_path(str(claude_dir / "hooks/convert_task_prompts.py"))["convert"]
+    row = {"metadata": {"op_name": op}}
+    template = (claude_dir / "workflows/task-prompts.md").read_text().split("```\n", 1)[1].split("```", 1)[0]
+    template = template.replace("{op_file}", str(task_py.resolve())).replace("{output_dir}", str((workdir / op).resolve()))
+    contract = {
+        "op_name": op, "case_mode": case_mode,
+        "main_prompt": convert(row, case_mode=case_mode)["prompt"][0]["content"],
+        "developer_prompt": template + "\n" + convert(row, case_mode=case_mode, developer=True)["prompt"][0]["content"],
+    }
+    (claude_dir / "task_contract.json").write_text(json.dumps(contract, ensure_ascii=False, indent=2))
 
     # 2. settings.json:官方 init.sh 的生成语义(hooks.json 里的 ${CLAUDE_PLUGIN_ROOT} → 绝对路径)
     template = (canonical / "settings.json.template").read_text(encoding="utf-8")

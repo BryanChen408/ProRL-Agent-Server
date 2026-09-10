@@ -14,12 +14,11 @@
     ],
     "PreToolUse": [
       {
-        "matcher": "Bash",
+        "matcher": "Agent|Task|Skill|Bash|Write|Edit|MultiEdit",
         "hooks": [
           {
             "type": "command",
-            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/skill_script_hook.py\"",
-            "async": false
+            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/workflow_hook.py\""
           }
         ]
       },
@@ -52,6 +51,26 @@
             "type": "command",
             "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/doc_gate.py\" --mode skill_post",
             "async": false
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/t3a_running_best.py\" --stop"
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/workflow_hook.py\""
           }
         ]
       }

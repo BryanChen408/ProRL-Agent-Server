@@ -52,19 +52,25 @@ def synthesize(stream_path: str, judge_metrics: dict | None = None) -> dict:
     streak_sig = None
     streak_n = 0
     last_was_eval = False
+    promote_eligible = False
     for ev in events:
         if ev.get("event") == "promote":
             # promote 只在该进步由评测 attempt 触发时计分
-            c = 0.06 if last_was_eval else 0.0
+            c = 0.06 if last_was_eval and promote_eligible else 0.0
+            promote_eligible = False  # A single attempt cannot mint repeated promote credit.
             credits.append({"event": "promote", "credit": c, "ts": ev.get("ts")})
             continue
         script = ev.get("script") or ""
         if script not in _EVAL_SCRIPTS:
             credits.append({"event": "helper", "script": script, "credit": 0.0, "ts": ev.get("ts")})
             last_was_eval = False
+            promote_eligible = False
             continue
         last_was_eval = True
         cls = ev.get("classification")
+        promote_eligible = script in ("evaluate_ascendc.sh", "verification_ascendc.py") and (
+            cls == "PASS" or (ev.get("case_pass") or 0) > 0
+        )
         if cls == "PASS":
             c = 0.04
         elif cls == "D":
@@ -92,7 +98,9 @@ def synthesize(stream_path: str, judge_metrics: dict | None = None) -> dict:
 
     anomalies: list[str] = []
     if judge_metrics is not None:
-        judge_ok = bool(judge_metrics.get("correctness_ok") or judge_metrics.get("success"))
+        judge_ok = (judge_metrics.get("success") is True
+                    and judge_metrics.get("correctness_ok") is True
+                    and not judge_metrics.get("error_type"))
         if not judge_ok:
             for c in credits:
                 if c.get("classification") == "PASS" and c.get("credit", 0) > 0:
@@ -102,6 +110,9 @@ def synthesize(stream_path: str, judge_metrics: dict | None = None) -> dict:
                     c["anomaly"] = "judge_rejected"
 
     total = _clamp(sum(c.get("credit", 0.0) for c in credits))
+    if judge_metrics is not None and not judge_ok and total > 0:
+        anomalies.append("No candidate accepted by judge; positive aggregate process credit capped at zero")
+        total = 0.0
     return {
         "schema_version": 1,
         "source": stream_path,

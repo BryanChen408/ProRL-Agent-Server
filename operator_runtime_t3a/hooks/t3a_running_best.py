@@ -6,7 +6,7 @@
   2. 按判据与 running best 比较,更好则把 {op}/ 快照进 ranked list(top-5)。
 
 判据(当场免费算的近似 reward;最终名次由 judge 侧我方判分链说了算,这里只影响判几次):
-  PASS(全 case)> 部分通过 > A类/D类/其他 → case 通过数 → speedup → 时间戳(后者优先)
+  仅 AscendC 候选: PASS(全 case)> 部分通过 > A类/D类/其他 → case 通过数 → speedup; 时间不算进步
 
 存储位置(防篡改排序):
   $POLAR_T3A_CANDIDATES_DIR(显式指定)> $ARTIFACTS_DIR/t3a_candidates(gateway 侧,agent 改不到)
@@ -126,7 +126,6 @@ def _rank_key(entry: dict) -> tuple:
         1 if entry.get("classification") == "PASS" else 0,
         int(entry.get("case_pass") or 0),
         float(entry.get("speedup") or 0.0),
-        float(entry.get("ts") or 0.0),
     )
 
 
@@ -199,7 +198,9 @@ def record_attempt(
         with open(_stream_path(cand_dir), "a", encoding="utf-8") as fh:
             fh.write(json.dumps(rec, ensure_ascii=False) + "\n")
 
-        if not op:
+        # TileLang and helper calls remain in the attempt stream, but cannot
+        # rank a submission for the AscendC judge.
+        if not op or script not in ("evaluate_ascendc.sh", "verification_ascendc.py"):
             return
         op_dir = _find_op_dir(op, cwd, project_root)
         if op_dir is None:
@@ -222,12 +223,14 @@ def _maybe_promote(
     cand_dir: str,
     stdout: str = "",
 ) -> int | None:
-    entries = _load_index(cand_dir)
+    if not (os.path.isdir(os.path.join(op_dir, "kernel"))
+            and os.path.isfile(os.path.join(op_dir, "model_new_ascendc.py"))):
+        return None
+    entries = [e for e in _load_index(cand_dir) if e.get("backend") == "ascendc"]
     src_hash = _src_hash(op_dir)
     best = max(entries, key=_rank_key, default=None)
-    if best is not None and best.get("src_hash") == src_hash:
-        return None  # [F6] 源码未变:重复执行不 promote、不记分
     candidate = {
+        "backend": "ascendc",
         "classification": classification,
         "case_pass": case_pass,
         "case_total": case_total,
@@ -235,6 +238,9 @@ def _maybe_promote(
         "src_hash": src_hash,
         "ts": time.time(),
     }
+    if (best is not None and best.get("src_hash") == src_hash
+            and _rank_key(candidate)[:2] <= _rank_key(best)[:2]):
+        return None  # Same code/accuracy: timing noise is not an improvement.
     if best is not None and _rank_key(best) >= _rank_key(candidate):
         return None  # 没有更好,不 promote
 
@@ -261,4 +267,39 @@ def _maybe_promote(
     for i, e in enumerate(entries):
         e["rank"] = i + 1
     _save_index(cand_dir, entries)
-    return 1
+    # Keep a first failed AscendC candidate for judge diagnostics, without
+    # rewarding source churn with zero passing cases.
+    return 1 if classification == "PASS" or case_pass > 0 else None
+
+
+def stop_reason(project_root: str) -> str | None:
+    """Read-only completion checkpoint; no evaluation and no retry counter.
+
+    Uses cannbot's Stop-hook rejection protocol, checking existing artifacts
+    instead of trusting the main agent's final prose. External timeout owns
+    termination when development cannot produce a submission.
+    """
+    op = os.environ.get("POLAR_OP_NAME") or _guess_op_name(project_root, project_root)
+    if not op:
+        return "T3A 无法定位 input 中的任务；检查原始任务路径，不得宣称开发完成。"
+    op_dir = os.path.join(project_root, op)
+    entries = _load_index(_candidates_dir(project_root))
+    if (os.path.isfile(os.path.join(op_dir, "trace.md"))
+            and any(e.get("op") == op and e.get("backend") == "ascendc"
+                    and os.path.isfile(e.get("file", "")) for e in entries)):
+        return None
+    return (
+        "T3A 开发尚未完成：缺少经过 AscendC 评测并留存的 kernel/ + "
+        "model_new_ascendc.py 候选或 trace.md。TileLang 验证和 stub 不算完成。"
+        "请恢复 tilelang2ascendc-kernel-generator，从未完成阶段继续；保持原始 output_dir，"
+        "执行开发阶段 evaluate_ascendc.sh 并记录真实结果。不要追加最终验证，不要由主链写代码。"
+        "若已有环境故障，记录原始错误并据此排查，禁止重复无效重跑。外部 pipeline 时间预算负责截止。"
+    )
+
+
+if __name__ == "__main__" and sys.argv[1:] == ["--stop"]:
+    payload = json.load(sys.stdin)
+    reason = stop_reason(os.environ.get("CLAUDE_PROJECT_DIR") or payload.get("cwd") or os.getcwd())
+    if reason:
+        print(reason, file=sys.stderr)
+        sys.exit(2)

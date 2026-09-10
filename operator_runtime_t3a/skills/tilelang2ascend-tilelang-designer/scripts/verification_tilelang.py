@@ -22,6 +22,10 @@ logger = logging.getLogger(__name__)
 
 
 SCRIPT_DIR = Path(__file__).resolve().parent
+WORKDIR = SCRIPT_DIR.parent
+
+# Import shared utility functions from the canonical AscendC verification module.
+# Canonical source: tilelang2ascend-translator/scripts/verification_ascendc.py
 
 # [R-paths] 跨 skill import 路径:上游用 parents[N] 反推仓库根,依赖「skill 待在原仓库树里」;
 # 实体铺到 workdir/.claude/skills/ 后层级对不上必断(实测 ModuleNotFoundError)。
@@ -34,11 +38,6 @@ def _skill_scripts(name):
             return cand
     return here.parent
 
-
-WORKDIR = SCRIPT_DIR.parent
-
-# Import shared utility functions from the canonical AscendC verification module.
-# Canonical source: tilelang2ascend-translator/scripts/verification_ascendc.py
 _ASCENDC_SCRIPTS = (
     _skill_scripts("tilelang2ascend-translator")
 )
@@ -174,7 +173,8 @@ def _run_verification(op: str):
         report["error"] = f"missing candidate model: {cand_path}"
         return report
 
-    sys.path.insert(0, str(WORKDIR))
+    original_sys_path = sys.path[:]
+    sys.path.insert(0, str(task_dir))
     try:
         ref_module = _load_module(ref_path, f"{op}_ref_model")
         cand_module = _load_module(cand_path, f"{op}_tilelang_model")
@@ -205,8 +205,7 @@ def _run_verification(op: str):
         report["traceback"] = traceback.format_exc()
         return report
     finally:
-        if str(WORKDIR) in sys.path:
-            sys.path.remove(str(WORKDIR))
+        sys.path[:] = original_sys_path
 
 
 def verify(op: str) -> bool:

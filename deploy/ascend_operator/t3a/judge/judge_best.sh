@@ -15,12 +15,14 @@ while [[ $# -gt 0 ]]; do
     *) echo "[judge-best] unknown arg: $1" >&2; exit 1;;
   esac
 done
-[[ -z "$OP_NAME" ]] && { echo "[judge-best] --op_name required" >&2; exit 1; }
+[[ "$OP_NAME" =~ ^[A-Za-z0-9_-]+$ ]] || { echo "[judge-best] valid --op_name required" >&2; exit 1; }
 
 _SRC="${BASH_SOURCE[0]}"
 command -v readlink >/dev/null 2>&1 && _SRC="$(readlink -f "$_SRC")"
 JUDGE_DIR="$(cd "$(dirname "$_SRC")" && pwd)"
 WORKDIR="$(cd "$JUDGE_DIR/.." && pwd)"
+cd "$WORKDIR" || exit 1
+mkdir -p "$OUT_DIR/candidates"
 PIPELINE="$JUDGE_DIR/ascendc_eval_pipeline.sh"
 [[ -f "$PIPELINE" ]] || { echo "[judge-best] pipeline missing: $PIPELINE" >&2; exit 1; }
 
@@ -66,12 +68,12 @@ elif [[ -n "$HIDDEN_OP" && -d "$HIDDEN_OP" ]]; then
       -C "$HIDDEN_OP" .
   echo -e "$FB_TAR\t$(sha256sum "$FB_TAR" | cut -d' ' -f1)" > "$LIST_FILE"
 else
-  echo "[judge-best] FATAL: no candidates and no $WORKDIR/$OP_NAME" >&2
-  exit 1
+  echo "[judge-best] no candidates and no $WORKDIR/$OP_NAME" >&2
 fi
 
 ACCEPTED=0
-PIPELINE_RC=0
+# Start a new selection; per-candidate directories are fresh on every invocation.
+rm -f "$OUT_DIR/metrics.json" "$OUT_DIR/metrics_error.log"
 while IFS=$'\t' read -r FILE SHA; do
   [[ -z "$FILE" ]] && continue
   if [[ ! -f "$FILE" ]]; then
@@ -84,7 +86,9 @@ while IFS=$'\t' read -r FILE SHA; do
     continue
   fi
   echo "[judge-best] judging: $FILE"
-  bash "$PIPELINE" --op_name "$OP_NAME" --impl "$FILE" --out_dir "$OUT_DIR" || true
+  CAND_OUT=$(mktemp -d "$OUT_DIR/candidates/${ACTUAL}.XXXXXX") || exit 1
+  bash "$PIPELINE" --op_name "$OP_NAME" --impl "$FILE" --out_dir "$CAND_OUT" 2>&1 | tee "$CAND_OUT/pipeline.log"
+  PIPELINE_RC=${PIPESTATUS[0]}
   # [R5-G2] judge 侧 process_info 中和:pipeline 每次运行会把它自己的单次判分
   # 写进 $ARTIFACTS_DIR/process_info.json —— 那是 judge 的一次验证,不是 agent 的
   # 解题过程。operator_judge 的 _load_process_events 就认这个路径,留着它会把
@@ -93,17 +97,53 @@ while IFS=$'\t' read -r FILE SHA; do
   if [[ -n "${ARTIFACTS_DIR:-}" && -f "$ARTIFACTS_DIR/process_info.json" ]]; then
     mv -f "$ARTIFACTS_DIR/process_info.json" "$ARTIFACTS_DIR/process_info.judge.$(date +%s).json" 2>/dev/null || true
   fi
-  VERDICT=$(python3 -c "
+  VERDICT=$(python3 - "$CAND_OUT" "$OUT_DIR" "$ACTUAL" "$FILE" "$PIPELINE_RC" <<'PYRESULT'
 import json
+from pathlib import Path
+import shutil
+import sys
+candidate_dir, output = map(Path, sys.argv[1:3])
+sha, filename, rc = sys.argv[3], sys.argv[4], int(sys.argv[5])
 try:
-    d = json.load(open('$OUT_DIR/metrics.json'))
-    et = d.get('error_type') or ''
-    ok = d.get('success') is True or (d.get('correctness_ok') is True)
-    blocked = et in ('stateful_impl_detected', 'ast_check_failed')
-    print('accept' if ok and not blocked else ('blocked' if blocked else 'reject'))
-except Exception as e:
-    print('reject')
-" 2>/dev/null)
+    d = json.loads((candidate_dir / 'metrics.json').read_text())
+    if not isinstance(d, dict):
+        raise ValueError('metrics must be an object')
+except (OSError, ValueError) as exc:
+    d = {'success': False, 'correctness_ok': False, 'ast_check_ok': False,
+         'error_type': 'judge_no_metrics', 'error': str(exc)}
+    shutil.copyfile(candidate_dir / 'pipeline.log', candidate_dir / 'metrics_error.log')
+if d.get('evaluated_candidate_sha256') not in (None, '', sha):
+    d.update(success=False, correctness_ok=False, error_type='judge_metrics_unreadable',
+             error='candidate hash in metrics does not match the evaluated tarball')
+d['evaluated_candidate_sha256'] = sha
+ok = (rc == 0 and d.get('success') is True and d.get('correctness_ok') is True
+      and d.get('ast_check_ok') is True and not d.get('error_type'))
+if not ok and d.get('success') is True:
+    d.update(success=False, error_type=d.get('error_type') or 'judge_metrics_unreadable')
+(candidate_dir / 'metrics.json').write_text(json.dumps(d, ensure_ascii=False, indent=2))
+selected_path = output / 'metrics.json'
+selected = json.loads(selected_path.read_text()) if selected_path.exists() else None
+summary = {k: d.get(k) for k in ('success', 'error_type', 'correctness_ok', 'cases_passed',
+                              'cases_total', 'evaluated_candidate_sha256')}
+summary.update(candidate=filename, pipeline_exit_code=rc)
+history = (selected or {}).get('judge_candidates', []) + [summary]
+# Keep the first ranked substantive failure; layout/infra-only results must
+# not hide an implementation error. A later accepted candidate always wins.
+no_submission = {'submission_missing', 'judge_no_metrics', 'judge_metrics_unreadable'}
+choose = (selected is None or ok or
+          (selected.get('error_type') in no_submission and d.get('error_type') not in no_submission))
+if choose:
+    selected = d
+    error_path = output / 'metrics_error.log'
+    if (candidate_dir / 'metrics_error.log').exists():
+        shutil.copyfile(candidate_dir / 'metrics_error.log', error_path)
+    else:
+        error_path.write_text(d.get('error') or '')
+selected['judge_candidates'] = history
+selected_path.write_text(json.dumps(selected, ensure_ascii=False, indent=2))
+print('accept' if ok else 'reject')
+PYRESULT
+  ) || exit 1
   case "$VERDICT" in
     accept) echo "[judge-best] ACCEPTED: $FILE"; ACCEPTED=1; break;;
     blocked) echo "[judge-best] rejected by judge gate (ast/stateful): $FILE — try next";;
@@ -111,9 +151,18 @@ except Exception as e:
   esac
 done < "$LIST_FILE"
 rm -f "$LIST_FILE"
+if [[ ! -f "$OUT_DIR/metrics.json" ]]; then
+  python3 - "$OUT_DIR/metrics.json" <<'PYNONE'
+import json, sys
+with open(sys.argv[1], 'w') as f:
+    json.dump({'success': False, 'correctness_ok': False, 'ast_check_ok': False,
+               'error_type': 'submission_missing', 'error': 'No readable, hash-verified candidate',
+               'evaluated_candidate_sha256': None, 'judge_candidates': []}, f)
+PYNONE
+fi
 
 # [R5] 过程分合成:attempt stream + 最终 metrics → judge_out/process_reward.json
-# 无论候选是否被接受都合成:全挂轨迹的过程反馈同样是信号(此时 metrics 为最后一次判分)。
+# 无论候选是否被接受都合成:全挂轨迹的过程反馈同样是信号(此时 metrics 保留排名靠前的真实失败)。
 STREAM=""
 for sp in "${POLAR_T3A_CANDIDATES_DIR:-}/../t3a_attempt_stream.jsonl" \
           "${ARTIFACTS_DIR:-}/t3a_attempt_stream.jsonl" \
@@ -128,7 +177,7 @@ if [[ -n "$STREAM" && -f "$JUDGE_DIR/t3a_process_reward.py" ]]; then
 fi
 
 if [[ "$ACCEPTED" != "1" ]]; then
-  echo "[judge-best] no candidate accepted; metrics.json reflects the last judged candidate"
+  echo "[judge-best] no candidate accepted; metrics.json preserves the selected failure; all verdicts are in judge_candidates"
   exit 1
 fi
 exit 0

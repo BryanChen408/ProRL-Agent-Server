@@ -35,6 +35,18 @@ logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 logger = logging.getLogger(__name__)
 
 # 从 validate_ascendc_impl 导入共享常量、AST 工具和检查函数
+
+# [R-paths] 跨 skill import 路径:上游用 parents[N] 反推仓库根,依赖「skill 待在原仓库树里」;
+# 实体铺到 workdir/.claude/skills/ 后层级对不上必断(实测 ModuleNotFoundError)。
+# 改为逐级向上搜 <name>/scripts,任何布局都能命中。
+def _skill_scripts(name):
+    here = Path(__file__).resolve()
+    for base in here.parents:
+        cand = base / name / "scripts"
+        if cand.is_dir():
+            return cand
+    return here.parent
+
 _ASCENDC_SCRIPTS = (
     _skill_scripts("tilelang2ascend-translator")
 )

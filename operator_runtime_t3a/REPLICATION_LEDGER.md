@@ -1,7 +1,7 @@
 # REPLICATION_LEDGER — 复刻对账表
 
 - 源: /home/docker/cannbot-skills @ `13b2ae5652c75fe83a3e4114552a6477d3a01f3d`
-- 目标: /home/docker/polar_can/ProRL-Agent-Server/operator_runtime_t3a
+- 目标: /home/docker/rl_analysis_20260909/t2a_dual_dataset_fix/t3a_runtime
 
 ## 白名单补丁点(允许存在的全部差异)
 - `agents/tilelang2ascendc-kernel-generator.md`:R2a 删 SOC 优先级 2/3(npu-smi 违禁)
@@ -18,38 +18,48 @@
 - `hooks/skill_script_hook.py` 的 _lease_wrap_command:R8(直接形态 NPU 脚本外层包租约,acos 冒烟实证)
 - `judge/`(t2a 判分链脚本 + judge_best.sh):R5 judge 侧接线(我方件,不进 agent workdir)
 - `runtime/prepare_operator_workdir.py`:t3a prepare(我方件,CLI 与 t2a 同形)
+- T3A 执行契约: 原生 Phase 1.2 工程布局、安装路径、派发策略、时间预算覆盖; doc_gate 仅去除次数终止
+- Stop: 复用 t3a_running_best 只读检查已有 AscendC 候选和 trace; 不追加评测
 - 4 个脚本的 R-paths 补丁(verification_ascendc/validate_ascendc_impl/verification_tilelang/validate_tilelang_impl):跨 skill import 改向上搜/内联
 
 ## 逐件对账
 
 - **skills/npu-arch**: ✅ 一致
+- **skills/ascendc-crash-debug**: ✅ 一致
 - **skills/ascendc-api-best-practices**: ✅ 一致
 - **skills/ascendc-docs-search**: ✅ 一致
 - **skills/ascendc-tiling-design**: ✅ 一致
 - **skills/tilelang2ascend-case-simplifier**: ✅ 一致
-- **skills/tilelang2ascend-operator-project-init**: ✅ 一致
+- **skills/tilelang2ascend-operator-project-init**: ⚠️ 1 处差异(应全部在白名单内)
+    - `Files /home/docker/cannbot-skills/plugins-community/tilelang2ascendc-ops-generator/skills/tilelang2ascend-operator-project-init/SKILL.md and /home/docker/rl_analysis_20260909/t2a_dual_dataset_fix/t3a_runtime/skills/tilelang2ascend-operator-project-init/SKILL.md differ`
 - **skills/ops-profiling**: ✅ 一致
 - **skills/ascendc-precision-debug**: ✅ 一致
 - **skills/tilelang2ascend-precision-tuning**: ✅ 一致
 - **skills/tilelang2ascend-tilelang-designer**: ⚠️ 3 处差异(应全部在白名单内)
-    - `Only in /home/docker/polar_can/ProRL-Agent-Server/operator_runtime_t3a/skills/tilelang2ascend-tilelang-designer: references`
-    - `Files /home/docker/cannbot-skills/plugins-community/tilelang2ascendc-ops-generator/skills/tilelang2ascend-tilelang-designer/scripts/validate_tilelang_impl.py and /home/docker/polar_can/ProRL-Agent-Server/operator_runtime_t3a/skills/tilelang2ascend-tilelang-designer/scripts/validate_tilelang_impl.py differ`
-    - `Files /home/docker/cannbot-skills/plugins-community/tilelang2ascendc-ops-generator/skills/tilelang2ascend-tilelang-designer/scripts/verification_tilelang.py and /home/docker/polar_can/ProRL-Agent-Server/operator_runtime_t3a/skills/tilelang2ascend-tilelang-designer/scripts/verification_tilelang.py differ`
-- **skills/tilelang2ascend-translator**: ⚠️ 3 处差异(应全部在白名单内)
-    - `Files /home/docker/cannbot-skills/plugins-community/tilelang2ascendc-ops-generator/skills/tilelang2ascend-translator/scripts/evaluate_ascendc.sh and /home/docker/polar_can/ProRL-Agent-Server/operator_runtime_t3a/skills/tilelang2ascend-translator/scripts/evaluate_ascendc.sh differ`
-    - `Files /home/docker/cannbot-skills/plugins-community/tilelang2ascendc-ops-generator/skills/tilelang2ascend-translator/scripts/validate_ascendc_impl.py and /home/docker/polar_can/ProRL-Agent-Server/operator_runtime_t3a/skills/tilelang2ascend-translator/scripts/validate_ascendc_impl.py differ`
-    - `Files /home/docker/cannbot-skills/plugins-community/tilelang2ascendc-ops-generator/skills/tilelang2ascend-translator/scripts/verification_ascendc.py and /home/docker/polar_can/ProRL-Agent-Server/operator_runtime_t3a/skills/tilelang2ascend-translator/scripts/verification_ascendc.py differ`
+    - `Only in /home/docker/rl_analysis_20260909/t2a_dual_dataset_fix/t3a_runtime/skills/tilelang2ascend-tilelang-designer: references`
+    - `Files /home/docker/cannbot-skills/plugins-community/tilelang2ascendc-ops-generator/skills/tilelang2ascend-tilelang-designer/scripts/validate_tilelang_impl.py and /home/docker/rl_analysis_20260909/t2a_dual_dataset_fix/t3a_runtime/skills/tilelang2ascend-tilelang-designer/scripts/validate_tilelang_impl.py differ`
+    - `Files /home/docker/cannbot-skills/plugins-community/tilelang2ascendc-ops-generator/skills/tilelang2ascend-tilelang-designer/scripts/verification_tilelang.py and /home/docker/rl_analysis_20260909/t2a_dual_dataset_fix/t3a_runtime/skills/tilelang2ascend-tilelang-designer/scripts/verification_tilelang.py differ`
+- **skills/tilelang2ascend-translator**: ⚠️ 4 处差异(应全部在白名单内)
+    - `Files /home/docker/cannbot-skills/plugins-community/tilelang2ascendc-ops-generator/skills/tilelang2ascend-translator/SKILL.md and /home/docker/rl_analysis_20260909/t2a_dual_dataset_fix/t3a_runtime/skills/tilelang2ascend-translator/SKILL.md differ`
+    - `Files /home/docker/cannbot-skills/plugins-community/tilelang2ascendc-ops-generator/skills/tilelang2ascend-translator/scripts/evaluate_ascendc.sh and /home/docker/rl_analysis_20260909/t2a_dual_dataset_fix/t3a_runtime/skills/tilelang2ascend-translator/scripts/evaluate_ascendc.sh differ`
+    - `Files /home/docker/cannbot-skills/plugins-community/tilelang2ascendc-ops-generator/skills/tilelang2ascend-translator/scripts/validate_ascendc_impl.py and /home/docker/rl_analysis_20260909/t2a_dual_dataset_fix/t3a_runtime/skills/tilelang2ascend-translator/scripts/validate_ascendc_impl.py differ`
+    - `Files /home/docker/cannbot-skills/plugins-community/tilelang2ascendc-ops-generator/skills/tilelang2ascend-translator/scripts/verification_ascendc.py and /home/docker/rl_analysis_20260909/t2a_dual_dataset_fix/t3a_runtime/skills/tilelang2ascend-translator/scripts/verification_ascendc.py differ`
 - **skills/tilelang2ascend-trace-recorder**: ✅ 一致
 - **skills/tilelang-op-design**: ✅ 一致
 - **skills/tilelang-op-develop**: ✅ 一致
 - **skills/tilelang-perf-optimization**: ✅ 一致
 - **skills/ascendc-perf-optimize**: ✅ 一致
 - **agents/(白名单:R2a)**: ⚠️ 1 处差异(应全部在白名单内)
-    - `Files /home/docker/cannbot-skills/plugins-community/tilelang2ascendc-ops-generator/agents/tilelang2ascendc-kernel-generator.md and /home/docker/polar_can/ProRL-Agent-Server/operator_runtime_t3a/agents/tilelang2ascendc-kernel-generator.md differ`
-- **hooks/(白名单:R3/R4)**: ⚠️ 3 处差异(应全部在白名单内)
-    - `Files /home/docker/cannbot-skills/plugins-community/tilelang2ascendc-ops-generator/hooks/doc_gate.py and /home/docker/polar_can/ProRL-Agent-Server/operator_runtime_t3a/hooks/doc_gate.py differ`
-    - `Files /home/docker/cannbot-skills/plugins-community/tilelang2ascendc-ops-generator/hooks/skill_script_hook.py and /home/docker/polar_can/ProRL-Agent-Server/operator_runtime_t3a/hooks/skill_script_hook.py differ`
-    - `Only in /home/docker/polar_can/ProRL-Agent-Server/operator_runtime_t3a/hooks: t3a_running_best.py`
-- **workflows/**: ✅ 一致
+    - `Files /home/docker/cannbot-skills/plugins-community/tilelang2ascendc-ops-generator/agents/tilelang2ascendc-kernel-generator.md and /home/docker/rl_analysis_20260909/t2a_dual_dataset_fix/t3a_runtime/agents/tilelang2ascendc-kernel-generator.md differ`
+- **hooks/(白名单:R3/R4)**: ⚠️ 6 处差异(应全部在白名单内)
+    - `Only in /home/docker/rl_analysis_20260909/t2a_dual_dataset_fix/t3a_runtime/hooks: convert_task_prompts.py`
+    - `Files /home/docker/cannbot-skills/plugins-community/tilelang2ascendc-ops-generator/hooks/doc_gate.py and /home/docker/rl_analysis_20260909/t2a_dual_dataset_fix/t3a_runtime/hooks/doc_gate.py differ`
+    - `Files /home/docker/cannbot-skills/plugins-community/tilelang2ascendc-ops-generator/hooks/session-start-tilelang2ascendc-ops-generator and /home/docker/rl_analysis_20260909/t2a_dual_dataset_fix/t3a_runtime/hooks/session-start-tilelang2ascendc-ops-generator differ`
+    - `Files /home/docker/cannbot-skills/plugins-community/tilelang2ascendc-ops-generator/hooks/skill_script_hook.py and /home/docker/rl_analysis_20260909/t2a_dual_dataset_fix/t3a_runtime/hooks/skill_script_hook.py differ`
+    - `Only in /home/docker/rl_analysis_20260909/t2a_dual_dataset_fix/t3a_runtime/hooks: t3a_running_best.py`
+    - `Only in /home/docker/rl_analysis_20260909/t2a_dual_dataset_fix/t3a_runtime/hooks: workflow_hook.py`
+- **workflows/**: ⚠️ 2 处差异(应全部在白名单内)
+    - `Files /home/docker/cannbot-skills/plugins-community/tilelang2ascendc-ops-generator/workflows/development-guide.md and /home/docker/rl_analysis_20260909/t2a_dual_dataset_fix/t3a_runtime/workflows/development-guide.md differ`
+    - `Files /home/docker/cannbot-skills/plugins-community/tilelang2ascendc-ops-generator/workflows/task-prompts.md and /home/docker/rl_analysis_20260909/t2a_dual_dataset_fix/t3a_runtime/workflows/task-prompts.md differ`
 
-**差异总数 10(每一行都应能对应到白名单某一条;对不上的=夹带或漏拷,必须清零)。**
+**差异总数 17(每一行都应能对应到白名单某一条;对不上的=夹带或漏拷,必须清零)。**

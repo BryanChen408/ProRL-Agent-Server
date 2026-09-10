@@ -159,7 +159,7 @@ def _run_command(command: str, cwd: str):
         # [R3b] bash -c 执行:export/&&/;/管道等复合命令形式全兼容
         # (原 shlex.split+shell=False 会把 export 当可执行文件 → FileNotFoundError)
         proc = subprocess.run(
-            ["bash", "-c", command], shell=False, cwd=cwd,
+            ["bash", "-o", "pipefail", "-c", command], shell=False, cwd=cwd,
             capture_output=True, text=True, timeout=1800,
             env=_npu_wrap_env(command),
         )
@@ -226,7 +226,7 @@ def _classify_result(exit_code: int, stdout: str, stderr: str) -> str:
     pass_matches = _D_CLASS_PASS_RE.findall(combined)
     if pass_matches:
         last_result = pass_matches[-1].lower()
-        if last_result == "pass":
+        if last_result == "pass" and exit_code == 0:
             return "PASS"
 
     # Check for A-class (compilation/runtime error)
@@ -322,7 +322,7 @@ def _lease_wrap_command(command: str) -> str:
             lock_dir = os.environ.get("POLAR_NPU_LOCK_DIR", "/dev/shm/npu-locks")
             return (
                 f"python3 {_shlex.quote(cand)} --pool {_shlex.quote(pool)} "
-                f"--lock-dir {_shlex.quote(lock_dir)} -- bash -c {_shlex.quote(command)}"
+                f"--lock-dir {_shlex.quote(lock_dir)} -- bash -o pipefail -c {_shlex.quote(command)}"
             )
     raise FileNotFoundError("NPU lease configured but tools/npu_lease_exec.py is missing")
 
@@ -349,7 +349,7 @@ def execute_intercepted(command: str) -> None:
                          "msprof_profile_run.sh") if s in command),
             "script")
         _t3a_cls = classification
-        if _t3a_cls is None and "verification_ascendc.py" in command:
+        if _t3a_cls is None and any(s in command for s in ("verification_ascendc.py", "evaluate_tilelang.sh", "verification_tilelang.py")):
             _t3a_cls = _classify_result(exit_code, stdout, stderr)
         record_attempt(
             command=command, classification=_t3a_cls, exit_code=exit_code,
@@ -429,6 +429,13 @@ def main():
         emit_pretooluse("allow")
         return
 
+    if (os.environ.get("POLAR_NPU_LEASE_POOL") and should_intercept(command)
+            and re.search(r"\bASCEND_RT_VISIBLE_DEVICES\s*=", command)):
+        _protocol_logger.info(json.dumps({"hookSpecificOutput": {
+            "hookEventName": "PreToolUse", "permissionDecision": "deny",
+            "permissionDecisionReason": "删除命令中的 ASCEND_RT_VISIBLE_DEVICES 赋值；评测设备由租约分配。"
+        }}, ensure_ascii=False))
+        return
     if should_intercept(command):
         execute_intercepted(command)
     else:

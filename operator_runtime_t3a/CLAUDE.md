@@ -23,6 +23,26 @@ permission:
   external_directory: allow
 ---
 
+## T3A 执行契约（优先于下文通用模板）
+
+- 主 agent 只调度和检查；禁止主链初始化工程或写实现。只派发已注册的
+  `tilelang2ascendc-kernel-generator`，其他设计/转译组件用 Skill 调用，不能当 Agent 类型。
+- 每次派发/恢复必须原样传递 input 参考路径、用例策略、输出根目录、租约策略和取消末尾验证阶段的策略。
+- 开发子 agent 按自身 Phase 1.2 创建 `{output_dir}/kernel/`，复用已安装 project-init
+  模板中的固定文件；不要执行 standalone project-init 的 `ascend-kernel/csrc/ops/` 布局。
+  model.py、model_new_tilelang.py、model_new_ascendc.py 和 design/ 均位于同一个 output_dir。
+- simple 数据集保留输入的全部 5 条用例，不调用 case-simplifier；simple 不是算子分类。
+- TileLang 验证是中间步骤，不能代替 Phase 4 AscendC 实现和 evaluate_ascendc.sh。
+  子 agent 提前返回时，从未完成阶段恢复同一开发子 agent；禁止把 stub 或 TileLang 产物宣称为完成。
+- 完成前读取真实 AscendC 评测结果和 trace.md，并检查 kernel/ 与 model_new_ascendc.py。
+  失败按真实失败报告；独立 judge 负责最终验收，不能拿 judge 替代开发阶段。
+- 本 RL 场景 pipeline/verify 不按次数终止，统一受外部 pipeline 时间预算约束。
+  下文重试数字仅用于诊断分阶段建议，不构成次数上限；不得因达到次数提前转 Phase 7 或请求用户。
+  同错反复出现应更换有证据的修复策略；D1/D2 的诊断和文档门禁继续保留。
+- 禁止自行设置设备可见性；NPU 调用仅通过现有租约评测脚本。
+
+
+
 # CANNBot - Ascend C 算子自动生成
 
 ## 工作目录
@@ -119,7 +139,6 @@ Phase 4: AscendC 生成与验证   (分支)
   ├─ 简单算子: 开发实现 + 代码审查 + 修复循环 (ops-direct-invoke: 渐进式开发 + REVIEW.md + 最多3轮修复)
   └─ 复杂算子: 转译          (tilelang2ascend-translator + 退化检测 + 迭代)
 Phase 5: 性能分析            (ops-profiling --quick 模式; 只做测量归档, TileLang 调优已在 Phase 3 Step 4 完成)
-Phase 6: 全量验证            (恢复全量用例、验证、修复)
 Phase 7: Trace 记录          (tilelang2ascend-trace-recorder)
 ```
 
@@ -264,6 +283,8 @@ Subagent 返回
 | `ops/tilelang-op-design/SKILL.md` | 算子设计文档生成：技术约束检测、编程模式决策树、信息收集、Block 级设计 | Phase 3 Step 1 |
 | `ops/tilelang-op-develop/SKILL.md` | 算子代码生成：编码规范、GEMM/CV 融合、V 核并行化、TileLang 编程指南 | Phase 3 Step 2 |
 | `ops/tilelang-perf-optimization/SKILL.md` | 性能优化：反模式清单、优化指南、CV 同步调试、Cube 高级策略 | Phase 3 Step 1e, 2e（设计门禁）+ Step 4（性能迭代本体） |
+
+本 RL 流程取消 Phase 6：Phase 5 后直接进入 Phase 7 记录 trace，agent 不恢复用例或追加最终验证；独立 judge 使用 input/ 中的完整任务用例验收候选。
 
 ---
 

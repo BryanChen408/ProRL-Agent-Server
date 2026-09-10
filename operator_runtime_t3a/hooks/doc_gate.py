@@ -204,14 +204,6 @@ def check_precision_gate() -> tuple:
     tune_count = state.get("tune_call_count", 0)
     total = debug_count + tune_count
 
-    if total >= 12:
-        return True, (
-            "[Precision Gate] TERMINAL: Phase 4 D 类精度修复已耗尽全部 12 次机会\n"
-            f"  D-1 (ascendc-precision-debug): {min(debug_count, 7)}/7 次\n"
-            f"  D-2 (ascendc-precision-tuning): {min(tune_count, 5)}/5 次\n"
-            "\nPhase 4 失败，请进入 Phase 7 记录 trace。"
-        )
-
     if stage == "D1":
         used = debug_count
         max_calls = 7
@@ -225,7 +217,7 @@ def check_precision_gate() -> tuple:
         max_calls = 5
         budget = 5
         required_skill = "ascendc-precision-tuning"
-        stage_info = f"D-2 阶段: ascendc-precision-tuning, 已用 {used}/{max_calls} 次"
+        stage_info = f"D-2 阶段: ascendc-precision-tuning, 已调用 {used} 次（不按次数终止）"
 
     return True, (
         "[Precision Gate] BLOCKED: D 类精度失败禁止直接修改 kernel 代码\n"

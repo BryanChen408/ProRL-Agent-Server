@@ -14,7 +14,8 @@ RUNTIME = ROOT / "operator_runtime_t3a"
 
 @pytest.mark.parametrize("prefix", ["", "cd . && ", "CASE_ENV=value ", "export CASE_ENV=value && "])
 @pytest.mark.parametrize("exit_code", [0, 7])
-def test_shell_semantics_and_lease_release(tmp_path, monkeypatch, prefix, exit_code):
+@pytest.mark.parametrize("suffix", ["", " | tail -n 1"])
+def test_shell_semantics_and_lease_release(tmp_path, monkeypatch, prefix, exit_code, suffix):
     tools = tmp_path / "tools"
     tools.mkdir()
     shutil.copy2(RUNTIME / "tools/npu_lease_exec.py", tools)
@@ -37,7 +38,7 @@ def test_shell_semantics_and_lease_release(tmp_path, monkeypatch, prefix, exit_c
         f"sys.exit({exit_code})\n"
     )
     module = runpy.run_path(str(RUNTIME / "hooks/skill_script_hook.py"))
-    command = prefix + "python3 " + shlex.quote(str(script))
+    command = prefix + "python3 " + shlex.quote(str(script)) + suffix
     assert module["should_intercept"](command)
     wrapped = module["_lease_wrap_command"](command)
     result = subprocess.run(["bash", "-c", wrapped], cwd=tmp_path,
@@ -65,5 +66,5 @@ def test_cpu_commands_passthrough_and_missing_executor_fails(tmp_path, monkeypat
 
 def test_build_script_preserves_wrapper_fix():
     build = (ROOT / "deploy/ascend_operator/build_t3a_replica.sh").read_text()
-    assert '-- bash -c {_shlex.quote(command)}' in build
+    assert '-- bash -o pipefail -c {_shlex.quote(command)}' in build
     assert 'NPU lease configured but tools/npu_lease_exec.py is missing' in build

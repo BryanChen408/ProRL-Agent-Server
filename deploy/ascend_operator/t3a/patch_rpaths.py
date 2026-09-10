@@ -23,9 +23,9 @@ def patch(path: Path, old: str, new: str) -> bool | None:
     if old in t:
         path.write_text(t.replace(old, new, 1), encoding='utf-8')
         return True
-    if new.split('\n')[0] in t or '_skill_scripts' in t:
+    if new in t:
         return None  # 已是新形态(幂等)
-    return False
+    raise ValueError(f"R-paths patch anchor missing: {path}")
 
 
 def main(root: Path) -> None:
@@ -63,7 +63,7 @@ def main(root: Path) -> None:
             p.write_text(t, encoding='utf-8')
             print("✓", p)
         else:
-            print("✗ 内联白名单定位失败", p)
+            raise ValueError(f"内联白名单定位失败: {p}")
 
     # 3)+4) designer 两个脚本: parents[1]/tilelang2ascend-translator → 向上搜
     for name in ("verification_tilelang.py", "validate_tilelang_impl.py"):
@@ -73,13 +73,25 @@ def main(root: Path) -> None:
             'Path(__file__).resolve().parents[1] / "tilelang2ascend-translator" / "scripts"',
             '_skill_scripts("tilelang2ascend-translator")',
         )
-        if ok:
-            t = p.read_text(encoding='utf-8')
-            if '_skill_scripts' not in t.split('_skill_scripts("tilelang2ascend-translator")')[0]:
-                t = t.replace('SCRIPT_DIR = Path(__file__).resolve().parent',
-                              'SCRIPT_DIR = Path(__file__).resolve().parent\n' + UPWARD_SEARCH, 1)
-                p.write_text(t, encoding='utf-8')
+        # Repair partially patched installations too. Both scripts import Path,
+        # but only verification_tilelang defines SCRIPT_DIR.
+        t = p.read_text(encoding='utf-8')
+        if 'def _skill_scripts(name):' not in t:
+            anchor = '_ASCENDC_SCRIPTS = ('
+            if anchor not in t:
+                raise ValueError(f"R-paths definition anchor missing: {p}")
+            t = t.replace(anchor, UPWARD_SEARCH + anchor, 1)
+            p.write_text(t, encoding='utf-8')
         print({True: "✓", False: "✗", None: "✓ (已打)"}[ok], p)
+
+    # Reuse the verifier's existing module loader; the task's design package
+    # lives beside model_new_tilelang.py, not beside the installed skill.
+    patch(de / 'verification_tilelang.py',
+          '    sys.path.insert(0, str(WORKDIR))\n',
+          '    original_sys_path = sys.path[:]\n    sys.path.insert(0, str(task_dir))\n')
+    patch(de / 'verification_tilelang.py',
+          '        if str(WORKDIR) in sys.path:\n            sys.path.remove(str(WORKDIR))',
+          '        sys.path[:] = original_sys_path')
 
 
 if __name__ == "__main__":
