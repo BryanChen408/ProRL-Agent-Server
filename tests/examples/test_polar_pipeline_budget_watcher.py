@@ -475,7 +475,7 @@ def test_completion_parser_counts_cd_wrapped_pipeline_and_shell_error() -> None:
     assert state.pipeline_calls[1].turn == 2
 
 
-def test_background_success_read_preserves_generation_boundary():
+def test_background_success_read_preserves_generation_boundary(monkeypatch, tmp_path):
     module = _load_module()
     messages = []
     command = 'bash tools/ascendc_eval_pipeline.sh --op_name op'
@@ -487,7 +487,14 @@ def test_background_success_read_preserves_generation_boundary():
         messages += [call(str(i)), result(str(i), '[ascendc-eval] verdict — operator_valid=False speedup_vs_torch=None')]
     messages += [call('8'), result('8', 'Command running in background with ID: xyz. Output is being written to: /tmp/xyz.output'),
                  call('read', 'Read', file_path='/tmp/xyz.output'), result('read', '[ascendc-eval] verdict — operator_valid=True task_complete=False speedup_vs_torch=1.0'), call('9')]
-    state = module.analyze_budget('s', {'original_request': {'messages': messages}})
+    record = {'original_request': {'messages': messages}}
+    def gateway_get(gateway, path, timeout):
+        assert path == '/sessions/s/completions?limit=1'
+        return {'completions': [record]}
+    monkeypatch.setattr(module, '_gateway_get', gateway_get)
+    latest = module.latest_completion_record('http://gateway', tmp_path, 's', 5)
+    assert latest == record
+    state = module.analyze_budget('s', latest)
     assert (state.generation_calls, state.optimization_calls) == (8, 1)
     assert module.should_cancel(state, 8, 4) == (False, '')
     # An unrelated success must not claim the unfinished pipeline.

@@ -2,12 +2,76 @@ from __future__ import annotations
 
 import asyncio
 import json
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from types import SimpleNamespace
+
+import httpx
+import pytest
 
 import polar.gateway.server as gateway_server
 from polar.gateway.completion_writer import CompletionWriter
 from polar.gateway.storage import SessionStore
+from polar.trajectory.models import CompletionRecord
+
+
+def test_completion_history_limit_serializes_only_selected_records_off_loop(monkeypatch):
+    store = SessionStore()
+    for tokens in (4, 6, 8):
+        store.save_message("sess1", {"messages": []}, _response(10, tokens))
+    expected = store.get_completions("sess1")
+    monkeypatch.setattr(gateway_server, "get_state", lambda: SimpleNamespace(
+        storage=store, node=SimpleNamespace(id="node-a")))
+    dump = CompletionRecord.model_dump
+    serialized = []
+    loop_thread = threading.get_ident()
+
+    def track_dump(record, **kwargs):
+        assert threading.get_ident() != loop_thread
+        serialized.append(record.completion_id)
+        return dump(record, **kwargs)
+
+    monkeypatch.setattr(CompletionRecord, "model_dump", track_dump)
+
+    async def run():
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=gateway_server.app),
+                                     base_url="http://test") as client:
+            for query, selected in (("?limit=1", expected[-1:]),
+                                    ("?limit=2", expected[-2:]), ("", expected)):
+                serialized.clear()
+                response = await client.get("/sessions/sess1/completions" + query)
+                assert response.status_code == 200
+                assert response.json()["completions"] == selected
+                assert serialized == [row["completion_id"] for row in selected]
+            for limit in ("0", "-1", "bad"):
+                assert (await client.get("/sessions/sess1/completions?limit=" + limit)).status_code == 422
+            assert (await client.get("/sessions/missing/completions?limit=1")).json()["completions"] == []
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("reader", ["get_completions", "load_completion_session"])
+def test_history_serialization_does_not_block_other_sessions(monkeypatch, reader):
+    store = SessionStore()
+    store.save_message("sess1", {"messages": []}, _response(10, 4))
+    started, release = threading.Event(), threading.Event()
+    dump = CompletionRecord.model_dump
+
+    def slow_dump(record, **kwargs):
+        started.set()
+        assert release.wait(5)
+        return dump(record, **kwargs)
+
+    monkeypatch.setattr(CompletionRecord, "model_dump", slow_dump)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        history = pool.submit(getattr(store, reader), "sess1")
+        try:
+            assert started.wait(2)
+            assert pool.submit(store.peek_sequence, "other-session").result(timeout=1) == 1
+        finally:
+            release.set()
+        assert history.result(timeout=2)
 
 
 def _response(prompt_tokens: int, completion_tokens: int) -> dict:

@@ -135,12 +135,17 @@ class SessionStore:
                 for state in self._sessions.values()
             ]
 
-    def get_completions(self, session_id: str) -> list[dict[str, Any]]:
+    def get_completions(self, session_id: str, *, limit: int | None = None) -> list[dict[str, Any]]:
+        if limit is not None and limit < 1:
+            raise ValueError("limit must be positive")
         with self._lock:
             state = self._sessions.get(session_id)
             if state is None:
                 return []
-            return [c.model_dump(mode="json") for c in state.completions]
+            records = list(state.completions[-limit:] if limit is not None else state.completions)
+        # Records are append-only. Serializing a long history must not hold the
+        # global lock needed by health/session polling and other generations.
+        return [c.model_dump(mode="json") for c in records]
 
     def list_completion_metrics(
         self,
@@ -397,11 +402,9 @@ class SessionStore:
                 )
 
             payload = self._metadata_payload_locked(state)
-            payload["completions"] = [
-                completion.model_dump(mode="python")
-                for completion in state.completions
-            ]
-            return CompletionSession.model_validate(payload)
+            records = list(state.completions)
+        payload["completions"] = [completion.model_dump(mode="python") for completion in records]
+        return CompletionSession.model_validate(payload)
 
     def delete_session(self, session_id: str) -> int:
         """Drop a session and return how many messages were removed."""

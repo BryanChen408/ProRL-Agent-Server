@@ -2289,7 +2289,10 @@ HTML_PAGE = r"""<!doctype html>
       if (!r.ok) throw new Error(`${r.status} ${r.statusText}`);
       return await r.json();
     }
+    let stateLoading = false;
     async function loadState(options = {}) {
+      if (stateLoading) return;
+      stateLoading = true;
       try {
         const updateDetail = options.updateDetail ?? true;
         state = await fetchJson('/api/state');
@@ -2300,6 +2303,8 @@ HTML_PAGE = r"""<!doctype html>
       } catch (e) {
         $('health').className = 'badge red';
         $('health').textContent = `error ${e}`;
+      } finally {
+        stateLoading = false;
       }
     }
     async function loadDetail(sid) {
@@ -2320,7 +2325,7 @@ HTML_PAGE = r"""<!doctype html>
       $('health').className = `badge ${ok ? 'green':'red'}`;
       const counts = h.active_status_counts || {};
       const abortN = (state.sessions || []).reduce((n, s) => n + (s.abort_traces || 0), 0);
-      $('health').textContent = ok ? `gateway ok · running ${counts.RUNNING || 0} · abort ${abortN}` : `gateway error`;
+      $('health').textContent = ok ? `gateway ok · running ${counts.RUNNING || 0} · abort ${abortN}` : `gateway check failed: ${h.error || h.status || 'unknown status'}`;
       $('root').textContent = state.root;
       $('updated').textContent = `updated ${new Date().toLocaleTimeString()}`;
     }

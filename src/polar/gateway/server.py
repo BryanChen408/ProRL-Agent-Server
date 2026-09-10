@@ -813,8 +813,14 @@ async def list_completion_metrics(
 
 
 @app.get("/sessions/{session_id}/completions")
-async def list_session_completions(session_id: str) -> dict[str, Any]:
-    """In-memory completions for an active or recently-completed session."""
+def list_session_completions(
+    session_id: str, limit: int | None = Query(default=None, ge=1),
+) -> JSONResponse:
+    """Completions in chronological order; optionally only the latest N records.
+
+    A sync route keeps history serialization in FastAPI's worker pool. Build
+    the JSONResponse here too, rather than encoding the large dict on its loop.
+    """
     state = get_state()
     try:
         safe = clean_session_id(session_id)
@@ -822,12 +828,12 @@ async def list_session_completions(session_id: str) -> dict[str, Any]:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     if safe is None:
         raise HTTPException(status_code=400, detail="Session id required")
-    completions = state.storage.get_completions(safe)
-    return {
+    completions = state.storage.get_completions(safe, limit=limit)
+    return JSONResponse({
         "session_id": safe,
         "completions": completions,
         "node_id": state.node.id,
-    }
+    })
 
 
 @app.get("/events")
@@ -1037,7 +1043,7 @@ async def proxy_request(request: Request, path: str):
     # 且实测 151450 的 20 个 4 连熔断 session 在 salvage 注入下依然全部死亡,
     # 救场价值有限。CLI 自己的 "Output token limit hit" 消息已含续写指引。
     if os.environ.get("POLAR_TRUNCATION_SALVAGE", "0") == "1":
-        salvage_msg = _salvage_message_for(state.storage.get_completions(session_id))
+        salvage_msg = _salvage_message_for(state.storage.get_completions(session_id, limit=1))
         if salvage_msg is not None:
             openai_request.setdefault("messages", []).append(salvage_msg)
             logger.info(

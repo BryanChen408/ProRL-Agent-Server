@@ -365,7 +365,7 @@ def _active_session_ids(gateway: str, timeout: float) -> list[str]:
 def _gateway_completions(gateway: str, session_id: str, timeout: float) -> list[dict[str, Any]]:
     data = _gateway_get(
         gateway,
-        f"/sessions/{urllib.parse.quote(session_id, safe='')}/completions",
+        f"/sessions/{urllib.parse.quote(session_id, safe='')}/completions?limit=1",
         timeout,
     )
     records: Any
