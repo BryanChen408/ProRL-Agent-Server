@@ -283,7 +283,7 @@ def test_extract_app_crash_handles_msprof_zero_exit_pattern():
     assert module._extract_app_crash("", output) == "ValueError: invalid generated case"
 
 
-def test_quick_warmup_uses_one_python_process_for_all_rounds(tmp_path, monkeypatch):
+def test_quick_warmup_runs_inside_the_profiled_python_process(tmp_path, monkeypatch):
     module = load_msprof_summary()
     calls = []
 
@@ -297,7 +297,8 @@ def test_quick_warmup_uses_one_python_process_for_all_rounds(tmp_path, monkeypat
 
     monkeypatch.setattr(module.subprocess, "run", fake_run)
     monkeypatch.setattr(
-        module, "_parse_msprof_duration_quick", lambda _path: (8.0, "kernel", None)
+        module, "_parse_msprof_duration_quick",
+        lambda _path, _warmup, _repeats: (8.0, "kernel", None),
     )
     out_dir = tmp_path / f"op_{tmp_path.name}"
     args = SimpleNamespace(retry=0, repeats=1, warmup=3, seed=17)
@@ -307,10 +308,67 @@ def test_quick_warmup_uses_one_python_process_for_all_rounds(tmp_path, monkeypat
     )
 
     assert duration == 8.0 and error is None
-    assert len(calls) == 2
-    assert calls[0][1] == "_warmup.py" and "range(2)" in calls[0][2]
-    assert calls[1][0] == "msprof" and calls[1][1] == "_wrapper.py"
-    assert "range(0)" in calls[1][2]
+    assert len(calls) == 1
+    assert calls[0][0] == "msprof" and calls[0][1] == "_wrapper.py"
+    assert "range(3)" in calls[0][2]
+    assert "range(1)" in calls[0][2]
+
+
+def test_grouped_parser_uses_event_pairs_as_case_boundaries(tmp_path):
+    module = load_msprof_summary()
+    csv_dir = tmp_path / "mindstudio_profiler_output"
+    csv_dir.mkdir()
+    (csv_dir / "task_time_1.csv").write_text(
+        "kernel_type,task_time(us),kernel_name,task_start(us)\n"
+        "AI_VECTOR_CORE,90.0,warmup,1\n"
+        "EVENT_RECORD,0.0,N/A,2\n"
+        "AI_VECTOR_CORE,8.0,ref_kernel,3\n"
+        "AI_VECTOR_CORE,12.0,ref_kernel,4\n"
+        "EVENT_RECORD,0.0,N/A,5\n"
+        "AI_VECTOR_CORE,99.0,between,6\n"
+        "EVENT_RECORD,0.0,N/A,7\n"
+        "AI_CORE,4.0,asc_kernel,8\n"
+        "AI_CORE,6.0,asc_kernel,9\n"
+        "EVENT_RECORD,0.0,N/A,10\n",
+        encoding="utf-8",
+    )
+    manifest = tmp_path / "grouped_manifest.json"
+    manifest.write_text(
+        '{"blocks": ['
+        '{"case": 0, "impl": "reference", "ok": true, "has_markers": true},'
+        '{"case": 0, "impl": "ascendc", "ok": true, "has_markers": true}'
+        ']}',
+        encoding="utf-8",
+    )
+
+    measurements, error = module._parse_msprof_grouped(
+        str(tmp_path), manifest, repeats=2
+    )
+
+    assert error is None
+    assert measurements[(0, "reference")]["duration_us"] == 10.0
+    assert measurements[(0, "ascendc")]["duration_us"] == 5.0
+
+
+def test_grouped_wrapper_contains_every_block_and_compiles(tmp_path):
+    module = load_msprof_summary()
+    blocks = [
+        (0, "reference", tmp_path / "case_000.pt"),
+        (0, "ascendc", tmp_path / "case_000.pt"),
+        (1, "reference", tmp_path / "case_001.pt"),
+        (1, "ascendc", tmp_path / "case_001.pt"),
+    ]
+
+    wrapper = module._generate_grouped_wrapper_script(
+        tmp_path, blocks, seed=7, device_id=0, warmup=3, repeats=2,
+        manifest_path=tmp_path / "manifest.json",
+    )
+
+    compile(wrapper, "grouped_wrapper.py", "exec")
+    assert wrapper.count("case_000.pt") == 2
+    assert wrapper.count("case_001.pt") == 2
+    assert "start_event.record()" in wrapper
+    assert "end_event.record()" in wrapper
 
 
 def test_performance_target_is_uniformly_1_1x():

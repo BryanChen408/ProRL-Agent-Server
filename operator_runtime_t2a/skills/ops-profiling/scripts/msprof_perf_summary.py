@@ -964,6 +964,7 @@ class _WrapperConfig:
     warmup: int
     jsonl_case: Optional[Dict[str, Any]] = None
     case_cache_path: Optional[Path] = None
+    repeats: int = 1
 
 
 _WRAPPER_SCRIPT_TEMPLATE = """\
@@ -1024,14 +1025,18 @@ _init_src = mod if hasattr(mod, "get_init_inputs") else _ref_mod
 _init_vals = _init_src.get_init_inputs() if hasattr(_init_src, "get_init_inputs") else []
 model = cls(*_init_vals).to(device).eval()
 
-for _ in range({warmup}):
+def _one_iter():
     with torch.no_grad():
         _ = model(*_call_args, **_call_kwargs)
     torch.npu.synchronize()
 
-with torch.no_grad():
-    _ = model(*_call_args, **_call_kwargs)
-torch.npu.synchronize()
+# 预热和正式测试共用一个 Python/NPU 进程。msprof 会采到两者，解析器只保留
+# 后 repeats 次正式测试，从而避免“外部进程预热、正式进程仍是冷启动”的问题。
+for _ in range({warmup}):
+    _one_iter()
+
+for _ in range({repeats}):
+    _one_iter()
 """
 
 
@@ -1082,6 +1087,7 @@ def _build_wrapper_script_content(cfg, model_file, cls_name, inputs_code):
         device_id=cfg.device_id,
         case_idx=cfg.case_idx,
         warmup=cfg.warmup,
+        repeats=cfg.repeats,
         seed=cfg.seed,
         model_file=model_file,
         cls_name=cls_name,
@@ -1214,35 +1220,18 @@ def _run_msprof_standard(wrapper_script: str, output_dir: str, device_id: int, w
     return str(prof_dirs[-1]), None
 
 
-def _run_msprof_quick(wrapper_script: str, warmup_script: Optional[str],
-                      output_dir: str, device_id: int):
+def _run_msprof_quick(wrapper_script: str, output_dir: str, device_id: int):
     """快速模式：只采集 1 轮（不采集 7 个 aic-metrics，只获取 kernel 时间）。
 
     直接调用 msprof 命令（不通过 msprof_profile_run.sh，避免循环调用）。
     使用 msprof --task-time=on --ascendcl=on，不设置 --aic-metrics。
 
-    warmup 在 msprof 外部执行：单独跑一次含全部预热轮次的 wrapper，
-    msprof 只采集正式 timed run，确保 task_time.csv 不含预热数据。
+    warmup 和正式测试都在同一个被采集进程中执行，由解析器丢弃 warmup 轮次。
     """
     os.makedirs(output_dir, exist_ok=True)
     env = os.environ.copy()
 
-    # Warmup: 在 msprof 外部执行，不采集。wrapper 崩溃必须在此透出真实报错 ——
-    # 否则建模/取数阶段的 TypeError 被吞掉,下游只剩 "no task_time or api_statistic
-    # csv found",wrapper 级故障会被伪装成采集失败。
-    if warmup_script is not None:
-        warmup_path = os.path.join(output_dir, "_warmup.py")
-        with open(warmup_path, "w", encoding="utf-8") as f:
-            f.write(warmup_script)
-        wr = subprocess.run([sys.executable, warmup_path],
-                            capture_output=True, text=True, env=env)
-        Path(warmup_path).unlink(missing_ok=True)
-        if wr.returncode != 0:
-            app_log = _save_app_output(output_dir, wr.stdout, wr.stderr)
-            crash = _extract_app_crash(wr.stdout, wr.stderr) or (wr.stderr or wr.stdout or "")[-400:]
-            return None, f"wrapper crashed: {crash} (app log: {app_log})"
-
-    # Measurement: msprof 只采集正式 timed run
+    # Measurement: wrapper 在同一个进程内先预热再正式测试。
     wrapper_path = os.path.join(output_dir, "_wrapper.py")
     with open(wrapper_path, "w", encoding="utf-8") as f:
         f.write(wrapper_script)
@@ -1319,12 +1308,68 @@ def _parse_msprof_duration(prof_group_dir: str):
     return None, None, "no compute rows found"
 
 
-def _parse_msprof_duration_quick(prof_group_dir: str):
+_META_KERNEL_TYPES = (
+    "PROFILING_ENABLE", "PROFILING_DISABLE", "TASK_TIMEOUT_SET", "EVENT_RECORD", ""
+)
+
+
+def _collect_task_time_kernels(rows):
+    """Collect positive non-metadata device tasks ordered by device start time."""
+    kernels = []
+    for row in rows:
+        if row.get("kernel_type", "") in _META_KERNEL_TYPES:
+            continue
+        try:
+            duration = float(row.get("task_time(us)", "") or 0)
+            start = float((row.get("task_start(us)", "") or "0").strip())
+        except ValueError:
+            continue
+        if duration > 0:
+            kernels.append((start, row.get("kernel_name", "unknown"), duration))
+    kernels.sort(key=lambda item: item[0])
+    return kernels
+
+
+def _split_task_time_runs(rows, n_runs: int):
+    """Split a repeated kernel sequence into ``n_runs`` identical iterations."""
+    kernels = _collect_task_time_kernels(rows)
+    if not kernels or n_runs < 1 or len(kernels) % n_runs:
+        return None
+    kernels_per_run = len(kernels) // n_runs
+    expected_names = [item[1] for item in kernels[:kernels_per_run]]
+    runs = []
+    for run_idx in range(n_runs):
+        chunk = kernels[run_idx * kernels_per_run:(run_idx + 1) * kernels_per_run]
+        if [item[1] for item in chunk] != expected_names:
+            return None
+        runs.append([item[2] for item in chunk])
+    return runs
+
+
+def _split_kernels_by_position(kernels, warmup: int, repeats: int):
+    """Fallback split when repeated kernel names are not perfectly identical."""
+    if not kernels:
+        return None
+    n_total = max(1, warmup + repeats)
+    n_kernels = len(kernels)
+    if n_kernels % n_total == 0:
+        kernels_per_run = n_kernels // n_total
+        active = kernels[warmup * kernels_per_run:]
+        return sum(item[2] for item in active) / max(1, repeats)
+
+    split_idx = max(0, int(n_kernels * warmup / n_total))
+    active = kernels[split_idx:]
+    if not active:
+        return sum(item[2] for item in kernels) / n_total
+    per_run_kernel_count = n_kernels / n_total
+    return sum(item[2] for item in active) / (len(active) / per_run_kernel_count)
+
+
+def _parse_msprof_duration_quick(prof_group_dir: str, warmup: int = 0, repeats: int = 1):
     """快速模式解析：从 PROF 目录中查找 task_time.csv 或 api_statistic.csv 并提取时间。
 
-    快速模式只跑 1 轮，不设置 --aic-metrics，因此没有 op_summary_*.csv。
-    warmup 已在 msprof 外部执行，task_time.csv 只包含正式 timed run 的 kernel 时间，
-    对单次采集中所有计算 kernel 的耗时直接累加即可。
+    msprof 采集窗口包含 warmup + repeats 次同进程迭代。按重复的 kernel 序列
+    拆分后丢弃 warmup，只对 repeats 次正式测试求平均。
     """
     # 1. 尝试从 task_time.csv 提取
     task_time_pattern = os.path.join(prof_group_dir, "mindstudio_profiler_output/task_time_*.csv")
@@ -1334,36 +1379,20 @@ def _parse_msprof_duration_quick(prof_group_dir: str):
             with open(task_time_files[0], "r", encoding="utf-8", errors="replace") as f:
                 reader = csv.DictReader(f)
                 rows = list(reader)
-            # 收集所有非元事件的 kernel 行，按 kernel_name 分组
-            kernel_times: Dict[str, List[float]] = {}
-            for r in rows:
-                kernel_type = r.get("kernel_type", "")
-                task_time = r.get("task_time(us)", "")
-                if kernel_type not in (
-                    "PROFILING_ENABLE",
-                    "PROFILING_DISABLE",
-                    "TASK_TIMEOUT_SET",
-                    "",
-                ) and task_time:
-                    try:
-                        duration = float(task_time)
-                        if duration > 0:
-                            kernel_name = r.get("kernel_name", "unknown")
-                            kernel_times.setdefault(kernel_name, []).append(duration)
-                    except ValueError:
-                        continue
-            if kernel_times:
-                # 汇总所有 kernel 的耗时
-                all_durations = []
-                all_kernel_names = set()
-                for times in kernel_times.values():
-                    all_durations.extend(times)
-                for name in kernel_times.keys():
-                    all_kernel_names.add(name)
-                total_duration = sum(all_durations)
-                if total_duration > 0:
-                    kernel_name = list(all_kernel_names)[0] if len(all_kernel_names) == 1 else "multiple_kernels"
-                    return total_duration, kernel_name, None
+            runs = _split_task_time_runs(rows, max(0, warmup) + max(1, repeats))
+            if runs is not None:
+                active = runs[max(0, warmup):]
+                per_run = [sum(run) for run in active]
+                if per_run:
+                    return sum(per_run) / len(per_run), "multiple_kernels", None
+            kernels = _collect_task_time_kernels(rows)
+            duration = _split_kernels_by_position(
+                kernels, max(0, warmup), max(1, repeats)
+            )
+            if duration is not None:
+                kernel_names = {item[1] for item in kernels}
+                kernel_name = next(iter(kernel_names)) if len(kernel_names) == 1 else "multiple_kernels"
+                return duration, kernel_name, None
         except Exception:
             pass
 
@@ -1649,42 +1678,253 @@ def _measure_one_impl_quick(mi: _MeasureInput):
     """快速模式：Measure one implementation with retries and repeats.
 
     --retry 用于解析失败重试；--repeats 控制 wrapper 内 timed iteration 次数。
-    wrapper 做 repeats 次 timed run，msprof 一把采集，total / repeats = 单次耗时。
-    warmup 由 _run_msprof_quick 在 msprof 外部执行。
+    wrapper 在同一个被采集进程内做 warmup，再做 repeats 次正式测试；解析器
+    丢弃前 warmup 轮次，避免重复初始化 Python/NPU。
 
     Returns (duration_us, error, prof_dir).
     """
     prof_dir = None
     impl_abbr = "ref" if mi.impl == "reference" else "asc"
     repeats = max(1, getattr(mi.args, "repeats", 1))
+    warmup = max(0, getattr(mi.args, "warmup", 0))
 
     for _ in range(1 + mi.args.retry):
-        # 让 wrapper 内跑 repeats 次 timed run，msprof 一把采集后除以 repeats 得到单次
         wrapper = _generate_wrapper_script(_WrapperConfig(
             mi.out_dir, mi.case_idx, mi.impl, mi.args.seed, mi.device_id,
-            repeats - 1, mi.jsonl_case, mi.case_cache_path))
-        warmup_wrapper = None
-        if mi.args.warmup > 0:
-            warmup_wrapper = _generate_wrapper_script(_WrapperConfig(
-                mi.out_dir, mi.case_idx, mi.impl, mi.args.seed, mi.device_id,
-                mi.args.warmup - 1, mi.jsonl_case, mi.case_cache_path))
+            warmup, mi.jsonl_case, mi.case_cache_path, repeats))
         tmpdir = f"/tmp/msprof_quick_{impl_abbr}_{mi.out_dir.name}_c{mi.case_idx}"
         _cleanup_prof_dirs(tmpdir)
-        prof_dir, err = _run_msprof_quick(
-            wrapper, warmup_wrapper, tmpdir, mi.device_id)
+        prof_dir, err = _run_msprof_quick(wrapper, tmpdir, mi.device_id)
         if not prof_dir:
             continue
 
-        duration, _op_name, parse_err = _parse_msprof_duration_quick(prof_dir)
+        duration, _op_name, parse_err = _parse_msprof_duration_quick(
+            prof_dir, warmup, repeats)
         if duration is None:
             err = parse_err
             continue
 
-        # msprof 采集了 repeats 次 timed run，除以 repeats 得到单次耗时
-        duration = duration / repeats
         return duration, None, prof_dir
 
     return None, err, prof_dir
+
+
+def _generate_grouped_wrapper_script(out_dir: Path, blocks: list, seed: int,
+                                     device_id: int, warmup: int, repeats: int,
+                                     manifest_path: Path) -> str:
+    """Generate one profiled process for every case and both implementations.
+
+    Two ``torch.npu.Event`` records bracket each timed block. msprof exports those
+    records as ``EVENT_RECORD`` rows, which lets the parent split one task-time CSV
+    back into per-case/per-implementation durations without changing the timing
+    metric.
+    """
+    block_specs = [
+        {
+            "case": int(case_idx),
+            "impl": impl,
+            "case_path": str(case_path),
+        }
+        for case_idx, impl, case_path in blocks
+    ]
+    return f'''\
+#!/usr/bin/env python3
+import importlib.util
+import inspect
+import json
+import os
+import sys
+import torch
+from collections.abc import Mapping
+from pathlib import Path
+
+out_dir = Path({str(out_dir)!r})
+manifest_path = Path({str(manifest_path)!r})
+blocks = {block_specs!r}
+seed = {int(seed)}
+warmup = {max(0, int(warmup))}
+repeats = {max(1, int(repeats))}
+os.environ["ASCEND_RT_VISIBLE_DEVICES"] = {str(device_id)!r}
+sys.path.insert(0, str(out_dir / "kernel" / "build"))
+sys.path.insert(0, str(out_dir))
+
+def _load(path, name):
+    spec = importlib.util.spec_from_file_location(name, path)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
+    spec.loader.exec_module(module)
+    return module
+
+def _move(value, device):
+    if isinstance(value, torch.Tensor):
+        return value.to(device)
+    if isinstance(value, Mapping):
+        return {{key: _move(item, device) for key, item in value.items()}}
+    if isinstance(value, list):
+        return [_move(item, device) for item in value]
+    if isinstance(value, tuple):
+        return tuple(_move(item, device) for item in value)
+    return value
+
+{_WRAPPER_BINDING_CODE}
+
+device = torch.device("npu")
+contract_mod = _load(out_dir / "model.py", "grouped_contract")
+contract_cls = getattr(contract_mod, "Model")
+results = []
+
+def _save_manifest():
+    temp_path = manifest_path.with_suffix(manifest_path.suffix + ".tmp")
+    temp_path.write_text(json.dumps({{"blocks": results}}, ensure_ascii=False), encoding="utf-8")
+    temp_path.replace(manifest_path)
+
+for block_no, block in enumerate(blocks):
+    entry = {{
+        "case": block["case"], "impl": block["impl"],
+        "ok": False, "has_markers": False, "error": None,
+    }}
+    try:
+        torch.manual_seed(seed)
+        try:
+            torch.npu.manual_seed_all(seed)
+        except Exception:
+            pass
+
+        impl = block["impl"]
+        model_file = "model.py" if impl == "reference" else "model_new_ascendc.py"
+        cls_name = "Model" if impl == "reference" else "ModelNew"
+        module = _load(out_dir / model_file, f"grouped_{{impl}}_{{block_no}}")
+        cls = getattr(module, cls_name)
+        input_case = torch.load(block["case_path"], map_location="cpu")
+        input_case = _move(input_case, device)
+        call_args, call_kwargs = _bind_case(contract_cls, input_case)
+
+        init_src = module if hasattr(module, "get_init_inputs") else contract_mod
+        init_vals = init_src.get_init_inputs() if hasattr(init_src, "get_init_inputs") else []
+        model = cls(*init_vals).to(device).eval()
+
+        def _one_iter():
+            with torch.no_grad():
+                model(*call_args, **call_kwargs)
+            torch.npu.synchronize()
+
+        for _ in range(warmup):
+            _one_iter()
+
+        start_event = torch.npu.Event()
+        end_event = torch.npu.Event()
+        start_event.record()
+        timed_error = None
+        try:
+            for _ in range(repeats):
+                _one_iter()
+        except Exception as exc:
+            timed_error = exc
+        finally:
+            end_event.record()
+            end_event.synchronize()
+            entry["has_markers"] = True
+
+        if timed_error is not None:
+            raise timed_error
+        entry["ok"] = True
+    except Exception as exc:
+        entry["error"] = f"{{type(exc).__name__}}: {{exc}}"[:300]
+    results.append(entry)
+    _save_manifest()
+'''
+
+
+def _load_grouped_manifest(manifest_path: Path):
+    try:
+        payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+        blocks = payload.get("blocks")
+        if isinstance(blocks, list):
+            return blocks, None
+    except (OSError, ValueError, TypeError, json.JSONDecodeError) as exc:
+        return None, f"invalid grouped manifest: {exc}"
+    return None, "invalid grouped manifest: missing blocks list"
+
+
+def _parse_msprof_grouped(prof_dir: str, manifest_path: Path, repeats: int):
+    """Split one msprof task-time CSV by paired NPU event markers."""
+    manifest, manifest_error = _load_grouped_manifest(manifest_path)
+    if manifest is None:
+        return None, manifest_error
+
+    task_time_files = sorted(glob.glob(os.path.join(
+        prof_dir, "mindstudio_profiler_output", "task_time_*.csv"
+    )))
+    if not task_time_files:
+        return None, "no task_time csv found"
+    try:
+        with open(task_time_files[0], "r", encoding="utf-8", errors="replace") as stream:
+            rows = list(csv.DictReader(stream))
+        rows.sort(key=lambda row: safe_float(row.get("task_start(us)")))
+    except (OSError, ValueError, TypeError) as exc:
+        return None, f"read task_time csv error: {exc}"
+
+    marked_blocks = [block for block in manifest if block.get("has_markers")]
+    marker_positions = [
+        idx for idx, row in enumerate(rows) if row.get("kernel_type") == "EVENT_RECORD"
+    ]
+    expected_markers = 2 * len(marked_blocks)
+    if len(marker_positions) != expected_markers:
+        return None, (
+            f"grouped marker mismatch: expected {expected_markers}, "
+            f"found {len(marker_positions)}"
+        )
+
+    measurements = {}
+    marker_idx = 0
+    for block in manifest:
+        key = (int(block["case"]), str(block["impl"]))
+        if not block.get("has_markers"):
+            measurements[key] = {"duration_us": None, "error": block.get("error")}
+            continue
+
+        start_pos = marker_positions[marker_idx]
+        end_pos = marker_positions[marker_idx + 1]
+        marker_idx += 2
+        if end_pos <= start_pos:
+            return None, f"invalid grouped marker order for case {key[0]} {key[1]}"
+        kernels = _collect_task_time_kernels(rows[start_pos + 1:end_pos])
+        if block.get("ok") and kernels:
+            measurements[key] = {
+                "duration_us": sum(item[2] for item in kernels) / max(1, repeats),
+                "error": None,
+            }
+        else:
+            measurements[key] = {
+                "duration_us": None,
+                "error": block.get("error") or "no timed device task found",
+            }
+    return measurements, None
+
+
+def _measure_all_impls_grouped(out_dir: Path, blocks: list, args, device_id: int):
+    """Profile all supplied blocks in one Python/NPU process and one msprof run."""
+    tmpdir = f"/tmp/msprof_quick_grouped_{out_dir.name}"
+    manifest_path = Path(tmpdir) / "grouped_manifest.json"
+    last_error = None
+    for _ in range(1 + args.retry):
+        _cleanup_prof_dirs(tmpdir)
+        Path(tmpdir).mkdir(parents=True, exist_ok=True)
+        wrapper = _generate_grouped_wrapper_script(
+            out_dir, blocks, args.seed, device_id, args.warmup, args.repeats,
+            manifest_path,
+        )
+        prof_dir, error = _run_msprof_quick(wrapper, tmpdir, device_id)
+        if prof_dir:
+            measurements, parse_error = _parse_msprof_grouped(
+                prof_dir, manifest_path, max(1, args.repeats)
+            )
+            if measurements is not None:
+                return measurements, None, prof_dir
+            error = parse_error
+        last_error = error
+        time.sleep(0.5)
+    return None, last_error, None
 
 
 @dataclass
@@ -2104,6 +2344,83 @@ def _run_quick_loop(out_dir, cases, case_cache_paths, n_cases, args, device_id):
     return rows, speedups, ref_times, asc_times
 
 
+def _run_quick_grouped_loop(out_dir, cases, case_cache_paths, n_cases, args, device_id):
+    """Run every non-empty case and both implementations in one msprof process."""
+    blocks = []
+    for idx in range(n_cases):
+        jsonl_case = cases[idx] if cases else None
+        if _case_has_empty_tensor(jsonl_case):
+            continue
+        case_path = case_cache_paths[idx] if case_cache_paths else None
+        if case_path is None:
+            return None, "grouped mode requires materialized provider inputs", None
+        blocks.extend(((idx, "reference", case_path), (idx, "ascendc", case_path)))
+
+    if not blocks:
+        measurements, prof_dir = {}, None
+    else:
+        measurements, error, prof_dir = _measure_all_impls_grouped(
+            out_dir, blocks, args, device_id
+        )
+        if measurements is None:
+            return None, error, prof_dir
+        failed = [
+            f"case {case_idx} {impl}: {measurements.get((case_idx, impl), {}).get('error')}"
+            for case_idx, impl, _case_path in blocks
+            if measurements.get((case_idx, impl), {}).get("duration_us") is None
+        ]
+        if failed:
+            if prof_dir and not args.keep_prof:
+                _cleanup_prof_dirs(prof_dir)
+            return None, "; ".join(failed[:3]), prof_dir
+
+    rows, speedups, ref_times, asc_times = [], [], [], []
+    for idx in range(n_cases):
+        shape, dtype = _extract_shape_dtype_from_jsonl(cases[idx]) if cases else ("?", "?")
+        jsonl_case = cases[idx] if cases else None
+        if _case_has_empty_tensor(jsonl_case):
+            LOGGER.info(f"{idx:<5} {shape:<35} {dtype:<10} "
+                        f"{'--':>12} {'--':>12} {'skip':>10}  (empty tensor)")
+            rows.append({
+                "case": idx, "shape": shape, "dtype": dtype,
+                "ref_us": None, "asc_us": None, "speedup": None,
+                "ref_error": None, "asc_error": None, "skipped": "empty_tensor",
+            })
+            continue
+
+        ref_result = measurements.get((idx, "reference"), {})
+        asc_result = measurements.get((idx, "ascendc"), {})
+        ref_us, ref_err = ref_result.get("duration_us"), ref_result.get("error")
+        asc_us, asc_err = asc_result.get("duration_us"), asc_result.get("error")
+        speedup = None
+        if ref_us is not None and asc_us is not None and asc_us > 0:
+            speedup = ref_us / asc_us
+            speedups.append(speedup)
+            ref_times.append(ref_us)
+            asc_times.append(asc_us)
+            LOGGER.info(
+                f"{idx:<5} {shape:<35} {dtype:<10} {ref_us:>12.2f} "
+                f"{asc_us:>12.2f} {speedup:>9.3f}x"
+            )
+        else:
+            LOGGER.info(
+                f"{idx:<5} {shape:<35} {dtype:<10} "
+                f"{'N/A' if ref_us is None else f'{ref_us:.2f}':>12} "
+                f"{'N/A' if asc_us is None else f'{asc_us:.2f}':>12} "
+                f"{'N/A':>10}  (ref_err={ref_err}, asc_err={asc_err})"
+            )
+        rows.append({
+            "case": idx, "shape": shape, "dtype": dtype,
+            "ref_us": ref_us, "asc_us": asc_us, "speedup": speedup,
+            "ref_error": ref_err, "asc_error": asc_err,
+            "ref_prof_dir": prof_dir, "asc_prof_dir": prof_dir,
+        })
+
+    if prof_dir and not args.keep_prof:
+        _cleanup_prof_dirs(prof_dir)
+    return (rows, speedups, ref_times, asc_times), None, prof_dir
+
+
 def run_compare_mode(args):
     """执行对比模式：model.py vs model_new_ascendc.py"""
     out_dir = Path(args.output_dir).resolve()
@@ -2131,12 +2448,12 @@ def run_compare_mode(args):
 
 
 def run_quick_mode(args):
-    """执行快速模式：model.py vs model_new_ascendc.py（只跑 1 轮 msprof，不采集 7 个 metrics）"""
+    """执行快速模式：默认把全部 case 合并到一次 msprof 采集中。"""
     out_dir = Path(args.output_dir).resolve()
 
     device_id, device_src = _select_device_id(args)
     LOGGER.info(f"[INFO] Using NPU device {device_id} (source={device_src})")
-    LOGGER.info("[INFO] Quick mode: 1-round profiling (no aic-metrics)")
+    LOGGER.info("[INFO] Quick mode: grouped profiling (one msprof for all cases)")
 
     with tempfile.TemporaryDirectory(prefix="polar_perf_cases_") as cache_root:
         cases, case_cache_paths, case_source = _materialize_compare_cases(
@@ -2147,15 +2464,42 @@ def run_quick_mode(args):
             LOGGER.info(f"[INFO] Loaded {n_cases} cases from {case_source}")
 
         _log_compare_header(out_dir, args)
-        rows, speedups, ref_times, asc_times = _run_quick_loop(
-            out_dir, cases, case_cache_paths, n_cases, args, device_id
-        )
+        requested_engine = getattr(args, "quick_engine", "grouped")
+        if requested_engine == "per-case":
+            grouped_result, grouped_error = None, "per-case engine requested"
+        else:
+            grouped_result, grouped_error, _prof_dir = _run_quick_grouped_loop(
+                out_dir, cases, case_cache_paths, n_cases, args, device_id
+            )
+        if grouped_result is None:
+            if requested_engine == "per-case":
+                LOGGER.info("[INFO] Quick mode: per-case msprof explicitly requested")
+            else:
+                LOGGER.warning(
+                    "Grouped quick profiling unavailable (%s); falling back to per-case msprof",
+                    grouped_error,
+                )
+            rows, speedups, ref_times, asc_times = _run_quick_loop(
+                out_dir, cases, case_cache_paths, n_cases, args, device_id
+            )
+            profiling_engine = "per_case_fallback"
+            msprof_invocations = 2 * sum(
+                not _case_has_empty_tensor(case) for case in cases
+            )
+        else:
+            rows, speedups, ref_times, asc_times = grouped_result
+            profiling_engine = "grouped_event_markers"
+            msprof_invocations = 1 if any(
+                not _case_has_empty_tensor(case) for case in cases
+            ) else 0
 
     csi = _CompareSummaryInput(
         out_dir, rows, speedups, ref_times, asc_times, n_cases, args, device_id, device_src)
     summary = _compute_compare_summary(csi)
     summary["timing_method"] = "msprof.quick.Task_Duration"
     summary["profiling_mode"] = "quick"
+    summary["profiling_engine"] = profiling_engine
+    summary["msprof_invocations"] = msprof_invocations
     _log_and_save_compare_reports(summary, out_dir, speedups, n_cases)
 
 
@@ -2428,6 +2772,10 @@ def main():
     # 对比模式参数
     parser.add_argument("--compare", action="store_true", help="启用对比模式（8 轮采集：7 metrics + sample）")
     parser.add_argument("--quick", action="store_true", help="启用快速模式（1 轮采集：只获取 kernel 时间，不采集 7 个 aic-metrics）")
+    parser.add_argument(
+        "--quick-engine", choices=("grouped", "per-case"), default="grouped",
+        help="快速模式采集引擎：grouped 将全部 case 合并为一次 msprof；per-case 用于回退",
+    )
     parser.add_argument("--output-dir", dest="output_dir", help="算子输出目录（对比模式/快速模式）")
     parser.add_argument("--warmup", type=int, default=3, help="msprof warmup 次数")
     parser.add_argument("--repeats", type=int, default=1, help="重复采集次数")
