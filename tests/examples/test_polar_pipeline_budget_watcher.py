@@ -473,3 +473,24 @@ def test_completion_parser_counts_cd_wrapped_pipeline_and_shell_error() -> None:
     assert state.generation_calls == 2
     assert state.pipeline_calls[0].turn == 1
     assert state.pipeline_calls[1].turn == 2
+
+
+def test_background_success_read_preserves_generation_boundary():
+    module = _load_module()
+    messages = []
+    command = 'bash tools/ascendc_eval_pipeline.sh --op_name op'
+    def call(cid, name='Bash', **args):
+        return {'role': 'assistant', 'content': [{'type': 'tool_use', 'id': cid, 'name': name, 'input': args or {'command': command}}]}
+    def result(cid, content):
+        return {'role': 'user', 'content': [{'type': 'tool_result', 'tool_use_id': cid, 'content': content}]}
+    for i in range(1, 8):
+        messages += [call(str(i)), result(str(i), '[ascendc-eval] verdict — operator_valid=False speedup_vs_torch=None')]
+    messages += [call('8'), result('8', 'Command running in background with ID: xyz. Output is being written to: /tmp/xyz.output'),
+                 call('read', 'Read', file_path='/tmp/xyz.output'), result('read', '[ascendc-eval] verdict — operator_valid=True task_complete=False speedup_vs_torch=1.0'), call('9')]
+    state = module.analyze_budget('s', {'original_request': {'messages': messages}})
+    assert (state.generation_calls, state.optimization_calls) == (8, 1)
+    assert module.should_cancel(state, 8, 4) == (False, '')
+    # An unrelated success must not claim the unfinished pipeline.
+    messages[-3]['content'][0]['input']['file_path'] = '/tmp/unrelated.output'
+    state = module.analyze_budget('s', {'original_request': {'messages': messages}})
+    assert state.first_success_index is None

@@ -39,8 +39,8 @@ operator_runtime:
   #   打在 950-only 页上,学错签名烧 A 类迭代。原件 asc-devkit-9.0.0 保留,回退=改回该路径。
   asc_devkit_dir: /home/docker/asc-devkit-9.0.0-a2a3
   budget:
-    generation_max: 15
-    optimization_max: 4
+    generation_max: 20
+    optimization_max: 5
     interval_seconds: 2
   npu_lease:
     enabled: true
@@ -69,7 +69,7 @@ operator:
   # ← delta 13:generation 最多 8 次、首次正确后 optimization 独立最多 4 次；
   #   每个候选都参与编译/对拍/测速，单次长尾可超过 30 min；
   #   加上 Phase 0-3 探索，保留 9000s 会话上限。
-  timeout_seconds: 21600.0
+  timeout_seconds: 18000.0
   runtime:
     image: ascendc-tilelang:v1                          # ← delta 2
     network: host

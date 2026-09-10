@@ -52,6 +52,11 @@ stop_existing() {
 stop_existing
 rm -f "${PID_FILE}"
 
+if [[ "${POLAR_PIPELINE_BUDGET_ENABLED:-1}" == "0" ]]; then
+  ok_log "watcher" "call limits disabled; operator timeout remains active"
+  exit 0
+fi
+
 setsid nohup python3 tools/polar_pipeline_budget_watcher.py \
   --root "${ROOT}" \
   --gateway "${GATEWAY_URL}" \

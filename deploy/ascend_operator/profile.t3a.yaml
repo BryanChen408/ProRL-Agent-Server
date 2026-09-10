@@ -2,11 +2,11 @@
 # 与 profile.t2a.yaml 的差异(本文件同样是整份复制,loader 不支持继承):
 #   R1. paths.operator_runtime_dir: operator_runtime_t3a(canonical = 官方复刻件 + R1-R4 补丁)
 #   R2. agent:复刻需要 Skill/Agent/Task 工具(官方主-子代理流程),仅禁交互类与网络类;
-#       不写 skillOverrides(无 only_project_skills)、不预生成骨架、无固定入口、无 stop_guard。
+#       不写 skillOverrides、不预生成骨架、无固定入口；T3A hook 检查派发与收尾。
 #   R3. evaluator:判分接线走我方 judge(= t2a 管线),但提交物形态从「agent 产 tarball」
-#       变为「session 收尾由 judge 侧打包 {op}/」——阶段 3 完成接线,当前为占位(见末尾)。
+#       变为「hook 保存候选，judge 按排名验收并保留逐候选结果」。
 # 起 run 时用 POLAR_PROFILE 选:
-#   POLAR_PROFILE=.../profile.t3a.yaml      复刻基线(官方流程原样)
+#   POLAR_PROFILE=.../profile.t3a.yaml      T3A 复刻与 RL 接线
 #   POLAR_PROFILE=.../profile.t2a.yaml      现行基线(对照组)
 service:
   bind_host: 0.0.0.0
@@ -23,12 +23,10 @@ paths:
 operator_runtime:
   workflow: legacy
   backend: ascendc
-  task_assets_dir: /home/docker/datasets/ascendc-rl-datasets/NPUKernelBench/src
+  task_assets_dir: /home/docker/datasets/ascendc-rl-datasets/NPUKernelBench/op_tasks
   asc_devkit_dir: /home/docker/asc-devkit-9.0.0-a2a3
   budget:
-    generation_max: 8
-    optimization_max: 4
-    interval_seconds: 2
+    enabled: false  # 不按 pipeline/verify 次数终止；解题由 timeout_seconds 限时。
   npu_lease:
     enabled: true
     pool: [0, 1, 2, 3, 4, 5, 6, 7]
@@ -40,6 +38,7 @@ observer:
 
 gateway:
   node_id: ascend-node-01
+  t3a_attempt_spans: true  # 原生 hook 判决接入 attempt credit，与次数限制独立。
   release_session_affinity: true
   max_init_workers: 8
   max_run_workers: 64
@@ -51,7 +50,7 @@ gateway:
 
 operator:
   profile: operator_npu
-  timeout_seconds: 21600.0
+  timeout_seconds: 18000.0  # 初始化与解题预算；最终收尾/judge 使用独立预算。
   runtime:
     image: ascendc-tilelang:v1
     network: host
@@ -68,9 +67,9 @@ operator:
       BASH_DEFAULT_TIMEOUT_MS: "2700000"
       BASH_MAX_TIMEOUT_MS: "2700000"
     model_name: claude-opus-4-5
-    # 官方流程的主代理是调度壳、子代理承担 40~180 次请求;主线轮次给足。
-    max_turns: 300
-    # ← R2 复刻纪律:不写 skillOverrides(16 族全量可见);skills 由 prepare 拷进
+    # 不额外限制 CLI 轮数，沿用 cannbot 工作流并由解题超时收尾。
+    max_turns: null
+    # ← R2 复刻纪律:不写 skillOverrides(原生依赖全量可见);skills 由 prepare 拷进
     #   workdir/.claude/skills(项目级),harness preset 不再拷用户级(防双份)。
     skills_path: ""
     max_output_tokens: 24576
@@ -87,9 +86,11 @@ operator:
       (workdir = /opt/workspace/agent_workdir,例如
       bash /opt/workspace/agent_workdir/.claude/skills/tilelang2ascend-translator/scripts/evaluate_ascendc.sh
       /opt/workspace/agent_workdir/{op_name})——不要在 cd 到 kernel/build 等子目录后用相对路径调脚本。
-      评测形态纪律(硬规则):功能验证/评测只允许两种直接调用形态——
+      评测形态纪律(硬规则):功能验证/评测使用以下四种原生调用形态——
       bash <绝对路径>/.claude/skills/tilelang2ascend-translator/scripts/evaluate_ascendc.sh <output_dir>
       python3 <绝对路径>/.claude/skills/tilelang2ascend-translator/scripts/verification_ascendc.py <output_dir>
+      bash <绝对路径>/.claude/skills/tilelang2ascend-tilelang-designer/scripts/evaluate_tilelang.sh <output_dir>
+      python3 <绝对路径>/.claude/skills/tilelang2ascend-tilelang-designer/scripts/verification_tilelang.py <output_dir>
       禁止用 python -c 内联注入、自写 wrapper 脚本、拷贝脚本改名等间接方式调评测:
       这些形态 hook 无法识别,该次评测不计入过程记录,等于白跑。
       脚本 import 报错时,读报错修正调用路径或环境变量,不要自造调用方式绕过。
@@ -102,13 +103,13 @@ operator:
     # ← R3 judge 接线(已完成):判优驱动按 ranked list 验收,AST/状态化打掉顺延;
     #   候选由 hook 静默快照(attempt stream 里的 promote 记录),judge 只认 sha256 对应字节。
     #
-    # 主链不训(t3a 语义,默认关):gateway 的 prefix_merging builder 已按 system 指纹给每条
-    #   trace 打 chain_role(main=主调度链 / sub=子代理独立会话)。主链只做读题/派发/复核
-    #   (实测 0 评测),广播分挂给它是相关噪声,且其行为是流程文档写死的规则。
-    #   vime 侧 adapter(vime_bridge/adapter.py)在 POLAR_T3A_MASK_MAIN_CHAIN=1 时跳过
-    #   chain_role=="main" 的 trace —— 该环境变量属于 **vime 启动环境**(rollout manager
-    #   进程),polar 的 runtime.env 到不了那里;t2a 不设 = 行为逐字不变。
-    # per-attempt span(G1,默认关):gateway 的 attempt_spans 在 POLAR_T3A_ATTEMPT_SPANS=1 时
+    # 主链不训:gateway 用 Claude 原生 transcript 的 isSidechain/agentId 与消息 ID
+    #   标记 chain_role，stream-json 的 parent_tool_use_id 作尾部兜底，不按 system 猜测。
+    #   VIME 的 POLAR_T3A_MASK_MAIN_CHAIN=1 只接收 chain_role_source=claude_native
+    #   且 chain_role=sub 的轨迹；身份缺失/冲突会报错并排除，策略切换保护不变。
+    #   开关属于 VIME 启动环境，使用 start_sync_hybrid_t3a.sh 开启；T2A 默认关闭。
+    # per-attempt span:本 profile 的 gateway.t3a_attempt_spans 开启
+    # POLAR_T3A_ATTEMPT_SPANS=1，gateway 的 attempt_spans
     #   从 hook 判决块([skill_script_hook intercepted execution])切 span 并给分
     #   (PASS→0.4 / D→0.3+0.1·通过率 / A→0.2,与终局 reward 同 ladder;缺块=None 不给分)。
     #   该环境变量属于 **polar gateway 启动环境**;t2a 会话没有 hook 标记,天然零影响。
@@ -118,3 +119,4 @@ operator:
       - output/submission/{op_name}_impl.tar.gz
     metrics_path: judge_out/metrics.json
     judge_timeout: 5400
+    postrun_timeout_seconds: 5400  # 解题结束起独立计时，含轨迹构建、judge 准备与重试。

@@ -23,6 +23,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "src"))
+from polar.trajectory.builder.attempt_spans import claim_backgrounded_verdicts
 
 DEFAULT_GATEWAY = "http://127.0.0.1:8100"
 DEFAULT_ROOT = Path(__file__).resolve().parents[3] / "output" / "ascend_operator"
@@ -250,6 +252,9 @@ def _extract_pipeline_calls(record: dict[str, Any]) -> list[PipelineCall]:
     # runaway / bypassed calls cannot escape the count. The result, when present,
     # only marks success (used for the gen/opt split).
     pending: dict[str, PipelineCall] = {}
+    pipeline_ids = {}
+    verdicts = {}
+    all_calls = []
     for msg in messages:
         role = msg.get("role")
         content = msg.get("content")
@@ -257,6 +262,11 @@ def _extract_pipeline_calls(record: dict[str, Any]) -> list[PipelineCall]:
             turn += 1
             for tool in _tool_uses(content):
                 command = _tool_command(tool)
+                tool_id = str(tool.get("id") or "")
+                inp = tool.get("input") or {}
+                if tool_id:
+                    target = command or str(inp.get("file_path") or inp.get("task_id") or "")
+                    all_calls.append((tool_id, target))
                 if not _is_pipeline_command(command):
                     continue
                 call = PipelineCall(
@@ -272,14 +282,24 @@ def _extract_pipeline_calls(record: dict[str, Any]) -> list[PipelineCall]:
                 tool_id = tool.get("id")
                 if tool_id:
                     pending[str(tool_id)] = call
+                    pipeline_ids[str(tool_id)] = (call.index, str(tool_id))
         elif role == "user":
             for item in _tool_results(content):
+                verdicts[str(item.get("tool_use_id") or "")] = item.get("content")
                 call = pending.pop(str(item.get("tool_use_id") or ""), None)
                 if call is not None:
                     result = str(item.get("content") or "")
                     call.result = result
                     call.success = bool(SUCCESS_RE.search(result))
                     call.cached = _is_pipeline_cache_hit(result)
+
+    claim_backgrounded_verdicts(pipeline_ids, verdicts, all_calls)
+    by_index = {call.index: call for call in calls}
+    for tool_id, (index, _) in pipeline_ids.items():
+        result = str(verdicts.get(tool_id) or "")
+        by_index[index].result = result
+        by_index[index].success = bool(SUCCESS_RE.search(result))
+        by_index[index].cached = _is_pipeline_cache_hit(result)
 
     if current:
         turn += 1

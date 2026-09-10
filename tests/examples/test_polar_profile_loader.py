@@ -4,7 +4,11 @@ import os
 import subprocess
 from pathlib import Path
 
+import pytest
 import yaml
+
+from polar.agent.models import AgentSpec
+from polar.agent.presets.claude_code import ClaudeCodeHarness
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -19,6 +23,69 @@ def _load_env(text: str) -> dict[str, str]:
         key, value = line.removeprefix("export ").split("=", 1)
         env[key] = value.strip("'")
     return env
+
+
+@pytest.mark.parametrize("name", ["t2a", "t3a"])
+def test_real_profiles_separate_attempt_credit_from_call_limits(tmp_path, name):
+    profile = yaml.safe_load((ROOT / f"deploy/ascend_operator/profile.{name}.yaml").read_text())
+    profile["paths"]["output_dir"] = str(tmp_path / "output")
+    path = tmp_path / "profile.yaml"
+    path.write_text(yaml.safe_dump(profile))
+    proc = subprocess.run(
+        ["python3", str(SCRIPT), "--profile", str(path), "--repo-root", str(ROOT)],
+        env={**os.environ, "POLAR_RUN_ID": "test", "POLAR_T3A_ATTEMPT_SPANS": "0"},
+        capture_output=True, text=True, check=True,
+    )
+    env = _load_env(proc.stdout)
+    topology = yaml.safe_load(Path(env["POLAR_TOPOLOGY"]).read_text())
+    op = topology["rollout"]["operator_profiles"]["operator_npu"]
+    command = ClaudeCodeHarness(AgentSpec(**op["agent"])).run_steps("test operator")[0].command
+    assert op["timeout_seconds"] == profile["operator"]["timeout_seconds"]
+    assert topology["gateway"]["nodes"][0]["inference"]["base_url"] == profile["service"]["sglang_router_url"]
+    if name == "t3a":
+        assert op["evaluator"]["postrun_timeout_seconds"] == 5400
+        assert op["evaluator"]["config"]["judge_timeout"] == 5400
+        assert env["POLAR_T3A_ATTEMPT_SPANS"] == "1"
+        assert env["POLAR_PIPELINE_BUDGET_ENABLED"] == "0"
+        assert env["POLAR_GEN_PIPELINE_MAX"] == env["POLAR_OPT_PIPELINE_MAX"] == ""
+        assert "POLAR_GEN_PIPELINE_MAX" not in op["runtime"]["env"]
+        assert "POLAR_OPT_PIPELINE_MAX" not in op["runtime"]["env"]
+        assert "max_turns" not in op["agent"]["settings"]
+        assert "--max-turns" not in command
+    else:
+        assert "postrun_timeout_seconds" not in op["evaluator"]
+        assert env["POLAR_T3A_ATTEMPT_SPANS"] == "0"
+        assert env["POLAR_PIPELINE_BUDGET_ENABLED"] == "1"
+        assert env["POLAR_GEN_PIPELINE_MAX"] == str(profile["operator_runtime"]["budget"]["generation_max"])
+        assert env["POLAR_OPT_PIPELINE_MAX"] == str(profile["operator_runtime"]["budget"]["optimization_max"])
+        assert op["runtime"]["env"]["POLAR_GEN_PIPELINE_MAX"] == env["POLAR_GEN_PIPELINE_MAX"]
+        assert op["agent"]["settings"]["max_turns"] == 150
+        assert "--max-turns 150" in command
+
+
+def test_time_only_start_stops_old_watcher_without_starting_another(tmp_path):
+    # Run the actual launcher with isolated paths and fake process controls.
+    script = tmp_path / "start_pipeline_budget_watcher.sh"
+    script.write_text((ROOT / "deploy/ascend_operator/start_pipeline_budget_watcher.sh").read_text())
+    (tmp_path / "_paths.sh").write_text(
+        'export POLAR_DEPLOY_DIR="$PWD" POLAR_OUTPUT_DIR="$PWD/out" POLAR_LOG_DIR="$PWD/out/logs"\n'
+        'pgrep() { printf "123456\\n"; }\n'
+        'kill() { printf "%s\\n" "$*" >> "$PWD/stopped"; }\n'
+        'sleep() { :; }\n'
+        'setsid() { touch "$PWD/unexpected_start"; return 1; }\n'
+    )
+    (tmp_path / "out").mkdir()
+    pid = tmp_path / "out/pipeline_budget_watcher.pid"
+    pid.write_text("123456\n")
+    proc = subprocess.run(
+        ["bash", str(script)], cwd=tmp_path,
+        env={**os.environ, "POLAR_TOPOLOGY": "already-rendered", "POLAR_PIPELINE_BUDGET_ENABLED": "0"},
+        capture_output=True, text=True, check=True,
+    )
+    assert "call limits disabled" in proc.stdout
+    assert (tmp_path / "stopped").read_text().splitlines() == ["123456", "-9 123456"]
+    assert not pid.exists()
+    assert not (tmp_path / "unexpected_start").exists()
 
 
 def test_profile_loader_derives_topology_and_sidecar_env(tmp_path: Path) -> None:

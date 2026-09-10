@@ -131,8 +131,10 @@ def _operator_prepare(
 
 
 def _evaluator_config(*, workflow: str, evaluator: dict, workdir: str) -> dict:
+    timeouts = {"judge_timeout": float(evaluator["judge_timeout"])} if "judge_timeout" in evaluator else {}
     if workflow == "cannbot":
         return {
+            **timeouts,
             "lazy_refresh_runtime": True,
             "op_name": "{op_name}",
             "judge_mode": "cannbot",
@@ -141,6 +143,7 @@ def _evaluator_config(*, workflow: str, evaluator: dict, workdir: str) -> dict:
             "workdir": workdir,
         }
     config = {
+        **timeouts,
         "lazy_refresh_runtime": True,
         "op_name": "{op_name}",
         "judge_command": str(evaluator.get("judge_command")),
@@ -179,6 +182,7 @@ def main() -> int:
     operator_runtime = _mapping(profile.get("operator_runtime"))
     legacy_budget = _mapping(profile.get("pipeline_budget"))
     budget = _mapping(operator_runtime.get("budget"))
+    budget_enabled = bool(budget.get("enabled", True))
     npu_lease = _mapping(operator_runtime.get("npu_lease"))
     observer = _mapping(profile.get("observer"))
     gateway = _mapping(profile.get("gateway"))
@@ -233,9 +237,9 @@ def main() -> int:
         "CLAUDE_CODE_MAX_RETRIES": "1",
         "CLAUDE_CODE_MAX_OUTPUT_TOKENS": max_tokens,
         "POLAR_ANTHROPIC_DEFAULT_MAX_TOKENS": max_tokens,
-        "POLAR_GEN_PIPELINE_MAX": gen_max,
-        "POLAR_OPT_PIPELINE_MAX": opt_max,
     }
+    if budget_enabled:
+        runtime_env.update({"POLAR_GEN_PIPELINE_MAX": gen_max, "POLAR_OPT_PIPELINE_MAX": opt_max})
     if lease_enabled:
         runtime_env.update(
             {
@@ -330,10 +334,11 @@ def main() -> int:
     if skills_path:  # 键序保持与原来一致(harness/model_name/skills_path/settings)
         agent_block["skills_path"] = skills_path
     agent_settings = {
-        "max_turns": int(agent.get("max_turns", 45)),
         "disallowed_tools": str(agent.get("disallowed_tools", "")),
         "append_system_prompt": str(agent.get("append_system_prompt", "")),
     }
+    if agent.get("max_turns", 45) is not None:
+        agent_settings["max_turns"] = int(agent.get("max_turns", 45))
     # `allowed_tools` is an optional allowlist.  Do not render an empty value:
     # Claude Code interprets `--allowedTools ''` as an empty tool surface.  When
     # configured (notably profile.t2a), it must survive profile -> topology ->
@@ -373,6 +378,10 @@ def main() -> int:
                 "builder": {"strategy": "prefix_merging", "config": {}},
             }
         }
+        if evaluator.get("postrun_timeout_seconds") is not None:
+            rollout_cfg["operator_profiles"][profile_name]["evaluator"]["postrun_timeout_seconds"] = float(
+                evaluator["postrun_timeout_seconds"]
+            )
     gateway_node = {
         "id": str(gateway.get("node_id", "ascend-node-01")),
         "host": bind_host,
@@ -422,8 +431,10 @@ def main() -> int:
         "SGLANG_ROUTER_URL": router_url,
         "POLAR_OBSERVER_HOST": str(observer.get("host", "0.0.0.0")),
         "POLAR_OBSERVER_PORT": str(observer.get("port", 18088)),
-        "POLAR_GEN_PIPELINE_MAX": gen_max,
-        "POLAR_OPT_PIPELINE_MAX": opt_max,
+        "POLAR_PIPELINE_BUDGET_ENABLED": "1" if budget_enabled else "0",
+        "POLAR_GEN_PIPELINE_MAX": gen_max if budget_enabled else "",
+        "POLAR_OPT_PIPELINE_MAX": opt_max if budget_enabled else "",
+        "POLAR_T3A_ATTEMPT_SPANS": "1" if gateway.get("t3a_attempt_spans", False) else "0",
         "POLAR_PIPELINE_WATCH_INTERVAL": watch_interval,
         "POLAR_ANTHROPIC_DEFAULT_MAX_TOKENS": max_tokens,
         "POLAR_INFERENCE_REQUEST_TIMEOUT_SECONDS": str(int(timeout_ms) // 1000),
