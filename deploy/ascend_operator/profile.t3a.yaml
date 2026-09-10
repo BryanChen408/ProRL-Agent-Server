@@ -24,7 +24,8 @@ operator_runtime:
   workflow: legacy
   backend: ascendc
   task_assets_dir: /home/docker/datasets/ascendc-rl-datasets/NPUKernelBench/op_tasks
-  asc_devkit_dir: /home/docker/asc-devkit-9.0.0-a2a3
+  # 与 T2A 共用离线清理的文档副本；准备命令见 README.md。
+  asc_devkit_dir: /home/docker/asc-devkit-9.0.0-a2a3-readable
   budget:
     enabled: false  # 不按 pipeline/verify 次数终止；解题由 timeout_seconds 限时。
   npu_lease:
