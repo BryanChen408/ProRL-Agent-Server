@@ -218,7 +218,7 @@ fail_hint() {
   # 原样展示成 agent 的任务完成信号。agent 侧用 operator_valid/task_complete 两个正交状态，
   # judge 侧没有 task_complete 时明确打印 None，不凭空声称任务已经结束。
   python3 -c "import json;d=json.load(open('$OUT_DIR/metrics.json'));p=d.get('perf_data') or {};print('[ascendc-eval] verdict — operator_valid=%s task_complete=%s ast_check_ok=%s correctness_ok=%s error_type=%s speedup_vs_torch=%s'%(d.get('operator_valid',d.get('success')),d.get('task_complete'),d.get('ast_check_ok'),d.get('correctness_ok'),d.get('error_type'),p.get('speedup_vs_torch')))" 2>/dev/null || true
-  python3 - "$OUT_DIR/metrics.json" "$OUT_DIR/metrics_error.log" <<'CLASSIFY' 2>/dev/null || true
+  python3 - "$OUT_DIR/metrics.json" "$OUT_DIR/metrics_error.log" "$WORK_ROOT" <<'CLASSIFY' 2>/dev/null || true
 import json, re, sys
 try:
     d = json.load(open(sys.argv[1]))
@@ -319,12 +319,13 @@ elif et == "benchmark_failed":
 else:
     # 新增 error_type 未进入映射属于 judge 分类器缺口,不能假装是代码错误。
     label = "B类-INFRA-分类器未覆盖该error_type(停止并上报,不要猜测修复):" + et
+label = label.replace(".claude/", f"{sys.argv[3]}/.claude/")
 print(f"[ascendc-eval] 错误分类: {label}")
 if first_exc:
     print(f"[ascendc-eval] 首个异常: {first_exc}")
 CLASSIFY
   if ! python3 -c "import json;raise SystemExit(0 if json.load(open('$OUT_DIR/metrics.json')).get('success') else 1)" 2>/dev/null; then
-    echo "  ↳ 完整错误在 $OUT_DIR/metrics_error.log;只改 {op}/ 下实现、重打 tarball、重跑本固定入口。"
+    echo "  ↳ 完整错误在 $OUT_DIR/metrics_error.log;只改 $SRC_DIR 下实现、重打 tarball、重跑本固定入口。"
   fi
 }
 
@@ -414,7 +415,7 @@ except Exception:
     SP="$sp" HIT="$hit" COMPLETE="$task_complete" REASON="$completion_reason" \
     PHASE_NEXT="$phase_next" TARGET="$PERF_TARGET" OPT_MAX="$PIPELINE_OPT_MAX" \
     OPT_USED="$PIPELINE_OPT_COUNT" REMAIN="$remain" MJ="$OUT_DIR/metrics.json" \
-    TS="$TASK_STATE_FILE" python3 - <<'PY' 2>/dev/null || true
+    TS="$TASK_STATE_FILE" WORK_ROOT="$WORK_ROOT" python3 - <<'PY' 2>/dev/null || true
 import json, os
 from pathlib import Path
 p = Path(os.environ["MJ"])
@@ -435,7 +436,7 @@ elif complete:
 else:
     action = (f"正确性已通过,但 speedup={os.environ.get('SP','')}x < 目标线 {target}x —— "
               f"未达标,不要结束任务。下一次调用本固定入口进入 optimization 阶段，还剩 {remain} 次预算。"
-              " 先 Read .claude/skills/ops-profiling/SKILL.md，再读取真实逐 case 结果并修改 kernel；"
+              f" 先 Read {os.environ['WORK_ROOT']}/.claude/skills/ops-profiling/SKILL.md，再读取真实逐 case 结果并修改 kernel；"
               "源码变化后再重跑。"
               " .best.tar.gz 只在 speedup 更高时才替换。")
 d["operator_valid"] = bool(d.get("success") and d.get("correctness_ok"))
@@ -477,7 +478,7 @@ PY
     echo "[ascendc-eval] task status — operator_valid=true task_complete=false completion_reason=pending_optimization"
     echo "[ascendc-eval] 正确性已通过,但 speedup=${sp}x < 目标线 ${PERF_TARGET}x —— 未达标,不要结束任务。"
     echo "[ascendc-eval] 下一次调用本固定入口进入 optimization 阶段:预算 ${PIPELINE_OPT_MAX} 次,已用 ${PIPELINE_OPT_COUNT} 次,剩 ${remain} 次。"
-    echo "[ascendc-eval] 先 Read .claude/skills/ops-profiling/SKILL.md,再读取真实逐 case 结果并修改 kernel;源码变化后重跑本入口。"
+    echo "[ascendc-eval] 先 Read $WORK_ROOT/.claude/skills/ops-profiling/SKILL.md,再读取真实逐 case 结果并修改 kernel;源码变化后重跑本入口。"
     echo "[ascendc-eval] .best.tar.gz 只在 speedup 更高时才替换 —— 优化失败不会覆盖已知最佳版本。"
   fi
 
@@ -581,21 +582,23 @@ if [[ "$AGENT_SIDE" == "1" ]]; then
   fi
   if [[ "$_WRONG_DIR" == "1" ]]; then
     echo "[ascendc-eval] ⚠⚠⚠ 你可能改错了目录 ⚠⚠⚠"
-    echo "[ascendc-eval] $OP_NAME/ 仍是未修改的预生成骨架,但 output/submission/ 下发现源码文件:"
+    echo "[ascendc-eval] $SRC_DIR 仍是未修改的预生成骨架,但 $WORK_ROOT/output/submission/ 下发现源码文件:"
     echo "[ascendc-eval]   $_STRAY_SRC"
-    echo "[ascendc-eval] 评测只打包 $SRC_DIR —— 你写在 output/submission/ 下的代码从未被评测,"
+    echo "[ascendc-eval] 评测只打包 $SRC_DIR —— 你写在 $WORK_ROOT/output/submission/ 下的代码从未被评测,"
     echo "[ascendc-eval] 报错才会和上次一模一样。正确做法:把你写的文件合并进 $SRC_DIR"
-    echo "[ascendc-eval] (覆盖骨架同名文件),再重跑本命令。output/submission/ 只放 tarball 产物。"
+    echo "[ascendc-eval] (覆盖骨架同名文件),再重跑本命令。$WORK_ROOT/output/submission/ 只放 tarball 产物。"
   fi
   _HASH_FILE="$STATE_DIR/.${OP_NAME}_last.hash"
   if [[ -n "$CUR_HASH" && -f "$_HASH_FILE" && -f "$OUT_DIR/metrics.json" \
         && "$CUR_HASH" == "$(cat "$_HASH_FILE" 2>/dev/null)" ]]; then
-    echo "[ascendc-eval] {op}/ 源码与上次评测完全一致 → 复用上次结论,跳过编译/对拍/性能(不消耗预算)"
+    echo "[ascendc-eval] 源码未变化，本次未重新评测（复用上次结论，不消耗预算）"
+    echo "[ascendc-eval] 实际检查目录：$SRC_DIR"
+    echo "[ascendc-eval] 若刚修改过代码，请确认修改文件位于此目录。"
     if [[ "$_WRONG_DIR" == "0" ]]; then
       _STRAY_SRC=$(find "$WORK_ROOT/output/submission" -type f \
           \( -name '*.cpp' -o -name '*.h' -o -name '*.hpp' -o -name '*.cc' \
              -o -name '*.py' -o -name 'CMakeLists.txt' \) 2>/dev/null | head -1)
-      [[ -n "$_STRAY_SRC" ]] && echo "[ascendc-eval] ⚠ 但 output/submission/ 下有源码文件(如 $_STRAY_SRC)——评测只打包 $SRC_DIR,如果你在 submission 下写代码,改动从未被评测,请合并进工程目录再提交"
+      [[ -n "$_STRAY_SRC" ]] && echo "[ascendc-eval] ⚠ 但 $WORK_ROOT/output/submission/ 下有源码文件(如 $_STRAY_SRC)——评测只打包 $SRC_DIR,如果你在 submission 下写代码,改动从未被评测,请合并进工程目录再提交"
     fi
     python3 -c "import json;d=json.load(open('$OUT_DIR/metrics.json'));p=d.get('perf_data') or {};print('[ascendc-eval] cached evaluation — operator_valid=%s task_complete=%s ast_check_ok=%s correctness_ok=%s speedup_vs_torch=%s'%(d.get('operator_valid',d.get('success')),d.get('task_complete'),d.get('ast_check_ok'),d.get('correctness_ok'),p.get('speedup_vs_torch')))" 2>/dev/null || true
     exit 0
@@ -686,7 +689,7 @@ if [[ ! -f "$IMPL_FILE" ]]; then
     # 工程目录压根不存在:agent 在没建 {op_name}/ 工程时就跑了评测(逻辑错,不是 infra)。
     # 明确告诉它先建工程,而不是一句 "submission missing" 让它猜。
     write_metrics false false false "" "" "" \
-      "工程目录不存在: $SRC_DIR —— 先创建 $OP_NAME/ 工程(kernel/ + model_new_ascendc.py),再跑固定评测入口;不要在没建工程时跑评测"
+      "工程目录不存在: $SRC_DIR —— 先创建 $SRC_DIR 工程(kernel/ + model_new_ascendc.py),再跑固定评测入口;不要在没建工程时跑评测"
   else
     # 工程在,但提交物没出来(pack 失败或 judge 侧没就位)。
     write_metrics false false false "" "" "" "submission missing: $IMPL_FILE (工程目录 $SRC_DIR 存在但打包未产出 tarball)"

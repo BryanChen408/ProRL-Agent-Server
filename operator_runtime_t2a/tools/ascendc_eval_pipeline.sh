@@ -4,16 +4,11 @@ set -uo pipefail
 WARMUP="${WARMUP:-5}"
 REPEATS="${REPEATS:-50}"
 export SOC_VERSION="${SOC_VERSION:-ascend910_9382}"
-# 先 readlink -f 解掉软链接再取 dirname —— 直接 dirname 在脚本被软链接调用时会拿到
-# 软链接的目录而不是真脚本目录,导致 _SCRIPT_DIR/WORK_ROOT 全错。readlink -f 对非软链
-# 按原样返回,所以两种情况都安全。
+
 _SRC="${BASH_SOURCE[0]}"
 command -v readlink >/dev/null 2>&1 && _SRC="$(readlink -f "$_SRC")"
 _SCRIPT_DIR="$(cd "$(dirname "$_SRC")" && pwd)"
-# WORK_ROOT = agent 的 workdir(tools/ 的上一级)。打包/找工程/judge_out 一律用它,
-# 不用调用时的 $PWD —— agent 常在 <op>/ 或 <op>/kernel/build/ 里跑评测,用 $PWD 会
-# 找不到 {op_name}/ → 报 submission missing。脚本固定在 <workdir>/tools/,所以它的
-# 上一级就是 workdir,与调用目录无关。
+
 WORK_ROOT="$(cd "${_SCRIPT_DIR}/.." && pwd)"
 if [[ -z "${ASCENDC_SKILLS_SRC:-}" ]]; then
   if [[ -d /opt/canonical/skills ]]; then ASCENDC_SKILLS_SRC=/opt/canonical/skills
@@ -70,9 +65,7 @@ IMPL_FILE="${IMPL_FILE:-output/submission/${OP_NAME}_impl.tar.gz}"
 # 相对路径的 --impl / --out_dir 一律相对 WORK_ROOT 解析(而不是调用目录),
 # 这样从 <op>/ 或 <op>/kernel/build/ 里跑也能定位到 workdir 下的工程与提交物。
 case "$IMPL_FILE" in /*) ;; *) IMPL_FILE="$WORK_ROOT/$IMPL_FILE";; esac
-# Agent 可发现的公开路径始终保留原值。预算内评测会把同一份 tar 另存为不可变
-# candidate，并让 Step0 只解包该 candidate；这样 Agent 的固定命令/路径不变，
-# best 又能证明自己对应的确是本次实际评测字节。
+
 PUBLIC_IMPL_FILE="$IMPL_FILE"
 CANDIDATE_TARBALL=""
 EVALUATED_CANDIDATE_SHA256=""
@@ -83,10 +76,7 @@ AGENT_SIDE=0; [[ -d "$SRC_DIR" ]] && AGENT_SIDE=1
 STATE_DIR="$WORK_ROOT/output/.selfcheck"
 PACK_SH="${_SCRIPT_DIR}/pack_submission.sh"
 
-write_metrics() {  # ast_ok corr_ok success fw impl speedup error [完整日志文件] [强制 error_type]
-  # $9 (force_type) 覆盖文本推断:classify() 按关键词猜,而部分失败的措辞里天然带
-  # "对拍"/"编译" 之类的词,会被归错档(例如"对拍前的注册冒烟检查失败"被判成
-  # correctness_failed)。调用方已经确知类型时,直接指定。
+write_metrics() {
   local ast_ok="$1" corr_ok="$2" success="$3" fw="$4" impl="$5" sp="$6" error="$7" log_src="${8:-}" force_type="${9:-}"
   : > "$OUT_DIR/metrics_error.log"
   [[ -n "$error" ]] && printf "%s\n" "$error" >> "$OUT_DIR/metrics_error.log"
@@ -179,10 +169,7 @@ if len(_raw) > _CAP:
     metrics["error_truncated"] = True
 (out / "metrics.json").write_text(json.dumps(metrics, ensure_ascii=False, indent=2), encoding="utf-8")
 PY
-  # 过程事件采集(process reward 数据源,dev_05 M2):agent 侧 only —— judge 侧
-  # (AGENT_SIDE=0)的评测是打分动作,不是被评分的过程。从刚落盘的 metrics.json 原样
-  # 读四参数,error_type 与 metrics.json 逐字节一致(judge 侧 V3 校验依赖)。
-  # || true 兜底:采集失败绝不影响评测本身。
+
   if [[ "$AGENT_SIDE" == "1" ]]; then
     "$PY_BIN" "$_SCRIPT_DIR/process_track.py" record-eval \
       --metrics "$OUT_DIR/metrics.json" \
@@ -193,10 +180,6 @@ PY
   fi
 }
 
-# 从 verify_report.json(Step2b --json-file 产出)提取对拍 case 统计到
-# CASES_PASSED/CASES_TOTAL,供 write_metrics 落进 metrics.json。
-# 缺失/异常(脚本被杀、report 未写、无 case_oks 字段)→ 置空 → metrics 里为 null,
-# reward 侧回退固定档,不影响旧行为。
 extract_case_stats() {
   CASES_PASSED=""; CASES_TOTAL=""
   [[ -f "$OUT_DIR/verify_report.json" ]] || return 0
@@ -214,11 +197,8 @@ print('%d %d' % (sum(1 for x in oks if x), len(oks)) if isinstance(oks, list) an
 }
 
 fail_hint() {
-  # success 是 judge/reward 的历史字段,语义只能保持「实现正确且完成性能测量」；不能再把它
-  # 原样展示成 agent 的任务完成信号。agent 侧用 operator_valid/task_complete 两个正交状态，
-  # judge 侧没有 task_complete 时明确打印 None，不凭空声称任务已经结束。
   python3 -c "import json;d=json.load(open('$OUT_DIR/metrics.json'));p=d.get('perf_data') or {};print('[ascendc-eval] verdict — operator_valid=%s task_complete=%s ast_check_ok=%s correctness_ok=%s error_type=%s speedup_vs_torch=%s'%(d.get('operator_valid',d.get('success')),d.get('task_complete'),d.get('ast_check_ok'),d.get('correctness_ok'),d.get('error_type'),p.get('speedup_vs_torch')))" 2>/dev/null || true
-  python3 - "$OUT_DIR/metrics.json" "$OUT_DIR/metrics_error.log" <<'CLASSIFY' 2>/dev/null || true
+  python3 - "$OUT_DIR/metrics.json" "$OUT_DIR/metrics_error.log" "$WORK_ROOT" <<'CLASSIFY' 2>/dev/null || true
 import json, re, sys
 try:
     d = json.load(open(sys.argv[1]))
@@ -319,12 +299,13 @@ elif et == "benchmark_failed":
 else:
     # 新增 error_type 未进入映射属于 judge 分类器缺口,不能假装是代码错误。
     label = "B类-INFRA-分类器未覆盖该error_type(停止并上报,不要猜测修复):" + et
+label = label.replace(".claude/", f"{sys.argv[3]}/.claude/")
 print(f"[ascendc-eval] 错误分类: {label}")
 if first_exc:
     print(f"[ascendc-eval] 首个异常: {first_exc}")
 CLASSIFY
   if ! python3 -c "import json;raise SystemExit(0 if json.load(open('$OUT_DIR/metrics.json')).get('success') else 1)" 2>/dev/null; then
-    echo "  ↳ 完整错误在 $OUT_DIR/metrics_error.log;只改 {op}/ 下实现、重打 tarball、重跑本固定入口。"
+    echo "  ↳ 完整错误在 $OUT_DIR/metrics_error.log;只改 $SRC_DIR 下实现、重打 tarball、重跑本固定入口。"
   fi
 }
 
@@ -335,16 +316,8 @@ PIPELINE_GEN_COUNT=0; PIPELINE_OPT_COUNT=0; PIPELINE_FIRST_SUCCESS=0
 BEST_META="$WORK_ROOT/output/submission/.${OP_NAME}_impl.best.meta.json"
 TASK_STATE_FILE="$OUT_DIR/task_state.json"
 CUR_HASH=""
-# 性能目标线。reward = 0.75 + 0.25*tanh(ln speedup)(operator_reward.reward_from_metrics):
-# 1.0x 只拿 0.75,低于 1.0x 反而往 0.5 掉。CLAUDE.md 4-S.4 的达标判定必须同步这个数。
 PERF_TARGET="${POLAR_PERF_TARGET:-1.1}"
 
-# 预算状态写进 $ARTIFACTS_DIR(gateway 侧 session 目录),不是 workdir —— 逐字对齐 triton 侧的
-# pipeline_status_write();ascendc 移植时整段漏了,导致 pipeline_budget_status.json 从来没落过盘,
-# watcher 的 should_cancel_from_status 分支对 ascendc 一直是空跑。
-# 注意口径:workdir 里的 .selfcheck 计数器 agent 删得掉,这份状态文件也在同一个 session bind mount 里,
-# 两者都只是「第二信号 + 遥测」。真正的强制层是 watcher 从 gateway completion 流里数固定入口调用次数
-# (polar_pipeline_budget_watcher.analyze_budget / should_cancel),那条链路 agent 改不到。
 pipeline_status_write() {
   [[ -n "${ARTIFACTS_DIR:-}" ]] || return 0
   mkdir -p "${ARTIFACTS_DIR}" 2>/dev/null || return 0
@@ -385,10 +358,6 @@ tmp.replace(path)
 PY
 }
 
-# 正确性一过就收工是当前最大的分数漏点(实测 179 个成功 session 只有 2 个继续优化,
-# speedup 中位数 0.859x、58.8% 慢于 torch)。这里把「实现有效」和「任务完成」拆开:
-# operator_valid 只表示正确性/测速通过；task_complete 才是 Stop hook 的唯一放行信号。
-# 目标未达且仍有 optimization 预算时 task_complete=false，不能再被 success=true 误导结束。
 emit_optimization_prompt() {  # $1=speedup
   [[ "$AGENT_SIDE" == "1" ]] || return 0
   local sp="${1:-}" remain=$(( PIPELINE_OPT_MAX - PIPELINE_OPT_COUNT ))
@@ -408,13 +377,11 @@ except Exception:
     task_complete="0"; completion_reason="pending_optimization"; phase_next="optimization"
   fi
 
-  # 先落权威状态再回显。Stop hook 只读这份文件；stdout 即使因 Bash 自动转后台而丢失，
-  # 也不会把「目标未达」误当成已完成。只在 agent 侧写，judge 的 metrics schema/奖励字段不变。
   if [[ -n "${OUT_DIR:-}" && -f "${OUT_DIR}/metrics.json" ]]; then
     SP="$sp" HIT="$hit" COMPLETE="$task_complete" REASON="$completion_reason" \
     PHASE_NEXT="$phase_next" TARGET="$PERF_TARGET" OPT_MAX="$PIPELINE_OPT_MAX" \
     OPT_USED="$PIPELINE_OPT_COUNT" REMAIN="$remain" MJ="$OUT_DIR/metrics.json" \
-    TS="$TASK_STATE_FILE" python3 - <<'PY' 2>/dev/null || true
+    TS="$TASK_STATE_FILE" WORK_ROOT="$WORK_ROOT" python3 - <<'PY' 2>/dev/null || true
 import json, os
 from pathlib import Path
 p = Path(os.environ["MJ"])
@@ -435,7 +402,7 @@ elif complete:
 else:
     action = (f"正确性已通过,但 speedup={os.environ.get('SP','')}x < 目标线 {target}x —— "
               f"未达标,不要结束任务。下一次调用本固定入口进入 optimization 阶段，还剩 {remain} 次预算。"
-              " 先 Read .claude/skills/ops-profiling/SKILL.md，再读取真实逐 case 结果并修改 kernel；"
+              f" 先 Read {os.environ['WORK_ROOT']}/.claude/skills/ops-profiling/SKILL.md，再读取真实逐 case 结果并修改 kernel；"
               "源码变化后再重跑。"
               " .best.tar.gz 只在 speedup 更高时才替换。")
 d["operator_valid"] = bool(d.get("success") and d.get("correctness_ok"))
@@ -477,15 +444,12 @@ PY
     echo "[ascendc-eval] task status — operator_valid=true task_complete=false completion_reason=pending_optimization"
     echo "[ascendc-eval] 正确性已通过,但 speedup=${sp}x < 目标线 ${PERF_TARGET}x —— 未达标,不要结束任务。"
     echo "[ascendc-eval] 下一次调用本固定入口进入 optimization 阶段:预算 ${PIPELINE_OPT_MAX} 次,已用 ${PIPELINE_OPT_COUNT} 次,剩 ${remain} 次。"
-    echo "[ascendc-eval] 先 Read .claude/skills/ops-profiling/SKILL.md,再读取真实逐 case 结果并修改 kernel;源码变化后重跑本入口。"
+    echo "[ascendc-eval] 先 Read $WORK_ROOT/.claude/skills/ops-profiling/SKILL.md,再读取真实逐 case 结果并修改 kernel;源码变化后重跑本入口。"
     echo "[ascendc-eval] .best.tar.gz 只在 speedup 更高时才替换 —— 优化失败不会覆盖已知最佳版本。"
   fi
 
 }
 
-# task_state.json 与当前候选 metrics 分离。进入 optimization 后，即使新候选编译/运行失败、
-# metrics.json 被失败结果覆盖，历史正确实现仍然存在，Stop 门禁也不能忘掉尚未用完的预算。
-# 每次实际 optimization 调用一开始就同步剩余预算；最后一次即使失败也按 best 放行。
 sync_task_state_budget() {
   [[ "$AGENT_SIDE" == "1" && "$PIPELINE_PHASE" == "optimization" \
       && -f "$TASK_STATE_FILE" ]] || return 0
@@ -566,9 +530,6 @@ if [[ "$AGENT_SIDE" == "1" ]]; then
       -type f ! -name '*.so' ! -name '*.a' ! -name '*.o' ! -name '*.whl' \
       ! -name '.eval_last.log' ! -name 'performance.json' ! -name 'preformance.json' \
       -print0 2>/dev/null | sort -z | xargs -0 sha256sum 2>/dev/null | sha256sum | cut -d' ' -f1)
-  # 改错目录检测:工程仍是未修改的预生成骨架(与 prepare 落盘的骨架哈希一致),而
-  # output/submission/ 下却有源码文件 —— agent 在错误的目录里写代码,改动从未进入打包
-  # 范围,报错才会逐字节重复。在 dedup 之前先提醒,第一次提交就能发现。
   _WRONG_DIR=0
   _STRAY_SRC=""
   _SKEL_HASH_FILE="$STATE_DIR/.${OP_NAME}_skeleton.hash"
@@ -581,21 +542,23 @@ if [[ "$AGENT_SIDE" == "1" ]]; then
   fi
   if [[ "$_WRONG_DIR" == "1" ]]; then
     echo "[ascendc-eval] ⚠⚠⚠ 你可能改错了目录 ⚠⚠⚠"
-    echo "[ascendc-eval] $OP_NAME/ 仍是未修改的预生成骨架,但 output/submission/ 下发现源码文件:"
+    echo "[ascendc-eval] $SRC_DIR 仍是未修改的预生成骨架,但 $WORK_ROOT/output/submission/ 下发现源码文件:"
     echo "[ascendc-eval]   $_STRAY_SRC"
-    echo "[ascendc-eval] 评测只打包 $SRC_DIR —— 你写在 output/submission/ 下的代码从未被评测,"
+    echo "[ascendc-eval] 评测只打包 $SRC_DIR —— 你写在 $WORK_ROOT/output/submission/ 下的代码从未被评测,"
     echo "[ascendc-eval] 报错才会和上次一模一样。正确做法:把你写的文件合并进 $SRC_DIR"
-    echo "[ascendc-eval] (覆盖骨架同名文件),再重跑本命令。output/submission/ 只放 tarball 产物。"
+    echo "[ascendc-eval] (覆盖骨架同名文件),再重跑本命令。$WORK_ROOT/output/submission/ 只放 tarball 产物。"
   fi
   _HASH_FILE="$STATE_DIR/.${OP_NAME}_last.hash"
   if [[ -n "$CUR_HASH" && -f "$_HASH_FILE" && -f "$OUT_DIR/metrics.json" \
         && "$CUR_HASH" == "$(cat "$_HASH_FILE" 2>/dev/null)" ]]; then
-    echo "[ascendc-eval] {op}/ 源码与上次评测完全一致 → 复用上次结论,跳过编译/对拍/性能(不消耗预算)"
+    echo "[ascendc-eval] 源码未变化，本次未重新评测（复用上次结论，不消耗预算）"
+    echo "[ascendc-eval] 实际检查目录：$SRC_DIR"
+    echo "[ascendc-eval] 若刚修改过代码，请确认修改文件位于此目录。"
     if [[ "$_WRONG_DIR" == "0" ]]; then
       _STRAY_SRC=$(find "$WORK_ROOT/output/submission" -type f \
           \( -name '*.cpp' -o -name '*.h' -o -name '*.hpp' -o -name '*.cc' \
              -o -name '*.py' -o -name 'CMakeLists.txt' \) 2>/dev/null | head -1)
-      [[ -n "$_STRAY_SRC" ]] && echo "[ascendc-eval] ⚠ 但 output/submission/ 下有源码文件(如 $_STRAY_SRC)——评测只打包 $SRC_DIR,如果你在 submission 下写代码,改动从未被评测,请合并进工程目录再提交"
+      [[ -n "$_STRAY_SRC" ]] && echo "[ascendc-eval] ⚠ 但 $WORK_ROOT/output/submission/ 下有源码文件(如 $_STRAY_SRC)——评测只打包 $SRC_DIR,如果你在 submission 下写代码,改动从未被评测,请合并进工程目录再提交"
     fi
     python3 -c "import json;d=json.load(open('$OUT_DIR/metrics.json'));p=d.get('perf_data') or {};print('[ascendc-eval] cached evaluation — operator_valid=%s task_complete=%s ast_check_ok=%s correctness_ok=%s speedup_vs_torch=%s'%(d.get('operator_valid',d.get('success')),d.get('task_complete'),d.get('ast_check_ok'),d.get('correctness_ok'),p.get('speedup_vs_torch')))" 2>/dev/null || true
     exit 0
@@ -626,8 +589,6 @@ print(int(data.get("gen_count") or 0), int(data.get("opt_count") or 0))' 2>/dev/
   pipeline_status_write
   sync_task_state_budget
   echo "[pipeline-budget] phase=$PIPELINE_PHASE attempt=$PIPELINE_ATTEMPT/$PIPELINE_LIMIT"
-  # 只有预算内的候选才能打包并参与 best 比较。第 limit+1 次之后的源码
-  # 未经评测，无论当前目录里还留有什么旧日志/性能文件，都不得影响 .best。
   if ! pipeline_over_limit; then
     pack_candidate || true
   fi
@@ -636,9 +597,6 @@ fi
 _on_exit() {
   local rc=$?
   [[ "$AGENT_SIDE" == "1" ]] || return 0
-  # 只有本次确实在预算内执行了评测，才能用 metrics 认证当前源码。
-  # 超限分支在 Step0 前退出，metrics.json 仍属于上一版源码；若在此读取，
-  # 会把旧的 correctness/speedup 错贴到未评测的当前代码上。
   if [[ "$PIPELINE_ATTEMPT" =~ ^[0-9]+$ ]] && ! pipeline_over_limit; then
     promote_candidate
   fi
@@ -658,16 +616,11 @@ _on_exit() {
 }
 trap _on_exit EXIT
 
-# 超限调用只落状态并保留最佳提交物，不能再进入解包、编译、对拍和上板。之前第 N+1 次
-# 仍会把整条 pipeline 跑完，watcher 虽最终能取消 session，昂贵工作已经发生。
 if [[ "$AGENT_SIDE" == "1" ]] && pipeline_over_limit; then
   echo "[pipeline-budget] budget already exhausted; skip evaluation work"
   exit 0
 fi
 
-# 走到这里说明本次要对当前源码开始一次新评测。哈希缓存分支已在上方
-# 返回，因此下列文件都是上一版源码的遗留结果，不能再被 EXIT trap、case 统计
-# 或下一轮 Agent 当成当前结果。本轮各阶段会按实际进展重新产生它们。
 rm -f "$OUT_DIR/metrics.json" "$OUT_DIR/metrics_error.log" \
       "$OUT_DIR/verify_report.json" "$OUT_DIR/performance.json"
 
@@ -683,10 +636,8 @@ fi
 mkdir -p "$WORK"
 if [[ ! -f "$IMPL_FILE" ]]; then
   if [[ ! -d "$SRC_DIR" ]]; then
-    # 工程目录压根不存在:agent 在没建 {op_name}/ 工程时就跑了评测(逻辑错,不是 infra)。
-    # 明确告诉它先建工程,而不是一句 "submission missing" 让它猜。
     write_metrics false false false "" "" "" \
-      "工程目录不存在: $SRC_DIR —— 先创建 $OP_NAME/ 工程(kernel/ + model_new_ascendc.py),再跑固定评测入口;不要在没建工程时跑评测"
+      "工程目录不存在: $SRC_DIR —— 先创建 $SRC_DIR 工程(kernel/ + model_new_ascendc.py),再跑固定评测入口;不要在没建工程时跑评测"
   else
     # 工程在,但提交物没出来(pack 失败或 judge 侧没就位)。
     write_metrics false false false "" "" "" "submission missing: $IMPL_FILE (工程目录 $SRC_DIR 存在但打包未产出 tarball)"
@@ -729,8 +680,6 @@ find "$TASK_DIR" \( -name '*.so' -o -name '*.a' -o -name '*.o' -o -name '*.whl' 
      -exec rm -rf {} + 2>/dev/null || true
 
 TASK_SRC="${TASK_FILE:-input/${OP_NAME}.py}"
-# 与 --impl / --out_dir 保持一致:相对 --task 固定从 workdir 解析，避免 agent
-# 在 <op>/kernel/build/ 等子目录调用时把 input/ 错当成当前目录的子目录。
 case "$TASK_SRC" in /*) ;; *) TASK_SRC="$WORK_ROOT/$TASK_SRC";; esac
 JSON_SRC="$(dirname "$TASK_SRC")/${OP_NAME}.json"
 TASK_SRC="$(realpath "$TASK_SRC" 2>/dev/null || echo "$TASK_SRC")"
@@ -833,10 +782,6 @@ KERNEL_DIR="$TASK_DIR/kernel"
 BUILDER="$SK/$TRANS_SKILL/scripts/build_ascendc.py"
 _CLEAN=(--clean); [[ "$INCREMENTAL" == "1" ]] && _CLEAN=()
 if ! (
-  # 不要用 set -e:在 `if ! ( ... )` 里 `!` 会禁用子 shell 的 errexit,build_ascendc
-  # 失败时 set -e 不退出,继续跑 setup.py(被 || echo 兜底成 exit 0),子 shell 退出码变 0,
-  # `if !` 看不到失败 → 编译失败被错标成后续的 op_not_registered(.so NONE)。
-  # 改为 build 失败后 `|| exit $?` 显式传播退出码。
   cd "$WORK"
   rm -rf "$KERNEL_DIR/dist"
   WORKDIR="$WORK" ASCEND_HOME_PATH="$ASCEND_HOME_PATH" \
@@ -878,11 +823,6 @@ if ! inject_baseline; then
   echo "[ascendc-eval] baseline re-inject failed"; fail_hint; exit 1
 fi
 
-# Step2a: is the operator actually reachable via torch.ops.npu? Packaging mistakes
-# (nested NpuExtension name, .so built where the submission's loader never globs,
-# silently skipped wheel install) survive compile and only blow up inside Step2b
-# as an AttributeError, which then gets reported as correctness_failed ->
-# "D类-精度不匹配". Catch it here, needs no NPU, and give it its own error_type.
 SMOKE="${_SCRIPT_DIR}/check_op_registered.py"
 if [[ -f "$SMOKE" ]]; then
   echo "[ascendc-eval] Step2a op registration smoke (no NPU)"
@@ -938,8 +878,6 @@ if ! VER_OUT=$(cd "$WORK" && export WORKDIR="$WORK" PYTHONPATH="$SK/$TRANS_SKILL
   extract_case_stats
   write_metrics true false false "" "" "" "数值对拍失败(Result: fail;完整对拍输出如下)" "$OUT_DIR/verify.log" \
     "$_VER_TYPE"
-  # 改动3扩展: 对拍失败把 Comparison 段直接打到 stderr(进工具结果)。否则 agent 只拿到
-  # "D类-精度不匹配"一句,没有 max_abs_diff/tolerance/失配元素数,只能盲调数值。
   echo "--- verify 对拍失败详情(完整日志见 $OUT_DIR/verify.log) ---" >&2
   if grep -q "Comparison" "$OUT_DIR/verify.log"; then
     sed -n '/Comparison/,$p' "$OUT_DIR/verify.log" | head -60 >&2

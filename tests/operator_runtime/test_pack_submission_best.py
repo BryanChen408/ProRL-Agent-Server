@@ -147,7 +147,8 @@ def test_pack_only_keeps_public_path_discoverable_without_pre_evaluation_best(tm
     assert resolved_candidate.exists() and public.exists()
     assert resolved_candidate.read_bytes() == public.read_bytes()
     assert not _best(tmp_path).exists() and not _meta(tmp_path).exists()
-    assert f"output/submission/{OP}_impl.tar.gz" in proc.stdout
+    assert f"当前候选已打包:{public}" in proc.stdout
+    assert f"judge 取件顺序:{_best(tmp_path)} → {public}" in proc.stdout
     assert str(resolved_candidate) not in proc.stdout
 
 

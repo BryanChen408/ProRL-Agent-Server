@@ -191,7 +191,9 @@ if [[ "$AGENT_SIDE" == "1" ]]; then
   _HASH_FILE="$STATE_DIR/.${OP_NAME}_last.hash"
   if [[ -n "$CUR_HASH" && -f "$_HASH_FILE" && -f "$OUT_DIR/metrics.json" \
         && "$CUR_HASH" == "$(cat "$_HASH_FILE" 2>/dev/null)" ]]; then
-    echo "[ascendc-eval] {op}/ 源码与上次评测完全一致 → 复用上次结论,跳过编译/对拍/性能(不消耗预算)"
+    echo "[ascendc-eval] 源码未变化，本次未重新评测（复用上次结论，不消耗预算）"
+    echo "[ascendc-eval] 实际检查目录：$SRC_DIR"
+    echo "[ascendc-eval] 若刚修改过代码，请确认修改文件位于此目录。"
     python3 -c "import json;d=json.load(open('$OUT_DIR/metrics.json'));p=d.get('perf_data') or {};print('[ascendc-eval] cached verdict — success=%s ast_check_ok=%s correctness_ok=%s speedup_vs_torch=%s'%(d.get('success'),d.get('ast_check_ok'),d.get('correctness_ok'),p.get('speedup_vs_torch')))" 2>/dev/null || true
     exit 0
   fi

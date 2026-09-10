@@ -6,6 +6,7 @@ set -uo pipefail
 #   --promote:读取本次 metrics，将“实际被评测的 candidate”按 reward 顺序提升为 best。
 # Agent 只调用固定评测入口；公开提交路径仍是 output/submission/{op}_impl.tar.gz。
 
+_TOOLS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 OP_NAME="" CANDIDATE="" PUBLIC_TARBALL="" METRICS="" PROMOTE=0
 LEGACY_VERIFIED="" LEGACY_SPEEDUP=""
 while [[ $# -gt 0 ]]; do
@@ -18,14 +19,14 @@ while [[ $# -gt 0 ]]; do
     --verified) LEGACY_VERIFIED=1; shift;;
     --speedup) LEGACY_SPEEDUP="$2"; shift 2;;
     -h|--help)
-      echo "usage: bash tools/pack_submission.sh <op_name> [--candidate <tar>] [--public <tar>]"
-      echo "       bash tools/pack_submission.sh <op_name> --promote --candidate <evaluated-tar> --metrics <metrics.json>"
+      echo "usage: bash \"$_TOOLS_DIR/pack_submission.sh\" <op_name> [--candidate <tar>] [--public <tar>]"
+      echo "       bash \"$_TOOLS_DIR/pack_submission.sh\" <op_name> --promote --candidate <evaluated-tar> --metrics <metrics.json>"
       exit 0;;
     *) [[ -z "$OP_NAME" ]] && { OP_NAME="$1"; shift; } \
          || { echo "[pack] unknown arg: $1" >&2; exit 1; };;
   esac
 done
-[[ -z "$OP_NAME" ]] && { echo "[pack] usage: bash tools/pack_submission.sh <op_name>" >&2; exit 1; }
+[[ -z "$OP_NAME" ]] && { echo "[pack] usage: bash \"$_TOOLS_DIR/pack_submission.sh\" <op_name>" >&2; exit 1; }
 
 WORKDIR="${WORKDIR:-$PWD}"
 WORKDIR="$(cd "$WORKDIR" 2>/dev/null && pwd)" \
@@ -35,7 +36,6 @@ SUB_DIR="$WORKDIR/output/submission"
 DEFAULT_TARBALL="$SUB_DIR/${OP_NAME}_impl.tar.gz"
 BEST_TARBALL="$SUB_DIR/${OP_NAME}_impl.best.tar.gz"
 BEST_META="$SUB_DIR/.${OP_NAME}_impl.best.meta.json"
-_TOOLS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 [[ -f "$_TOOLS_DIR/env.sh" ]] && source "$_TOOLS_DIR/env.sh"
 PY_BIN="${PY_BIN:-${AST_CHECK_PYTHON:-python3}}"
 
@@ -75,15 +75,15 @@ if [[ "$PROMOTE" != "1" ]]; then
     echo "[pack] FAILED: 工程目录不存在: $TASK_DIR(应为 {workdir}/{op_name}/)" >&2; exit 1
   fi
   MISSING=()
-  [[ -f "$TASK_DIR/model_new_ascendc.py" ]] || MISSING+=("model_new_ascendc.py")
-  [[ -d "$TASK_DIR/kernel" ]]              || MISSING+=("kernel/")
+  [[ -f "$TASK_DIR/model_new_ascendc.py" ]] || MISSING+=("$TASK_DIR/model_new_ascendc.py")
+  [[ -d "$TASK_DIR/kernel" ]]              || MISSING+=("$TASK_DIR/kernel/")
   if [[ ${#MISSING[@]} -gt 0 ]]; then
     echo "[pack] FAILED: 缺少必需件: ${MISSING[*]}" >&2
     echo "[pack] 提交物必须含 model_new_ascendc.py + kernel/(op_host/ op_kernel/ ops.h register.cpp CMakeLists.txt setup.py)" >&2
     exit 1
   fi
   for want in kernel/CMakeLists.txt kernel/op_host kernel/op_kernel; do
-    [[ -e "$TASK_DIR/$want" ]] || echo "[pack] WARN: 建议补齐 $want(judge 侧要从源码重编)"
+    [[ -e "$TASK_DIR/$want" ]] || echo "[pack] WARN: 建议补齐 $TASK_DIR/$want(judge 侧要从源码重编)"
   done
 
   # AST 只用于提示，不参与 best 排序。完整排序只能来自本 candidate 的 metrics。
@@ -119,8 +119,8 @@ if [[ "$PROMOTE" != "1" ]]; then
   fi
   SIZE=$(du -h "$PUBLIC_TARBALL" 2>/dev/null | cut -f1)
   NFILES=$(tar tzf "$CANDIDATE" 2>/dev/null | grep -vc '/$')
-  echo "[pack] 当前候选已打包:${PUBLIC_TARBALL#$WORKDIR/}；评测完成前不会更新 best | ${NFILES} 文件 ${SIZE}"
-  echo "[pack] judge 取件顺序:${OP_NAME}_impl.best.tar.gz → ${OP_NAME}_impl.tar.gz"
+  echo "[pack] 当前候选已打包:$PUBLIC_TARBALL；评测完成前不会更新 best | ${NFILES} 文件 ${SIZE}"
+  echo "[pack] judge 取件顺序:$BEST_TARBALL → $PUBLIC_TARBALL"
   exit 0
 fi
 
@@ -355,5 +355,5 @@ case "$ACTION" in
   *)
     echo "[pack] FAILED: best 提升器返回异常:$PROMOTION" >&2; exit 1;;
 esac
-echo "[pack] judge 取件顺序:${OP_NAME}_impl.best.tar.gz → ${OP_NAME}_impl.tar.gz"
+echo "[pack] judge 取件顺序:$BEST_TARBALL → $PUBLIC_TARBALL"
 exit 0

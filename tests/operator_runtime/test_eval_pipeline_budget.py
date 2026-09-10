@@ -141,6 +141,25 @@ def test_status_agrees_with_watcher_cancel_decision(tmp_path):
     assert cancel is True and "11>10" in reason
 
 
+def test_failure_feedback_paths_do_not_follow_shell_cwd(tmp_path):
+    root = tmp_path / "workspace with spaces"
+    nested = root / "op_x" / "kernel"
+    out_dir = root / "judge_out"
+    nested.mkdir(parents=True)
+    out_dir.mkdir()
+    (out_dir / "metrics.json").write_text(json.dumps({
+        "success": False, "error_type": "ascendc_compile_failed",
+    }))
+    (out_dir / "metrics_error.log").write_text("compiler error\n")
+    out = _run("fail_hint", "fail_hint", {
+        "PATH": "/usr/bin:/bin:/usr/local/bin", "WORK_ROOT": str(root),
+        "SRC_DIR": str(root / "op_x"), "OUT_DIR": str(out_dir),
+    }, nested)
+    assert f"Read {root}/.claude/skills/tilelang2ascend-translator/SKILL.md" in out
+    assert f"完整错误在 {out_dir}/metrics_error.log" in out
+    assert f"只改 {root}/op_x 下实现" in out
+
+
 def _prompt_env(**over: str) -> dict[str, str]:
     env = {
         "PATH": "/usr/bin:/bin:/usr/local/bin",
@@ -148,6 +167,7 @@ def _prompt_env(**over: str) -> dict[str, str]:
         "PIPELINE_OPT_MAX": "4", "PIPELINE_OPT_COUNT": "0",
         "OUT_DIR": ".",   # _run 的 cwd=tmp_path,配合 _seed_metrics 使用
         "TASK_STATE_FILE": "task_state.json",
+        "WORK_ROOT": "/opt/workspace/agent_workdir",
     }
     env.update(over)
     return env
@@ -175,7 +195,7 @@ def test_prompt_says_not_met_below_target(tmp_path):
     assert "未达标" in out and "不要结束任务" in out
     assert "0.859x" in out and "1.1x" in out
     assert "剩 4 次" in out
-    assert "Read .claude/skills/ops-profiling/SKILL.md" in out
+    assert "Read /opt/workspace/agent_workdir/.claude/skills/ops-profiling/SKILL.md" in out
 
 
 def test_prompt_stops_optimization_above_target(tmp_path):
@@ -235,6 +255,7 @@ def test_prompt_is_also_written_into_metrics_json(tmp_path):
     assert ns["phase_next"] == "optimization"
     assert ns["optimization_remaining"] == 4
     assert "不要结束任务" in ns["action"]
+    assert "Read /opt/workspace/agent_workdir/.claude/skills/ops-profiling/SKILL.md" in ns["action"]
     # 原有键一个都不能动:judge 侧的 reward 只认这几个
     for k in ("success", "error_type", "perf_data", "ast_check_ok", "correctness_ok"):
         assert d[k] == _METRICS[k]
