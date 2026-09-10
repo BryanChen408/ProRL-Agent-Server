@@ -105,7 +105,9 @@ def _pipeline_call_id(messages: list[dict[str, Any]]) -> str | None:
     return None
 
 
-def _prepare_attempt_span_state(kept: list[CompletionRecord]) -> dict[str, Any]:
+def _prepare_attempt_span_state(
+    kept: list[CompletionRecord], terminal_tool_results: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     """Session-wide pre-pass for P3 attempt spans (plan §6.2/§6.3).
 
     Both products are derived ONLY from server-side records:
@@ -123,7 +125,7 @@ def _prepare_attempt_span_state(kept: list[CompletionRecord]) -> dict[str, Any]:
         span: -1 = segment 0 (trace0), k = continuation of event k's segment.
     """
     if _attempt_spans.t3a_on():
-        return _prepare_t3a_attempt_span_state(kept)
+        return _prepare_t3a_attempt_span_state(kept, terminal_tool_results)
     verdict_by_call_id: dict[str, Any] = {}
     ordinal_by_completion_id: dict[str, tuple[int, str]] = {}
     prev_ordinal_by_completion_id: dict[str, int] = {}
@@ -149,6 +151,7 @@ def _prepare_attempt_span_state(kept: list[CompletionRecord]) -> dict[str, Any]:
         if call_id:
             ordinal_by_completion_id[completion.completion_id] = (next_ordinal, call_id)
             next_ordinal += 1
+    verdict_by_call_id.update(terminal_tool_results or {})
     _attempt_spans.claim_backgrounded_verdicts(
         ordinal_by_completion_id, verdict_by_call_id, calls_in_order
     )
@@ -212,7 +215,9 @@ def _t3a_sidecar_reads(assistant_msg: dict[str, Any]) -> list[tuple[str, str]]:
     return out
 
 
-def _prepare_t3a_attempt_span_state(kept: list[CompletionRecord]) -> dict[str, Any]:
+def _prepare_t3a_attempt_span_state(
+    kept: list[CompletionRecord], terminal_tool_results: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     """t3a(cannbot 复刻)版 session 级 pre-pass —— 与 t2a 版同构,只在
     POLAR_T3A_ATTEMPT_SPANS=1 时被 _prepare_attempt_span_state 调用。
 
@@ -233,9 +238,8 @@ def _prepare_t3a_attempt_span_state(kept: list[CompletionRecord]) -> dict[str, A
     sidecar_bound: dict[str, str] = {}  # 读 sidecar 的调用 id → 原调用 id
     seen_blocks: set[tuple[str, int, int]] = set()
     next_ordinal = 0
-    for completion in kept:
-        trace = build_trace_from_completion(completion)
-        for message in trace.prompt_messages:
+    def collect_verdicts(messages):
+        for message in messages:
             if not isinstance(message, dict):
                 continue
             bound_id = None
@@ -258,6 +262,9 @@ def _prepare_t3a_attempt_span_state(kept: list[CompletionRecord]) -> dict[str, A
                     continue
                 seen_blocks.add(key)
                 blocks.append((norm_cmd, score))
+    for completion in kept:
+        trace = build_trace_from_completion(completion)
+        collect_verdicts(trace.prompt_messages)
         prev_ordinal_by_completion_id[completion.completion_id] = next_ordinal - 1
         call_id = None
         for message in trace.response_messages:
@@ -272,6 +279,10 @@ def _prepare_t3a_attempt_span_state(kept: list[CompletionRecord]) -> dict[str, A
             ordinal_by_completion_id[completion.completion_id] = (next_ordinal, call_id)
             attempts.append((next_ordinal, call_id, _attempt_spans._normalize_command(cmd)))
             next_ordinal += 1
+    collect_verdicts([
+        {"role": "tool", "tool_call_id": call_id, "content": content}
+        for call_id, content in (terminal_tool_results or {}).items()
+    ])
     # 配对:身份绑定优先;未绑定 attempt 按命令文本从 FIFO 池取(内联注入形态)
     score_by_call_id: dict[str, float | None] = dict(bound_scores)
     queues: dict[str, list[float | None]] = {}
@@ -515,11 +526,48 @@ class PrefixMergingBuilder(BaseTrajectoryBuilder):
         # POLAR_ATTEMPT_CREDIT=0 关). Created ONCE per trajectory and shared by
         # every chain/segment finalization so event ordinals are trajectory-level
         # and verdicts pair across chain breaks.
+        recover_budget = session.termination_reason in {
+            "agent_context_limit_exceeded", "agent_time_budget_exceeded",
+        }
         span_state = (
-            _prepare_attempt_span_state(filter_result.kept)
-            if _attempt_spans.env_on()
+            _prepare_attempt_span_state(filter_result.kept, session.terminal_tool_results)
+            if _attempt_spans.env_on() or recover_budget
             else None
         )
+        budget_metadata = {}
+        if recover_budget:
+            last_complete = None
+            for i, completion in enumerate(filter_result.kept):
+                event = span_state["ordinal_by_completion_id"].get(completion.completion_id)
+                if event is None:
+                    continue
+                ordinal, call_id = event
+                complete = (
+                    span_state["score_by_call_id"].get(call_id) is not None
+                    if "score_by_call_id" in span_state
+                    else _attempt_spans.parse_verdict(
+                        span_state["verdict_by_call_id"].get(call_id)
+                    ) is not None
+                )
+                if complete:
+                    last_complete = (i, completion.completion_id, ordinal, call_id)
+            # Include the completed invocation, but none of the following repair
+            # work: its outcome has not been observed. Never modify sampled tokens.
+            cutoff = last_complete[0] if last_complete is not None else -1
+            span_state["budget_completion_ids"] = {
+                c.completion_id for c in filter_result.kept[:cutoff + 1]
+            }
+            budget_metadata = {
+                "termination_reason": session.termination_reason,
+                "completed_pipeline_prefix": {
+                    "completion_id": last_complete[1],
+                    "attempt_ordinal": last_complete[2],
+                    "tool_call_id": last_complete[3],
+                } if last_complete is not None else None,
+                "incomplete_pipeline_completion_ids": [
+                    c.completion_id for c in filter_result.kept[cutoff + 1:]
+                ],
+            }
         for chain_index, chain in enumerate(chains):
             start = 0
             segment_index = 0
@@ -541,12 +589,14 @@ class PrefixMergingBuilder(BaseTrajectoryBuilder):
                 # load-bearing: a trace that was ALREADY all-zero (degenerate empty
                 # responses) must still be emitted, or flipping the flag on would
                 # silently drop traces this feature never touched.
-                if finalized.trace.metadata.get("post_best_masked_tokens") and not any(
+                if (
+                    finalized.trace.metadata.get("post_best_masked_tokens")
+                    or finalized.trace.metadata.get("incomplete_pipeline_masked_tokens")
+                ) and not any(
                     finalized.trace.loss_mask
                 ):
-                    stats["traces_dropped_post_best"] = (
-                        stats.get("traces_dropped_post_best", 0) + 1
-                    )
+                    key = "traces_dropped_incomplete_pipeline" if recover_budget else "traces_dropped_post_best"
+                    stats[key] = stats.get(key, 0) + 1
                 else:
                     final_traces.append(finalized.trace)
                 stats["completions_preserved"] += finalized.kept_count
@@ -604,13 +654,19 @@ class PrefixMergingBuilder(BaseTrajectoryBuilder):
         upstream_truncated = bool(upstream_failures) and _upstream_failure_truncated_session(
             dict(session.metadata), len(session.completions)
         )
-        _non_trainable = session_had_abort or session_spanned or upstream_truncated
+        missing_prefix = recover_budget and not any(any(t.loss_mask) for t in final_traces)
+        _non_trainable = (
+            session_had_abort or session_spanned
+            or (upstream_truncated and not recover_budget) or missing_prefix
+        )
         if session_had_abort:
             _span_error: str | None = "aborted generation (weight-update cutoff)"
         elif session_spanned:
             _span_error = f"policy_version span (mixed-weight): {sorted(session_versions)}"
-        elif upstream_truncated:
+        elif upstream_truncated and not recover_budget:
             _span_error = f"upstream engine failure truncated the session: {upstream_failures}"
+        elif missing_prefix:
+            _span_error = "budget exhausted before any complete trainable pipeline"
         else:
             _span_error = None
         # 截断事件计数(completion 级,供截断惩罚):空截断轮修复后不再单独成
@@ -638,6 +694,7 @@ class PrefixMergingBuilder(BaseTrajectoryBuilder):
                 "completion_filter": filter_result.metadata,
                 "upstream_failures": upstream_failures or None,
                 "truncation_events": truncation_events,
+                **budget_metadata,
                 **_top_level_scheduler_metadata(session.metadata),
             },
             traces=final_traces,
@@ -772,7 +829,8 @@ class PrefixMergingBuilder(BaseTrajectoryBuilder):
         # Detection + verdicts come from the session-wide pre-pass (span_state);
         # here we only map kept events to their response-token offsets — anchored
         # at the CALLING turn's response start (事件段从发起调用的那一轮开始).
-        _want_spans = span_state is not None
+        _want_spans = span_state is not None and _attempt_spans.env_on()
+        budget_ids = span_state.get("budget_completion_ids") if span_state is not None else None
         event_records: list[tuple[int, int, str]] = []
         # Post-best masking: chain position of the best attempt's calling turn;
         # every LATER turn is post-best. None -> nothing to mask here.
@@ -780,7 +838,7 @@ class PrefixMergingBuilder(BaseTrajectoryBuilder):
         # 的 R_e=0 负项柔和接管(A/B 对照用);spans 与 credit 不受影响。
         _pb = (
             self._post_best_pos(chain, span_state, chain_continues)
-            if _want_spans and _attempt_spans.post_best_mask_on()
+            if _want_spans and budget_ids is None and _attempt_spans.post_best_mask_on()
             else None
         )
         _pb_masked = 0
@@ -795,7 +853,10 @@ class PrefixMergingBuilder(BaseTrajectoryBuilder):
         else:
             _pb_masked += self._append_response_tokens(
                 first_trace, stream_ids, response_slots, loss_mask,
-                force_zero_loss=_pb is not None and 0 > _pb,
+                force_zero_loss=(
+                    chain[0].completion_id not in budget_ids if budget_ids is not None
+                    else _pb is not None and 0 > _pb
+                ),
             )
         if _want_spans:
             _ev = span_state["ordinal_by_completion_id"].get(chain[0].completion_id)
@@ -877,7 +938,10 @@ class PrefixMergingBuilder(BaseTrajectoryBuilder):
             else:
                 _pb_masked += self._append_response_tokens(
                     Ci_trace, stream_ids, response_slots, loss_mask,
-                    force_zero_loss=_pb is not None and i > _pb,
+                    force_zero_loss=(
+                        chain[i].completion_id not in budget_ids if budget_ids is not None
+                        else _pb is not None and i > _pb
+                    ),
                 )
             if _want_spans:
                 _ev = span_state["ordinal_by_completion_id"].get(chain[i].completion_id)
@@ -932,7 +996,8 @@ class PrefixMergingBuilder(BaseTrajectoryBuilder):
                 _metadata["attempt_spans"] = _spans
 
         if _pb_masked:
-            _metadata["post_best_masked_tokens"] = _pb_masked
+            key = "incomplete_pipeline_masked_tokens" if budget_ids is not None else "post_best_masked_tokens"
+            _metadata[key] = _pb_masked
 
         trace = Trace(
             prompt_ids=prompt_ids,

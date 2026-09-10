@@ -27,7 +27,7 @@ from polar.gateway.storage import SessionStore
 from polar.agent.base import BaseHarness
 from polar.agent.factory import create_harness
 from polar.agent.models import AgentRunResult
-from polar.agent.presets.claude_code import annotate_completion_roles
+from polar.agent.presets.claude_code import annotate_completion_roles, read_run_result
 from polar.run_namespace import run_dir_name, run_id_from_metadata
 from polar.rollout.models import (
     NodeHeartbeatRequest,
@@ -854,19 +854,31 @@ class GatewayNodeManager:
         managed.timer.mark("build", "started")
         try:
             trajectory = await self._await_with_budget(
-                asyncio.to_thread(self._build_trajectory, request, managed.session_dir),
+                asyncio.to_thread(
+                    self._build_trajectory, request, managed.session_dir,
+                    None if managed.cancel_requested else agent_result,
+                ),
                 managed,
             )
         finally:
             managed.timer.mark("build", "finished")
 
         error = trajectory.error
-        if agent_result.status == "timeout":
+        recovered_prefix = (
+            trajectory.status == "COMPLETED"
+            and trajectory.metadata.get("completed_pipeline_prefix") is not None
+        )
+        if recovered_prefix:
+            trajectory = trajectory.model_copy(update={
+                "metadata": {**trajectory.metadata, "agent_error": agent_result.error},
+            })
+        elif agent_result.status == "timeout":
             if (
                 managed.postrun_deadline is not None
                 and not managed.cancel_requested
                 and trajectory.status == "COMPLETED"
                 and trajectory.traces
+                and request.evaluator.strategy != "operator_judge"
             ):
                 # Budget exhaustion is a normal end to solving. Preserve valid
                 # traces for RL; builder errors and policy cutoffs stay errors.
@@ -974,10 +986,36 @@ class GatewayNodeManager:
             }
         )
 
-    def _build_trajectory(self, request: SessionDispatchRequest, session_dir: Path | None = None) -> Trajectory:
+    def _build_trajectory(
+        self, request: SessionDispatchRequest, session_dir: Path | None = None,
+        agent_result: AgentRunResult | None = None,
+    ) -> Trajectory:
         completion_session = self.storage.load_completion_session(request.session_id)
         if request.agent.harness == "claude_code" and session_dir is not None:
             annotate_completion_roles(completion_session, session_dir)
+        if (
+            agent_result is not None
+            and agent_result.status in ("failed", "timeout")
+            and request.evaluator is not None
+            and request.evaluator.strategy == "operator_judge"
+        ):
+            cli_result, tool_results = (
+                read_run_result(session_dir)
+                if request.agent.harness == "claude_code" and session_dir is not None
+                else ({}, {})
+            )
+            if agent_result.status == "timeout":
+                completion_session.termination_reason = "agent_time_budget_exceeded"
+            elif (
+                cli_result.get("is_error") is True
+                and cli_result.get("api_error_status") == 400
+                and any(marker in str(cli_result.get("result", "")).lower() for marker in (
+                    "maximum context length", "context_length_exceeded",
+                ))
+            ):
+                completion_session.termination_reason = "agent_context_limit_exceeded"
+            if completion_session.termination_reason:
+                completion_session.terminal_tool_results = tool_results
         builder = self.builders.create(request.builder)
         result = builder.build(completion_session)
         if asyncio.iscoroutine(result):

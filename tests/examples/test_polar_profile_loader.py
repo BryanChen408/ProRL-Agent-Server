@@ -41,10 +41,10 @@ def test_real_profiles_separate_attempt_credit_from_call_limits(tmp_path, name):
     op = topology["rollout"]["operator_profiles"]["operator_npu"]
     command = ClaudeCodeHarness(AgentSpec(**op["agent"])).run_steps("test operator")[0].command
     assert op["timeout_seconds"] == profile["operator"]["timeout_seconds"]
+    assert op["evaluator"]["postrun_timeout_seconds"] == 5400
+    assert op["evaluator"]["config"]["judge_timeout"] == 5400
     assert topology["gateway"]["nodes"][0]["inference"]["base_url"] == profile["service"]["sglang_router_url"]
     if name == "t3a":
-        assert op["evaluator"]["postrun_timeout_seconds"] == 5400
-        assert op["evaluator"]["config"]["judge_timeout"] == 5400
         assert env["POLAR_T3A_ATTEMPT_SPANS"] == "1"
         assert env["POLAR_PIPELINE_BUDGET_ENABLED"] == "0"
         assert env["POLAR_GEN_PIPELINE_MAX"] == env["POLAR_OPT_PIPELINE_MAX"] == ""
@@ -53,7 +53,6 @@ def test_real_profiles_separate_attempt_credit_from_call_limits(tmp_path, name):
         assert "max_turns" not in op["agent"]["settings"]
         assert "--max-turns" not in command
     else:
-        assert "postrun_timeout_seconds" not in op["evaluator"]
         assert env["POLAR_T3A_ATTEMPT_SPANS"] == "0"
         assert env["POLAR_PIPELINE_BUDGET_ENABLED"] == "1"
         assert env["POLAR_GEN_PIPELINE_MAX"] == str(profile["operator_runtime"]["budget"]["generation_max"])

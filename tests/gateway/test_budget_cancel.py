@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from pathlib import Path
 from types import SimpleNamespace
 
-from polar.agent.models import AgentSpec
+import pytest
+
+from polar.agent.models import AgentRunResult, AgentSpec
 from polar.gateway.dispatcher import ManagedSession
 from polar.gateway.node import GatewayNodeManager
 from polar.gateway.session import SessionRegistry
@@ -12,7 +15,10 @@ from polar.gateway.storage import SessionStore
 from polar.rollout.models import SessionDispatchRequest, SessionResult, SessionStatus
 from polar.rollout.timer import StageTimer
 from polar.runtime.models import RuntimeSpec
-from polar.trajectory.models import Trace, Trajectory
+from polar.trajectory.models import (
+    CompletionRecord, CompletionSession, EvaluatorSpec, StrategySpec, Trace, Trajectory,
+)
+from polar.trajectory.registry import default_builder_registry
 
 
 def _request() -> SessionDispatchRequest:
@@ -37,6 +43,85 @@ def _managed(tmp_path: Path, *, reason: str | None = "pipeline_budget_exceeded")
         cancel_requested=True,
         cancel_reason=reason,
     )
+
+
+@pytest.mark.parametrize("ending", ["context", "timeout", "other_400", "502", "policy_cutoff", "judge_failure"])
+def test_budget_prefix_is_judged_and_accepted_without_hiding_other_failures(tmp_path, ending):
+    command = "bash tools/ascendc_eval_pipeline.sh --op_name OP --out_dir judge_out"
+    call = {"id": "p1", "type": "function", "function": {
+        "name": "Bash", "arguments": json.dumps({"command": command}),
+    }}
+    records = []
+    for i, prompt in enumerate([[1, 2], [1, 2, 10, 99, 50]]):
+        records.append(CompletionRecord(
+            completion_id=f"c{i}", request={"system": "harness", "messages": []},
+            response={"choices": [{
+                "input_token_ids": prompt, "finish_reason": "stop",
+                "message": {"role": "assistant", "content": "work", "tool_calls": [call] if i == 0 else []},
+                "logprobs": {"content": [
+                    {"token_id": 10 + i, "logprob": -0.1}, {"token_id": 99, "logprob": -0.2},
+                ]},
+            }]}, metadata={"policy_version": 0},
+        ))
+    session = CompletionSession(session_id="s", completions=records)
+    manager = GatewayNodeManager.__new__(GatewayNodeManager)
+    manager.node_id = "node-test"
+    manager.storage = SimpleNamespace(load_completion_session=lambda sid: session.model_copy(deep=True))
+    manager.builders = default_builder_registry()
+    manager.session_registry = SessionRegistry()
+    manager.session_registry.register("s", task_id="t")
+    managed = _managed(tmp_path, reason=None)
+    managed.cancel_requested = ending == "policy_cutoff"
+    managed.cancel_reason = "policy_cutoff" if managed.cancel_requested else None
+    managed.request.agent = AgentSpec(harness="claude_code")
+    managed.request.builder = StrategySpec(strategy="prefix_merging", config={"end_of_turn_token_id": 99})
+    managed.request.evaluator = EvaluatorSpec(strategy="operator_judge", postrun_timeout_seconds=30)
+    managed.agent_result = AgentRunResult(
+        status="timeout" if ending == "timeout" else "failed", return_code=1, error="agent stopped",
+    )
+    log = tmp_path / "logs/agent/claude-code.txt"
+    log.parent.mkdir(parents=True)
+    events = [{"type": "user", "message": {"content": [{
+        "type": "tool_result", "tool_use_id": "p1",
+        "content": "[ascendc-eval] done — success=true correctness_ok=true speedup_vs_torch=2.0",
+    }]}}]
+    if ending != "timeout":
+        events.append({"type": "result", "is_error": True, "api_error_status": 502 if ending == "502" else 400,
+                       "result": "maximum context length is 262144" if ending in {"context", "policy_cutoff", "judge_failure"} else "invalid request"})
+    log.write_text("\n".join(json.dumps(e) for e in events) + '\n{"partial":')
+    judged = []
+
+    async def judge(request, trajectory, **kwargs):
+        judged.append(trajectory)
+        if ending == "judge_failure":
+            raise RuntimeError("judge container unavailable")
+        for trace in trajectory.traces:
+            trace.reward = 0.9
+        return trajectory
+
+    manager._run_eval = judge
+
+    async def run():
+        managed.execution_deadline = asyncio.get_running_loop().time() + 30
+        manager._start_postrun_deadline(managed)
+        return await manager._build_session_result(managed)
+
+    result = asyncio.run(run())
+    assert len(judged) == 1
+    if ending == "judge_failure":
+        assert result.status == "ERROR"
+        assert "judge container unavailable" in result.error
+        assert result.trajectory.metadata["completed_pipeline_prefix"]["tool_call_id"] == "p1"
+        return
+    assert result.trajectory.traces[0].reward == 0.9
+    if ending in {"context", "timeout"}:
+        assert result.status == "COMPLETED"
+        assert result.error is None
+        assert result.trajectory.metadata["completed_pipeline_prefix"]["tool_call_id"] == "p1"
+        assert result.trajectory.traces[0].loss_mask == [1, 1, 0, 0, 0]
+    else:
+        assert result.status == "ERROR"
+        assert "completed_pipeline_prefix" not in result.trajectory.metadata
 
 
 def test_budget_cancel_builds_trainable_partial_result(tmp_path: Path) -> None:

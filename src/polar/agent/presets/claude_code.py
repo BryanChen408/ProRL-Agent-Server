@@ -132,6 +132,34 @@ class ClaudeCodeHarness(BaseHarness):
         ]
 
 
+def read_run_result(session_dir: Path) -> tuple[dict, dict]:
+    """Read the CLI terminal result and tool returns, including a rejected next request."""
+    result, tool_results = {}, {}
+    path = session_dir / "logs/agent/claude-code.txt"
+    if not path.is_file():
+        return result, tool_results
+    with path.open(encoding="utf-8", errors="replace") as stream:
+        for line in stream:
+            try:
+                event = json.loads(line)
+            except ValueError:
+                continue  # A timeout can leave the final JSON line incomplete.
+            if not isinstance(event, dict):
+                continue
+            if event.get("type") == "result":
+                result = event
+            if event.get("type") != "user":
+                continue
+            message = event.get("message")
+            content = message.get("content") if isinstance(message, dict) else None
+            if isinstance(content, list):
+                for block in content:
+                    if isinstance(block, dict) and block.get("type") == "tool_result":
+                        if block.get("tool_use_id"):
+                            tool_results[block["tool_use_id"]] = block.get("content")
+    return result, tool_results
+
+
 def annotate_completion_roles(session: CompletionSession, session_dir: Path) -> None:
     """Join native Claude identities to captured completions by message ID.
 

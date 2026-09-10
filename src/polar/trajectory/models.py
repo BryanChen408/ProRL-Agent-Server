@@ -79,6 +79,9 @@ class CompletionSession(BaseModel):
     api_type: str | None = None
     metadata: dict[str, Any] = Field(default_factory=dict)
     completions: list[CompletionRecord] = Field(default_factory=list)
+    # Harness results can arrive after the last saved model completion.
+    terminal_tool_results: dict[str, Any] = Field(default_factory=dict)
+    termination_reason: str | None = None
 
     @model_validator(mode="after")
     def _sort_completions(self) -> "CompletionSession":

@@ -14,6 +14,7 @@ import asyncio
 import json
 import re
 import os
+import pytest
 
 from polar.trajectory.builder import attempt_spans
 from polar.trajectory.builder.prefix_merging import PrefixMergingBuilder
@@ -90,6 +91,90 @@ def _build(records: list[CompletionRecord]):
             CompletionSession(session_id="session-1", completions=records)
         )
     )
+
+
+@pytest.mark.parametrize("credit", ["0", "1"])
+@pytest.mark.parametrize("reason", ["agent_context_limit_exceeded", "agent_time_budget_exceeded"])
+def test_budget_keeps_last_complete_pipeline_even_after_best(monkeypatch, credit, reason):
+    monkeypatch.setenv("POLAR_ATTEMPT_CREDIT", credit)
+    monkeypatch.setenv("POLAR_POST_BEST_MASK", "1")
+    records = [
+        _record("00", [1, 2], [10, EOT], tool_calls=_tool_calls("Bash", "p1", _PIPELINE_CMD)),
+        _record("01", [1, 2, 10, EOT, 50], [20, EOT],
+                prompt_messages=[_verdict_msg("p1", _VERDICT_OK)]),
+        _record("02", [1, 2, 10, EOT, 50, 20, EOT, 51], [30, EOT],
+                tool_calls=_tool_calls("Bash", "p2", _PIPELINE_CMD)),
+        _record("03", [1, 2, 10, EOT, 50, 20, EOT, 51, 30, EOT, 52], [40, EOT]),
+        _record("04", [1, 2, 10, EOT, 50, 20, EOT, 51, 30, EOT, 52, 40, EOT, 53],
+                [60, EOT], tool_calls=_tool_calls("Bash", "unfinished", _PIPELINE_CMD)),
+    ]
+    session = CompletionSession(
+        session_id="s", completions=records, termination_reason=reason,
+        # The second, worse evaluation finished. Its verdict survived only in the
+        # harness log. A successful outcome is not required for a complete attempt.
+        terminal_tool_results={"p2": _VERDICT_FAIL, "unfinished": "Step2 compile"},
+    )
+    result = asyncio.run(PrefixMergingBuilder(end_of_turn_token_id=EOT).build(session))
+    assert result.status == "COMPLETED"
+    assert result.metadata["completed_pipeline_prefix"]["tool_call_id"] == "p2"
+    assert result.metadata["incomplete_pipeline_completion_ids"] == ["03", "04"]
+    trace = result.traces[0]
+    assert trace.loss_mask == [1, 1, 0, 1, 1, 0, 1, 1, 0, 0, 0, 0, 0, 0]
+    assert trace.metadata["incomplete_pipeline_masked_tokens"] == 4
+    assert "post_best_masked_tokens" not in trace.metadata
+    assert ("attempt_spans" in trace.metadata) == (credit == "1")
+    if credit == "1":
+        spans = trace.metadata["attempt_spans"]
+        assert [span[:3] for span in spans] == [[0, 6, 0], [6, 12, 1], [12, 14, 2]]
+        assert spans[0][3] > spans[1][3] > 0  # Native final failure still gets its real score.
+        assert spans[2][3] is None  # Pending attempt is not a fabricated zero-score verdict.
+    monkeypatch.setenv("POLAR_POST_BEST_MASK", "0")
+    original = _build(records).traces[0]
+    assert trace.prompt_ids == original.prompt_ids
+    assert trace.response_ids == original.response_ids
+    assert trace.response_logprobs == original.response_logprobs
+
+
+def test_budget_pairs_native_background_verdict_without_training_poll_tail(monkeypatch):
+    monkeypatch.setenv("POLAR_POST_BEST_MASK", "0")
+    records = [
+        _record("00", [1, 2], [10, EOT], tool_calls=_tool_calls("Bash", "p1", _PIPELINE_CMD)),
+        _record("01", [1, 2, 10, EOT, 50], [20, EOT],
+                prompt_messages=[_verdict_msg(
+                    "p1", "Command running in background with ID: job1. Output is being written to: /tmp/job1.output"
+                )], tool_calls=_tool_calls("Bash", "poll", "cat /tmp/job1.output")),
+    ]
+    session = CompletionSession(
+        session_id="s", completions=records, termination_reason="agent_time_budget_exceeded",
+        terminal_tool_results={"poll": _VERDICT_FAIL},
+    )
+    result = asyncio.run(PrefixMergingBuilder(end_of_turn_token_id=EOT).build(session))
+    assert result.status == "COMPLETED"
+    assert result.metadata["completed_pipeline_prefix"]["tool_call_id"] == "p1"
+    assert result.traces[0].loss_mask == [1, 1, 0, 0, 0]
+
+
+@pytest.mark.parametrize("failure", ["no_verdict", "mixed_policy", "abort"])
+def test_budget_does_not_rescue_unverified_or_mixed_policy_work(failure):
+    records = [
+        _record("00", [1, 2], [10, EOT], tool_calls=_tool_calls("Bash", "p1", _PIPELINE_CMD)),
+        _record("01", [1, 2, 10, EOT, 50], [20, EOT]),
+    ]
+    if failure == "mixed_policy":
+        records[0].metadata["policy_version"] = 0
+        records[1].metadata["policy_version"] = 1
+    if failure == "abort":
+        records[1].response["choices"][0]["finish_reason"] = "abort"
+    result = asyncio.run(PrefixMergingBuilder(end_of_turn_token_id=EOT).build(
+        CompletionSession(
+            session_id="s", completions=records, termination_reason="agent_time_budget_exceeded",
+            terminal_tool_results={"p1": "still compiling" if failure == "no_verdict" else _VERDICT_OK},
+        )
+    ))
+    assert result.status == "ERROR"
+    if failure == "no_verdict":
+        assert result.metadata["completed_pipeline_prefix"] is None
+        assert not any(any(t.loss_mask) for t in result.traces)
 
 
 class _EnvGuard:
@@ -807,6 +892,24 @@ class TestT3ABlockParsing:
 
 
 class TestT3ABuilderIntegration:
+    def test_budget_uses_terminal_hook_verdict(self):
+        with _EnvGuard("1"), _T3AEnvGuard("1"):
+            records = [
+                _record("00-eval", [1, 2], [10, EOT],
+                        tool_calls=_tool_calls("Bash", "call_1", _T3A_CMD)),
+                _record("01-tail", [1, 2, 10, EOT, 50], [20, EOT]),
+            ]
+            result = asyncio.run(PrefixMergingBuilder(end_of_turn_token_id=EOT).build(
+                CompletionSession(
+                    session_id="s", completions=records,
+                    termination_reason="agent_time_budget_exceeded",
+                    terminal_tool_results={"call_1": _t3a_block(_T3A_CMD, 0, "Result: pass")},
+                )
+            ))
+            assert result.status == "COMPLETED"
+            assert result.metadata["completed_pipeline_prefix"]["tool_call_id"] == "call_1"
+            assert result.traces[0].loss_mask == [1, 1, 0, 0, 0]
+
     def test_span_scored_from_hook_block(self):
         with _EnvGuard("1"), _T3AEnvGuard("1"):
             records = [

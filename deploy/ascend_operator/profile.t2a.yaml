@@ -151,3 +151,6 @@ operator:
       - output/submission/{op_name}_impl.best.tar.gz
       - output/submission/{op_name}_impl.tar.gz
     metrics_path: judge_out/metrics.json
+    # 解题超时后仍评测 best；judge 使用独立预算。
+    judge_timeout: 5400
+    postrun_timeout_seconds: 5400

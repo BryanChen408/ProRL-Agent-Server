@@ -230,12 +230,16 @@ def test_expired_solving_budget_still_builds_and_scores_with_fresh_budget(
     manager.session_registry = SessionRegistry()
     manager.session_registry.register("s", task_id="t")
     manager.evaluators = default_evaluator_registry()
-    manager._build_trajectory = lambda request, session_dir: Trajectory(
+    manager._build_trajectory = lambda request, session_dir, agent_result: Trajectory(
         status=builder_status,
         error="mixed policy versions" if builder_status == "ERROR" else None,
         traces=[Trace(prompt_ids=[1], response_ids=[2], loss_mask=[1],
                       response_logprobs=[-0.1], metadata={"attempt_index": 0})],
-        metadata={"policy_version": 7},
+        metadata={
+            "policy_version": 7,
+            "termination_reason": "agent_time_budget_exceeded",
+            "completed_pipeline_prefix": {"completion_id": "c1", "tool_call_id": "p1"},
+        },
     )
     monkeypatch.setattr("polar.gateway.node.create_runtime", lambda *args: judge)
     managed = _managed(request, agent, tmp_path)
@@ -299,7 +303,7 @@ def test_judge_preparation_is_bounded_and_preserves_built_traces(tmp_path):
     manager.node_id = "node-test"
     manager.session_registry = SessionRegistry()
     manager.session_registry.register("s", task_id="t")
-    manager._build_trajectory = lambda request, session_dir: Trajectory(
+    manager._build_trajectory = lambda request, session_dir, agent_result: Trajectory(
         status="COMPLETED", traces=[Trace(response_ids=[2], loss_mask=[1])],
     )
     managed = _managed(_request(lazy=True), FakeRuntime("agent", [], tmp_path), tmp_path)

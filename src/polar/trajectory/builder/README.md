@@ -40,3 +40,13 @@ keep their real logprobs; `prefix_merging` fills interstitial positions with
 end-of-turn token (auto-detected, or set explicitly with the builder's
 `end_of_turn_token_id` config). Training bridges expect trainable tokens to have
 matching logprob data.
+
+For `operator_judge` sessions that hit the context or agent time limit,
+`prefix_merging` retains training through the last pipeline invocation with a
+complete verdict (including failed evaluations). The gateway also reads terminal
+Claude tool results that never reached a subsequent saved completion. Later
+assistant turns get zero loss; retained token and logprob arrays are unchanged.
+This boundary overrides post-best masking for these sessions. The judge still
+evaluates the submitted best with its separate post-run budget. Sessions without
+a complete trainable pipeline, mixed-policy/aborted generations, and judge
+infrastructure failures remain non-trainable.
