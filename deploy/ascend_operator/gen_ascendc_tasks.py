@@ -67,17 +67,20 @@ def _instruction(op_name: str, model_rel: str) -> str:
         f"- The graded submission is the single tarball {tar} (or its .best variant); never packed -> scores 0.\n"
         "- model_new_ascendc.py.forward must call torch.ops.npu.<op> (no plain-torch fallback), else the "
         "degradation check fails.\n"
-        # 逐字派生 triton 任务 prompt 的同一条 Rule(见 op_assets_cudallm_filtered189)。
         # NPU 卡是 agent/judge 共享的卡池,固定入口内部会排队抢锁;任何绕过它的探针都会
         # 和别的 session 撞在同一张卡上(性能测量失真 = reward 失真)。
         "- Do not run custom Python tests, manual import/forward checks, torch.allclose, temporary "
-        "kernels, npu-smi/environment/API introspection, verifier introspection, or any executable "
+        "kernels, npu-smi, or any executable "
         "probe that touches the NPU. The fixed validation entry is the only executable validation "
         "path, and the only thing allowed to acquire an NPU card. Never set ASCEND_RT_VISIBLE_DEVICES "
         "yourself.\n"
-        "- Do not read, modify, inspect, or delete anything under tools/, the verifier scripts under "
-        ".claude/skills/*/scripts/, or pipeline parameters (SOC_VERSION / warmup / repeats / "
-        "precision thresholds are fixed by the entry).\n"
+        "- Read/Grep/Glob may inspect tools/ and .claude/skills/*/scripts/ to understand input contracts, "
+        "parameters and errors. Follow CLAUDE.md and .claude/workflows/cannbot-reference-index.md "
+        "for read-only SDK/API source lookup; the documented environment-location command may source "
+        "tools/env.sh without touching the NPU. Do not modify or delete these scripts or SDK/library "
+        "files, copy/rewrite scripts for execution, or run validation outside the fixed entry. "
+        "Do not change pipeline parameters (SOC_VERSION / warmup / repeats / precision thresholds "
+        "are fixed by the entry).\n"
         # 目标线与 CLAUDE.md 4-S.4 / ascendc_eval_pipeline.sh 的 PERF_TARGET 是同一个数,三处要同步。
         # 只写"实现算子"时实测中位 speedup 0.859x、58.8% 慢于 torch:agent 精度一过就收工,
         # 而 reward 在 1.0x 才 0.75、更快才涨,等于把分数留在桌上。

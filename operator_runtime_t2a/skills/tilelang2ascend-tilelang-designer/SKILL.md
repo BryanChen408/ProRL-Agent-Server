@@ -28,7 +28,9 @@ argument-hint: >
 - `model_new_tilelang.py` 中禁止使用 torch 算子；只允许进行张量创建，张量变换以及调用你实现的自定义算子。
 - 在 TileLang 实现中应尽可能避免标量逐元素写法，优先使用 `T.copy`、`T.tile.*`、矩阵/向量原语等块级或向量化操作；只有在确实无法避免时才使用标量逻辑。
 - 只允许修改或新增 `{output_dir}/` 目录中的文件，不要改动其他目录中的文件。
-- 只允许读取当前工作区目录结构内的文件与子目录；禁止读取当前工作区之外的任何路径，包括父目录、兄弟目录、用户目录、绝对路径以及系统其他目录。
+- 允许读取当前工作区，以及 CLAUDE.md「开发源码只读范围」中当前 Python 的 TileLang
+  包源码和仓内示例；按 `.claude/workflows/cannbot-reference-index.md` 定位，不猜安装路径，
+  不导入包或执行示例来探测 NPU。禁止读取其他工作区外路径。
 - 禁止读取 `asc-devkit/docs/` 目录及其下任何文件；该目录仅供 AscendC 阶段使用，与本阶段无关。
 - 禁止读取 `.claude/skills/tilelang2ascend-tilelang-designer/references/TileLang-AscendC-API-Mapping.md`；该文档是 TileLang 到 AscendC 的转译映射，仅供 AscendC 阶段使用，与本阶段无关。
 

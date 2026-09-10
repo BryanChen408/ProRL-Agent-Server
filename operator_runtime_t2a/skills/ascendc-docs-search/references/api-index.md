@@ -48,7 +48,7 @@ $ASC_DEVKIT_DIR/docs/zh/api/  — Ascend C API 文档根目录
 ### 表4：数据搬运 API
 | API | 说明 | 对齐要求 |
 |-----|------|---------|
-| `DataCopy` | 数据拷贝 | 512 字节 |
+| `DataCopy` | 数据拷贝 | 以对应重载的约束章节为准 |
 | `DataMove` | 数据移动 | 32 字节 |
 
 ### 表5：资源管理 API
@@ -103,7 +103,7 @@ $ASC_DEVKIT_DIR/docs/zh/api/  — Ascend C API 文档根目录
 
 ## 三、高阶 API
 
-> 实际目录 `docs/zh/api/SIMD-API/高阶API/` 下含 13 个子类，下表为索引。HCCL 通信类详见[第七章](#七hccl-通信-api)。
+> 下表是上游文档类别名，不代表本版磁盘子目录；统一从 API 根目录按名称搜索。
 
 | 子目录 | 类别 | 典型 API |
 |--------|------|---------|
@@ -125,13 +125,13 @@ $ASC_DEVKIT_DIR/docs/zh/api/  — Ascend C API 文档根目录
 
 ## 四、Utils API
 
-> 实际目录 `docs/zh/api/Utils-API/`，含调测接口（printf、asc_dump）等。用 `find "$ASC_DEVKIT_DIR/docs/zh/api/Utils-API/" -name "*.md"` 查阅。
+> 调测接口（printf、asc_dump）等，从 `$ASC_DEVKIT_DIR/docs/zh/api/` 按接口名搜索。
 
 ---
 
 ## 五、AI CPU API
 
-> 实际目录 `docs/zh/api/AI-CPU-API/`。用 `find "$ASC_DEVKIT_DIR/docs/zh/api/AI-CPU-API/" -name "*.md"` 查阅。
+> AI CPU 接口从 `$ASC_DEVKIT_DIR/docs/zh/api/` 按接口名搜索，不假定独立子目录存在。
 
 ---
 
@@ -148,7 +148,7 @@ $ASC_DEVKIT_DIR/docs/zh/api/  — Ascend C API 文档根目录
 
 ## 七、HCCL 通信 API
 
-HCCL（集合通信）API 文档位于 `docs/zh/api/SIMD-API/高阶API/HCCL通信类/`，分三个子目录：
+HCCL（集合通信）API 按以下三类内容检索；下列目录名称仅为上游分类，读取时先定位真实文件：
 
 | 子目录 | 内容 | 典型 API |
 |--------|------|---------|
@@ -163,7 +163,7 @@ HCCL（集合通信）API 文档位于 `docs/zh/api/SIMD-API/高阶API/HCCL通�
 
 查找命令（路径含中文，必须加引号）：
 ```bash
-find "$ASC_DEVKIT_DIR/docs/zh/api/SIMD-API/高阶API/HCCL通信类/" -name "*.md"
+find "$ASC_DEVKIT_DIR/docs/zh/api/" -iname "*hccl*.md"
 ```
 
 HCCL 头文件另见 `$ASC_DEVKIT_DIR/include/adv_api/hccl/`（`hccl.h`、`hccl_common.h`、`hccl_tiling.h`、`hccl_tilingdata.h`）。
@@ -184,10 +184,7 @@ HCCL 头文件另见 `$ASC_DEVKIT_DIR/include/adv_api/hccl/`（`hccl.h`、`hccl_
    - **Returns 章节**：了解返回值含义
    - **Example 章节**：参考使用示例
 
-3. **常见对齐要求**：
-   - 大多数操作：32 字节对齐
-   - DataCopy：512 字节对齐
-   - 某些特殊 API：64/128 字节对齐
+3. **对齐要求**：按具体 API 重载、dtype 与平台的约束章节核对，不套用统一字节数。
 
 ---
 

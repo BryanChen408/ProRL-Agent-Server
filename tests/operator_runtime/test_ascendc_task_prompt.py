@@ -73,3 +73,17 @@ def test_t2a_system_prompt_allows_brief_design_without_premature_evaluation():
     assert "拿不准的地方先写出代码跑出真实报错" not in prompt
     assert "简短设计核对" in prompt
     assert "不要因为没有 metrics 就评测未实现的骨架" in prompt
+
+
+def test_prompt_allows_read_only_diagnosis_without_bypassing_validation():
+    text = _load_generator()._instruction("op_test", "input/op_test.py")
+    assert "Read/Grep/Glob may inspect tools/ and .claude/skills/*/scripts/" in text
+    assert "cannbot-reference-index.md" in text
+    assert "may source tools/env.sh without touching the NPU" in text
+    assert "Do not read, modify, inspect" not in text
+    assert "environment/API introspection" not in text
+    assert "verifier introspection" not in text
+    assert "Do not modify or delete these scripts or SDK/library files" in text
+    assert "copy/rewrite scripts for execution, or run validation outside the fixed entry" in text
+    assert "Do not change pipeline parameters" in text
+    assert "The fixed validation entry is the only executable validation path" in text

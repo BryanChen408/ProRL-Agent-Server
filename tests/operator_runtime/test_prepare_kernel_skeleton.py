@@ -8,6 +8,9 @@ from __future__ import annotations
 
 import importlib.util
 import inspect
+import json
+import shutil
+import subprocess
 import sys
 from pathlib import Path
 
@@ -362,11 +365,111 @@ def test_extraction_failure_falls_back_to_template(tmp_path):
 def _mdef_schema(out: Path) -> str:
     reg = (out / "kernel" / "register.cpp").read_text()
     line = next(l for l in reg.splitlines() if "m.def(" in l)
-    return line.split('m.def("', 1)[1].split('")', 1)[0]
+    return json.loads(line.split('m.def(', 1)[1].rsplit(');', 1)[0])
 
 
 def _assert_schema_parses(schema: str) -> None:
     torch._C.parse_schema(schema)  # 抛异常即测试失败
+
+
+@pytest.mark.parametrize("default", ["mean", '"quoted"\\中文', None])
+def test_constant_defaults_match_wrapper_and_registered_call(tmp_path, default):
+    task, js = _write_model(tmp_path, f'''
+import torch
+MODE = {default!r}
+ALIAS = MODE
+class Model(torch.nn.Module):
+    def __init__(self, mode=ALIAS):
+        super().__init__()
+        self.mode = mode
+    def forward(self, x, reduction: str=ALIAS, *, output_format: str=ALIAS):
+        return x
+def get_init_inputs():
+    return ["explicit_init"]
+''')
+    op = "t2a_constant_default_contract"
+    out = _instantiate(tmp_path, task, js, op)
+    schema = _mdef_schema(out)
+    parsed = torch._C.parse_schema(schema)
+    assert [p.default_value for p in parsed.arguments[1:]] == [default] * 3
+    lib = torch.library.Library("npu", "FRAGMENT")
+    lib.define(schema)
+    seen = []
+
+    def impl(x, reduction=default, mode=default, output_format=default):
+        seen.append((reduction, mode, output_format))
+        return x
+
+    lib.impl(op, impl, "CompositeExplicitAutograd")
+    model = _construct((out / "model_new_ascendc.py").read_text())
+    assert model.mode == default
+    x = torch.ones(1)
+    assert torch.equal(model(x), x)
+    assert torch.equal(getattr(torch.ops.npu, op)(x), x)
+    assert seen == [(default, default, default)] * 2
+
+
+@pytest.mark.parametrize("values", [(1, 1.5), (1.5, 1), (1, "mean"), ("mean", 1)])
+def test_case_attribute_types_merge_without_order_dependence(tmp_path, values):
+    task, _ = _write_model(tmp_path, '''
+import torch
+class Model(torch.nn.Module):
+    def forward(self, x, alpha): return x
+''')
+    js = task.with_suffix(".json")
+    js.write_text("".join(json.dumps({"inputs": [
+        {"name": "alpha", "type": "attr", "value": v}
+    ]}) + "\n" for v in values))
+    op = "t2a_numeric_attribute_contract"
+    if "mean" in values:
+        with pytest.raises(ValueError, match="incompatible case types for parameter 'alpha'"):
+            _instantiate(tmp_path, task, js, op)
+        return
+    out = _instantiate(tmp_path, task, js, op)
+    schema = _mdef_schema(out)
+    assert "float alpha" in schema
+    lib = torch.library.Library("npu", "FRAGMENT")
+    lib.define(schema)
+    seen = []
+
+    def impl(x, alpha):
+        seen.append(alpha)
+        return x
+
+    lib.impl(op, impl, "CompositeExplicitAutograd")
+    model = _construct((out / "model_new_ascendc.py").read_text())
+    for value in values:
+        model(torch.ones(1), value)
+    assert seen == list(values)
+
+
+@pytest.mark.skipif(shutil.which("g++") is None, reason="C++ compiler required")
+@pytest.mark.parametrize("default", ["mean", '"quoted"', "path\\name", "中文", None])
+def test_registration_string_compiles_and_preserves_schema(tmp_path, default):
+    task, js = _write_model(tmp_path, f'''
+import torch
+class Model(torch.nn.Module):
+    def forward(self, x, mode: str={default!r}):
+        return x
+''')
+    out = _instantiate(tmp_path, task, js)
+    schema = _mdef_schema(out)
+    if default is None:
+        assert "str? mode=None" in schema
+        assert "const c10::optional<std::string> &mode" in (out / "kernel/ops.h").read_text()
+    else:
+        assert json.loads(prep._schema_default(prep._Param("mode", "str", repr(default)))) == default
+    _assert_schema_parses(schema)
+    line = next(line for line in (out / "kernel/register.cpp").read_text().splitlines()
+                if "m.def(" in line)
+    # Compile the actual emitted statement and check the bytes C++ passes to m.def.
+    source = '#include <iostream>\nstruct M { void def(const char* s) { std::cout << s; } };\n'
+    source += 'int main() { M m; ' + line + ' }\n'
+    binary = tmp_path / "registration"
+    compiled = subprocess.run(["g++", "-x", "c++", "-std=c++17", "-o", str(binary), "-"],
+                              input=source, text=True, capture_output=True)
+    assert compiled.returncode == 0, compiled.stderr
+    assert subprocess.check_output([str(binary)], text=True) == schema
 
 
 CONV_LIKE = """
@@ -559,13 +662,18 @@ def test_skeleton_labels_semantic_placeholders_without_rewriting_reference(tmp_p
 
 
 @pytest.mark.parametrize("agent_side", [True, False])
+@pytest.mark.parametrize("with_case_json", [True, False])
 def test_prepare_carries_existing_cannbot_design_resources_without_new_wiring(
-    tmp_path, monkeypatch, agent_side,
+    tmp_path, monkeypatch, agent_side, with_case_json,
 ):
     import json
+    import re
 
-    task, js = _write_model(tmp_path, LAYERNORM_LIKE, LAYERNORM_CASE)
-    originals = task.read_bytes(), js.read_bytes()
+    task, js = _write_model(
+        tmp_path, LAYERNORM_LIKE if with_case_json else SINGLE,
+        LAYERNORM_CASE if with_case_json else None,
+    )
+    originals = task.read_bytes(), js.read_bytes() if js else None
     workdir = tmp_path / "session"
     monkeypatch.setattr(prep.shutil, "which", lambda name: "/unused/claude")
     args = ["--backend", "ascendc", "--op-name", "my_op",
@@ -574,9 +682,12 @@ def test_prepare_carries_existing_cannbot_design_resources_without_new_wiring(
     if agent_side:
         args.append("--require-claude")
     assert prep.main(args) == 0
-    assert (task.read_bytes(), js.read_bytes()) == originals
+    assert (task.read_bytes(), js.read_bytes() if js else None) == originals
     assert (workdir / "input/my_op.py").read_bytes() == originals[0]
-    assert (workdir / "input/my_op.json").read_bytes() == originals[1]
+    if js:
+        assert (workdir / "input/my_op.json").read_bytes() == originals[1]
+    else:
+        assert not (workdir / "input/my_op.json").exists()
     for relative in (
         "workflows/templates/design-template.md",
         "skills/ascendc-tiling-design/SKILL.md",
@@ -587,10 +698,29 @@ def test_prepare_carries_existing_cannbot_design_resources_without_new_wiring(
     ):
         assert (workdir / ".claude" / relative).read_bytes() == (CANONICAL / relative).read_bytes()
     assert (workdir / "CLAUDE.md").read_bytes() == (CANONICAL / "CLAUDE.md").read_bytes()
+    index = workdir / ".claude/workflows/cannbot-reference-index.md"
+    for relative in re.findall(r"\]\(([^)]+)\)", index.read_text()):
+        target = (index.parent / relative).resolve()
+        assert target.is_relative_to(workdir.resolve())
+        assert target.is_file(), relative
+        assert target.read_bytes(), relative
+    for name in ("ascendc-design-doc-generator", "ascendc-code-gen"):
+        original = REPO / "operator_runtime_ascendc/skills" / name
+        installed = workdir / ".claude/skills" / name
+        # Knowledge only: no old workflow, scripts or absolute host symlinks.
+        assert {p.name for p in installed.iterdir()} == {"references", "templates"}
+        for source in original.rglob("*"):
+            if source.is_file() and source.name != "SKILL.md":
+                assert (installed / source.relative_to(original)).read_bytes() == source.read_bytes()
     workflow = (workdir / "CLAUDE.md").read_text()
     translator = (workdir / ".claude/skills/tilelang2ascend-translator/SKILL.md").read_text()
     assert "简单算子只跳过 TileLang，不跳过设计" in workflow
     assert "简单算子跳过 Phase 3，" not in workflow
+    assert ".claude/workflows/cannbot-reference-index.md" in workflow
+    assert ".claude/workflows/cannbot-reference-index.md" in translator
+    assert "读取、修改或删除 `tools/`" not in workflow
+    assert "禁止读取当前工作区之外的任何路径" not in workflow
+    assert "禁止直接运行本 skill 的上游评测脚本" in translator
     for relative in ("workflows/templates/design-template.md",
                      "skills/ascendc-tiling-design/SKILL.md",
                      "skills/ascendc-api-best-practices/SKILL.md"):
@@ -601,3 +731,48 @@ def test_prepare_carries_existing_cannbot_design_resources_without_new_wiring(
     assert not (workdir / "judge_out/metrics.json").exists()
     settings = json.loads((workdir / ".claude/settings.json").read_text())
     assert set(settings.get("hooks", {})) == ({"Stop"} if agent_side else set())
+
+
+def test_t2a_generated_instructions_keep_dataset_and_resource_fixes():
+    for script in ("build_claude_md.py", "gen_skill_reference_list.py"):
+        subprocess.run(
+            [sys.executable, str(REPO / "deploy/ascend_operator" / script),
+             "--canonical", str(CANONICAL), "--check"], check=True,
+        )
+
+
+@pytest.mark.parametrize("sdk_exists", [True, False])
+def test_documented_source_lookup_uses_current_environment_without_importing_tilelang(
+    tmp_path, sdk_exists,
+):
+    import os
+    import shlex
+
+    index = (CANONICAL / "workflows/cannbot-reference-index.md").read_text()
+    section = index.split("## 当前工具链源码", 1)[1]
+    command = section.split("```bash\n", 1)[1].split("```", 1)[0]
+    sdk = tmp_path / "current sdk"
+    if sdk_exists:
+        (sdk / "opp").mkdir(parents=True)
+    package = tmp_path / "installed/tilelang"
+    package.mkdir(parents=True)
+    (package / "__init__.py").write_text("raise AssertionError('must not import tilelang')\n")
+    (tmp_path / "tools").mkdir()
+    (tmp_path / "tools/env.sh").write_text(
+        f"export OPERATOR_PYTHON={shlex.quote(sys.executable)}\n"
+        f"export ASCEND_HOME_PATH={shlex.quote(str(sdk))}\n"
+        f"export ASCEND_OPP_PATH={shlex.quote(str(sdk / 'opp'))}\n"
+    )
+    result = subprocess.run(
+        ["bash", "-c", command], cwd=tmp_path, check=True, capture_output=True, text=True,
+        env={**os.environ, "PYTHONPATH": str(package.parent)},
+    )
+    assert f"ASCEND_HOME_PATH={sdk if sdk_exists else '不可用或未设置'}" in result.stdout
+    assert f"ASCEND_OPP_PATH={sdk / 'opp' if sdk_exists else '不可用或未设置'}" in result.stdout
+    assert f"TILELANG_SOURCE={package}" in result.stdout
+    assert "TILELANG_EXAMPLES=当前安装不含仓内示例" in result.stdout
+    for relative in (
+        "CLAUDE.md", "skills/tilelang2ascend-translator/SKILL.md",
+        "skills/tilelang2ascend-tilelang-designer/SKILL.md",
+    ):
+        assert "开发源码只读范围" in (CANONICAL / relative).read_text()

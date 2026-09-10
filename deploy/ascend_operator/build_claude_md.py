@@ -49,6 +49,14 @@ def apply_deltas(text: str) -> str:
     # [D1] 装完后的路径。上游按仓库树写,init.sh 装完是 .claude/ 下的扁平布局。
     text = text.replace("plugins-community/tilelang2ascendc-ops-generator/skills/", ".claude/skills/")
     text = text.replace("`workflows/templates/", "`.claude/workflows/templates/")
+    # 官方资料和当前工具链源码不在工作目录内；读取范围由覆盖区统一定义。
+    text = text.replace("`asc-devkit/docs/api/`", "`$ASC_DEVKIT_DIR/docs/zh/api/`")
+    text = text.replace("`asc-devkit/examples/`", "`$ASC_DEVKIT_DIR/examples/`")
+    text = _sub(
+        text,
+        "只允许读取当前工作区目录结构内的文件与子目录；禁止读取当前工作区之外的任何路径。",
+        "允许读取当前工作区，以及本环境覆盖区「开发源码只读范围」列出的官方资料和工具链源码；禁止读取其他工作区外路径。",
+    )
 
     # [D2] 上游的命令拦截 Hook 在本环境不存在:skill_script_hook.py 没铺进容器，Bash
     #      仍然直通。保留该章 = 告诉 agent 一个假事实(它会以为评测被托管代跑)。
@@ -101,7 +109,7 @@ def apply_deltas(text: str) -> str:
 | 参数 | 取值 | 说明 |
 |------|------|--------|
 | `op_name` | 任务给定的算子名（如 `3_Add`） | 下文所有 `{op_name}` 均指它 |
-| `op_file` | `input/{op_name}.py` | 参考实现（含 `Model` 与 `get_input_groups`），已预置 |
+| `op_file` | `input/{op_name}.py` | 参考实现（含 `Model`；输入入口为实际定义的 `get_inputs()` 或 `get_input_groups()`，`get_init_inputs()` 按实际定义读取），已预置 |
 | `output_dir` | **`{op_name}/`**（工作目录顶层，相对路径） | 下文所有 `{output_dir}` 一律指它 |
 | `npu` | —— | **无此参数**：卡由抢卡机制注入 |
 
@@ -161,7 +169,7 @@ def apply_deltas(text: str) -> str:
     text = _sub(
         text,
         "├── <op_name>.json               # 测试用例 (JSON Lines, 精简后)",
-        "├── <op_name>.json               # 测试用例 (JSON Lines, 数据集原版;判分时被数据集原件覆盖,改它无效)",
+        "├── <op_name>.json               # 可选测试用例 (仅原数据集提供时存在;判分时被数据集原件覆盖,改它无效)",
     )
     text = _sub(text, "├── <op_name>.json.bak           # 原始用例备份\n", "")
     # d) Phase 2 整节(连同节前的 --- 分隔线一起去掉,避免残留双分隔线)
@@ -225,7 +233,7 @@ Phase 4 的固定入口已经完成正确性验证和第一轮逐 case 测速，
         "Phase 3: 设计表达              (分支)\n"
         "  ├─ 简单算子: 架构设计 + 设计串讲 (ops-direct-invoke: DESIGN.md + PLAN.md + WALKTHROUGH.md)\n"
         "  └─ 复杂算子: TileLang 设计  (tilelang2ascend-tilelang-designer + 退化检测 + 迭代)",
-        "Phase 3: 设计表达              (简单算子跳过；复杂算子执行 TileLang 设计与 AST 门禁)",
+        "Phase 3: 设计表达              (简单算子内联设计；复杂算子执行 TileLang 设计与 AST 门禁)",
     )
     text = _sub(
         text,
@@ -240,7 +248,7 @@ Phase 4 的固定入口已经完成正确性验证和第一轮逐 case 测速，
     route_end = text.index("---\n\n## 仲裁参考资源", route_start)
     structural_route = """## 算子分类路由规则
 
-Phase 0 必须读取 `model.py` 的 `Model.__init__()`、`forward()`、`get_input_groups()` 和关联用例，按实际计算图、输入输出契约与 shape/dtype 变化判定路径。
+Phase 0 必须读取原始 `input/{op_name}.py` 的 `Model.__init__()`、`forward()`，以及 `get_inputs()`、`get_input_groups()`、`get_init_inputs()` 中实际存在的入口和关联用例，按实际计算图、输入输出契约与 shape/dtype 变化判定路径。不要要求或补造 reference 中不存在的输入入口。
 
 禁止使用算子名白名单、文件名、编号或“是否见过这个算子”作为路由依据。算子名只能用于展示；即使名称陌生，只要源码表达清楚，也必须按源码结构分类。
 
@@ -254,7 +262,7 @@ Phase 0 必须读取 `model.py` 的 `Model.__init__()`、`forward()`、`get_inpu
 
 ```
 读取源码与用例
-├─ single_op → 跳过 TileLang，直接调用 translator 在 Polar 预生成骨架上实现
+├─ single_op → 跳过 TileLang，由 translator 复用 cannbot 设计资料，先内联设计再补全骨架
 ├─ fused     → 先做 TileLang 设计，再调用 translator 在同一预生成骨架上实现
 └─ other     → 记录无法分类的具体证据，保守走 TileLang 路径
 ```
@@ -270,11 +278,11 @@ Phase 0 必须读取 `model.py` 的 `Model.__init__()`、`forward()`、`get_inpu
         "- 简单算子后续走 ops-direct-invoke 工作流（Architect 设计 → Developer 实现 → Reviewer 审查）\n"
         "- 复杂算子后续走 TileLang → tilelang2ascend-translator 路径",
         "### 结构分类\n\n"
-        "读取 `op_file` (model.py) 的 `Model.__init__()`、`forward()`、`get_input_groups()` 与关联用例，应用上方结构路由规则：\n\n"
+        "读取原始 `op_file` 的 `Model.__init__()`、`forward()`，以及 `get_inputs()`、`get_input_groups()`、`get_init_inputs()` 中实际存在的入口与关联用例，应用上方结构路由规则：\n\n"
         "- 记录 `algorithm_classification = \"single_op\" | \"fused\" | \"other\"`\n"
         "- 记录观察到的计算阶段、输入输出契约、shape/dtype 行为和分类理由\n"
         "- 根据分类派生 `op_type = \"simple\"` 或 `op_type = \"complex\"`：`single_op` 为 simple，`fused`/`other` 为 complex\n"
-        "- 简单算子跳过 Phase 3，Phase 4 直接把 `model.py` 与预生成骨架交给 translator\n"
+        "- 简单算子跳过 Phase 3-C 的 TileLang 产物，先按 translator 的「内嵌设计与审查」核对，再实现\n"
         "- 复杂算子执行 Phase 3，再把 TileLang 设计与预生成骨架交给 translator\n"
         "- 禁止仅凭算子名或历史白名单推断分类；陌生名称不等于复杂算子",
     )
@@ -286,7 +294,9 @@ Phase 0 必须读取 `model.py` 的 `Model.__init__()`、`forward()`、`get_inpu
         "    继续 Phase 4",
         "if op_type == \"simple\":\n"
         "    ── 简单算子: 不需要 TileLang 中间表示 ──────────────\n"
-        "    直接进入 Phase 4,由 translator 读取 model.py 并原位补全预生成骨架",
+        "    Read .claude/skills/tilelang2ascend-translator/SKILL.md 的「内嵌设计与审查」\n"
+        "    复用其中指向的 cannbot 设计模板和知识文件，在主轨迹内完成设计，再进入 Phase 4\n"
+        "    不新增 Agent、设计文件或独立评测步骤",
     )
     text = _cut(
         text,
@@ -614,6 +624,18 @@ AST 通过时的有效产物是 block-level、tile-level 与 `model_new_tilelang
         "| 退化检测前置 | 复杂路径每次生成/修改 model_new_tilelang.py 后强制做 AST；AscendC 产物由固定入口强制做 AST |",
     )
     text = text.replace("| NPU 设备 | 通过 `ASCEND_RT_VISIBLE_DEVICES` 环境变量设置 |\n", "")
+    # 保留已验证的双数据集输入与内联设计说明，避免重新生成时丢失。
+    text = _sub(text, '│   ├── design.md                # 设计文档 (简单算子路径)', '│   ├── design.md                # 可选设计记录；简单路径在主轨迹内完成，不要求落文件')
+    text = _sub(
+        text,
+        "复制后检查 model.py 中 `get_input_groups()` 的 `json_path` 解析逻辑：",
+        "仅当 reference 定义了 `get_input_groups()` 且通过 `json_path` 读取 JSON 时，检查复制后的路径解析逻辑：",
+    )
+    text = _sub(
+        text,
+        "如果是其他写法（已硬编码文件名或使用绝对路径），则不修改。",
+        "如果是其他写法（已硬编码文件名或使用绝对路径），则不修改；没有此入口或不依赖 JSON 时跳过，不新增输入函数或用例文件。",
+    )
     return text
 
 

@@ -9,7 +9,30 @@
 `references/` 文件。不要尝试调用 Skill，也不要等待 Skill 返回内容；读完后由当前会话直接
 检查和修改工程。路径不确定时先列出 `.claude/skills/`，不要猜路径。
 
-## 预生成骨架是唯一工程契约
+首次设计或找参考实现时，先 Read `.claude/workflows/cannbot-reference-index.md`。
+它列出 cannbot 原版设计资料、host/kernel 模板及 archive 的真实文件名；只读本题相关条目，
+已读且未变化的资料不重复读。旧资料仅提供实现参考，其中的调度、初始化与评测指令不适用。
+Read 找不到时先 Glob 所在目录，再按真实文件名 Read；不要连续猜 `_kernel.cpp` 等后缀。
+
+新增的两个目录是纯资料包，没有 `SKILL.md`，直接从以下文件读取：
+- `.claude/skills/ascendc-design-doc-generator/templates/design-template.md`
+- `.claude/skills/ascendc-code-gen/references/GUIDE.md`
+
+以上 `.claude/...` 路径均相对会话工作目录 `/opt/workspace/agent_workdir/`，
+不要使用宿主仓库的 `operator_runtime_t2a/skills/` 路径。两包的其他资料在各自
+`references/`、`templates/` 下，具体文件名见上述索引；目录本身用 Glob，不用 Read。
+
+## 开发源码只读范围
+
+除工作区和 `$ASC_DEVKIT_DIR` 外，允许只读查阅**当前评测工具链**的 CANN 头文件、
+实现源码、CMake 定义、官方 OPP 源码，以及当前 Python 安装的 TileLang 包源码和仓内示例。
+只在文档不足、类型/签名不明或修复具体错误时读取，不重复探索已确认的目录。
+先按 `.claude/workflows/cannbot-reference-index.md` 的「当前工具链源码」步骤定位，
+复用 `tools/env.sh`，以实际存在的路径为准；不照搬历史版本目录、不搜索其他 SDK 版本。
+这允许 Read/Grep/Glob 诊断，不允许改写 SDK/库文件、安装包、导入未知示例或执行其中的
+构建/测试脚本。评测、设备选择、精度和预算仍由固定 pipeline 管理。
+
+## 预生成骨架是唯一工程起点，不是算子语义契约
 
 Polar prepare 在 Agent 启动前已经读取本题 `model.py` 的 `__init__` / `forward`，并在
 `{output_dir}/` 中预生成当前算子的工程骨架。开始实现前先检查并复用这些现有文件：
@@ -25,8 +48,8 @@ Polar prepare 在 Agent 启动前已经读取本题 `model.py` 的 `__init__` / 
 复制其他任务或模板来重建工程，也不要把 device 文件另写成
 `op_kernel/{op_name}.cpp`。
 
-- 简单算子跳过 TileLang，直接由 `tilelang2ascend-translator` 读取 `model.py`，在现有骨架上
-  完成数学、tiling 与必要接线。
+- 简单算子只跳过 TileLang，不跳过设计；由 `tilelang2ascend-translator` 读取 `model.py`，
+  复用已有 cannbot 设计模板和知识文件，在主轨迹内完成设计与审查后再补全骨架。
 - 复杂算子先形成 TileLang block/tile 设计，再由同一个 translator 在现有骨架上完成实现。
 - `CMakeLists.txt`、`setup.py`、`kernel/utils/` 和 `model_new_ascendc.py` 的双路径 loader 是
   机制件，默认原样保留；不要为了“初始化”或统一风格而改写。
@@ -35,6 +58,18 @@ Polar prepare 在 Agent 启动前已经读取本题 `model.py` 的 `__init__` / 
   必要接线，不属于重建工程。
 - 必需文件确实缺失或损坏时，只在原路径结合 `model.py` 与相邻文件原位修复缺失部分，不要
   因一个文件缺失推倒整套骨架。
+
+**唯一语义依据是原始 reference 和原版用例，不是骨架、算子名或历史实现。** 必须读取
+`input/{op_name}.py` 的 `Model.__init__`、完整 `forward` 及其调用的辅助逻辑，核对
+`get_inputs/get_input_groups/get_init_inputs` 中实际存在的入口与关联用例；不要把多步计算
+缩减成文件名中的一个操作，也不要忽略子模块参数、返回结构或分支。
+
+骨架中的 `empty_like(首个输入)`、fp16/fp32 限制、连续性检查、按字节数分发 dtype、
+单输出接线、恒等拷贝与 elementwise tiling 都是**待改写占位**，不保证符合本题。
+按 reference 修正输出 shape/dtype、全部输出、布局、累加精度、buffer 与尾块；BF16/整数
+支持不能只删 host 检查，必须同步修正 kernel 类型与访存。静态签名提取不等于已实现
+`__init__` 中的子模块与参数语义。模板或历史文档中的芯片示例以本环境 `SOC_VERSION` 为准，
+其中的子代理、用例精简、独立构建/评测指令不适用，仍服从本节固定入口与预算。
 
 ## 固定入口
 
@@ -139,18 +174,20 @@ Phase 6(全量恢复)因此已从工作流移除。不要自行精简、修改�
   实现代码在 `$ASC_DEVKIT_DIR/impl/`。写 kernel 前用 `ascendc-docs-search` 查 API 签名与
   命名空间,不要凭记忆写。
 - 文档里凡写 `asc-devkit/...` 的地方,一律读作 `$ASC_DEVKIT_DIR/...`。
-- skill 文档里 `$ASC_DEVKIT_DIR/examples/00_introduction/...` 这类路径是旧版布局,
-  本版实际是 `examples/{01_simd_cpp_api,02_simd_c_api,03_simt_api}/`,用 find 定位。
+- 示例入口见 `.claude/skills/ascendc-docs-search/references/example-catalog.md`；
+  目录随版本变化，先列实际目录再读取，不照搬历史绝对路径。
 - 编译报 `no template named 'TQue'` / `did you mean 'AscendC::...'` 这类,是命名空间或签名
   记错,查 `$ASC_DEVKIT_DIR/docs/zh/api/` 核实,不要靠猜改。
 - 检索文档一律从 `$ASC_DEVKIT_DIR` 根目录搜(Grep/Glob 的 path 填根目录),不要凭记忆
-  猜子路径——docs/ 下有两棵树(`docs/zh/api/` 与 `docs/api/`),只搜子树会漏;
-  搜不到时换关键词(去后缀、换同义词),不要直接下「API 不存在」的结论。
+  猜子路径或假定存在 `docs/api/`；API 根目录搜索无结果时再扩大到整个资料仓；
+  搜不到时换关键词(去后缀、换同义词)，再按「开发源码只读范围」查实际 SDK 定义，
+  不要直接下「API 不存在」的结论。
 
 ## 禁止
 
 - 自行设置 `ASCEND_RT_VISIBLE_DEVICES`。
 - 运行 `npu-smi` 或任何探测 NPU 的命令。`SOC_VERSION` 已在环境变量里。
-- 读取、修改或删除 `tools/` 与 `.claude/skills/*/scripts/` 下的脚本。
+- 修改或删除 `tools/` 与 `.claude/skills/*/scripts/` 下的脚本。允许用 Read/Grep
+  只读检查脚本，定位输入契约、参数和报错；不允许复制改写后执行或绕过固定入口判分。
 - 修改评测参数(SOC_VERSION / warmup / repeats / 精度阈值)。
 - 向用户提问。这是非交互运行,没有人会回答。

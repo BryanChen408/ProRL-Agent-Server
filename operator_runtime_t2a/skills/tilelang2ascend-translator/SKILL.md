@@ -30,9 +30,9 @@ argument-hint: >
 - `model_new_ascendc.py` 中禁止使用 torch 算子；只允许进行张量创建，张量变换以及调用你实现的自定义算子。
 - 在 AscendC 实现中应尽可能避免标量逐元素写法，优先使用块级或向量化操作；只有在确实无法避免时才使用标量逻辑。
 - 只允许修改或新增 `{output_dir}/` 目录中的文件，不要改动其他目录中的文件。
-- 只允许读取当前工作区目录结构内的文件与子目录。唯一例外是可以只读访问
-  `$ASC_DEVKIT_DIR`，用于查阅当前 CANN 环境配套的官方文档、示例和实现参考。
-  禁止读取其他工作区外路径。
+- 允许读取当前工作区和 `$ASC_DEVKIT_DIR`，以及 CLAUDE.md「开发源码只读范围」中
+  当前工具链的官方源码。类型、签名或实现细节不明时，按
+  `.claude/workflows/cannbot-reference-index.md` 定位 CANN headers/OPP；禁止读取其他工作区外路径。
 - 禁止读取 `.claude/skills/tilelang2ascend-translator/references/TileLangAscendProgrammingGuide.md`；该文档是 TileLang 编程指南，仅供 TileLang 阶段使用，与本阶段无关。
 - 预生成骨架是唯一工程起点，不是算子语义契约。禁止调用项目初始化 skill、复制其他任务或模板重建整个工程。
 - `empty_like`、dtype/连续性检查、单输出与恒等拷贝均是占位；输出、分支、参数与布局以原始 reference 为准，不能只补 Compute 而保留不适用的 host/kernel 假设。
@@ -70,6 +70,7 @@ argument-hint: >
 
 ## Skill 参考资料
 本 skill 提供以下参考资料：
+- `.claude/workflows/cannbot-reference-index.md` — 首次设计先读；按实际计算结构选择 cannbot 原版设计/代码模板，及 archive 的真实 host/kernel 路径。没有 SKILL.md 的旧资料目录直接 Read references/templates，不调用旧工作流。
 - `.claude/workflows/templates/design-template.md` — cannbot 原有设计模板，按下方「内嵌设计与审查」读取相关章节，不要求填写整份文档
 - `.claude/skills/ascendc-tiling-design/SKILL.md` — cannbot 原有 tiling 场景索引与设计要素
 - `.claude/skills/ascendc-api-best-practices/SKILL.md` — cannbot 原有 API 场景索引；按本题操作读取相关 references，不另造 API 对照表

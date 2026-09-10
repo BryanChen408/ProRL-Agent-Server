@@ -609,6 +609,14 @@ def _clone(v):
     return v
 
 
+def _seed_model(seed, device):
+    """cannbot triton verifier 的同种子构造约定，供验证、检测和性能入口共用。"""
+    import torch
+    torch.manual_seed(seed)
+    if torch.device(device).type == "npu":
+        torch.npu.manual_seed_all(seed)
+
+
 def _resolve_input_groups(module):
     """Return model input cases without conflating a case with its arguments.
 
@@ -1018,10 +1026,10 @@ _call_args, _call_kwargs = _bind_case(_contract_cls, input_case)
 
 # ---- model construction (init 参数与对拍脚本 verification_ascendc.py 同一约定:扁平展开) ----
 # 能走到测速的模型都已被对拍用 cls(*get_init_inputs()) 成功建过,照抄该约定即对所有
-# 可测速算子兼容。init 来源先试实现模块(model_new 一般没有 get_init_inputs),没有再
-# 回落 model.py —— 构造参数属于任务定义,不属于实现。
-_init_src = mod if hasattr(mod, "get_init_inputs") else _ref_mod
-_init_vals = _init_src.get_init_inputs() if hasattr(_init_src, "get_init_inputs") else []
+# 可测速算子兼容。init 只取 model.py；构造参数属于任务定义,不属于实现。
+_seed_model({seed}, device)
+_init_vals = _ref_mod.get_init_inputs() if hasattr(_ref_mod, "get_init_inputs") else []
+_seed_model({seed}, device)
 model = cls(*_init_vals).to(device).eval()
 
 for _ in range({warmup}):
@@ -1086,7 +1094,7 @@ def _build_wrapper_script_content(cfg, model_file, cls_name, inputs_code):
         model_file=model_file,
         cls_name=cls_name,
         inputs_code=inputs_code,
-        binding_code=_WRAPPER_BINDING_CODE,
+        binding_code=_WRAPPER_BINDING_CODE + "\n" + inspect.getsource(_seed_model),
     )
 
 

@@ -54,6 +54,7 @@ from msprof_perf_summary import (
     _move as _move_to_device,
     _resolve_input_groups,
     _bind_case,
+    _seed_model,
 )
 
 
@@ -942,7 +943,7 @@ def _make_verification_report(op):
 
 def _setup_paths(kernel_build_dir):
     inserted_paths = []
-    paths_to_add = [str(WORKDIR)]
+    paths_to_add = [str(WORKDIR), str(kernel_build_dir.parent.parent)]
     if kernel_build_dir.is_dir():
         paths_to_add.append(str(kernel_build_dir))
     else:
@@ -1064,15 +1065,14 @@ def _run_verification(op: str, non_compute: bool = False):
         ref_cls = _find_model_class(ref_module, "Model")
         cand_cls = _find_model_class(cand_module, "ModelNew")
 
-        torch.manual_seed(0)
-        if hasattr(cand_module, "get_init_inputs"):
-            init_inputs = cand_module.get_init_inputs()
-        else:
-            init_inputs = getattr(ref_module, "get_init_inputs", lambda: [])()
-        input_groups = _get_input_groups(ref_module)
         device = _get_device()
+        _seed_model(0, device)
+        init_inputs = getattr(ref_module, "get_init_inputs", lambda: [])()
+        input_groups = _get_input_groups(ref_module)
 
+        _seed_model(0, device)
         ref_model = ref_cls(*_clone_value(init_inputs)).to(device).eval()
+        _seed_model(0, device)
         cand_model = cand_cls(*_clone_value(init_inputs)).to(device).eval()
 
         all_ok, comparisons, input_summaries, case_oks, ref_fallback_error = _run_comparisons(

@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
-"""用法: detect_stateful_impl.py <task_dir>   退出码 0=通过 1=不通过 2=跳过"""
+"""用法: detect_stateful_impl.py <task_dir>   退出码 0=通过 1=检测命中 2=跳过 3=检测异常"""
 from __future__ import annotations
 
 import importlib.util
 import sys
+import traceback
+from collections.abc import Mapping
 from pathlib import Path
 
 
@@ -17,34 +19,6 @@ def _load(path: Path, name: str):
     return mod
 
 
-def _find_class(mod, name):
-    cls = getattr(mod, name, None)
-    if cls is None:
-        raise AttributeError(f"{name} not found in {mod.__file__}")
-    return cls
-
-
-def _input_groups(mod):
-    if hasattr(mod, "get_input_groups"):
-        groups = mod.get_input_groups()
-        if groups:
-            return list(groups)
-    if hasattr(mod, "get_inputs"):
-        one = mod.get_inputs()
-        if one:
-            return [one]
-    return []
-
-
-def _to_device(value, device):
-    import torch
-    if isinstance(value, torch.Tensor):
-        return value.detach().clone().to(device)
-    if isinstance(value, (list, tuple)):
-        return type(value)(_to_device(v, device) for v in value)
-    return value
-
-
 def _same(a, b) -> bool:
     """两个输出是否逐位相同(含嵌套结构)。"""
     import torch
@@ -54,6 +28,8 @@ def _same(a, b) -> bool:
         return bool(torch.equal(a.detach().cpu(), b.detach().cpu()))
     if isinstance(a, (list, tuple)) and isinstance(b, (list, tuple)):
         return len(a) == len(b) and all(_same(x, y) for x, y in zip(a, b))
+    if isinstance(a, Mapping) and isinstance(b, Mapping):
+        return a.keys() == b.keys() and all(_same(a[k], b[k]) for k in a)
     return a == b
 
 
@@ -70,27 +46,55 @@ def main(argv=None) -> int:
     except Exception:
         device = "cuda" if torch.cuda.is_available() else "cpu"
 
+    utility_paths = [
+        Path(__file__).resolve().with_name("input_contract.py"),
+        task_dir.parent / ".claude/skills/ops-profiling/scripts/msprof_perf_summary.py",
+        Path(__file__).resolve().parents[1] / "skills/ops-profiling/scripts/msprof_perf_summary.py",
+        Path(__file__).resolve().parents[1] / ".claude/skills/ops-profiling/scripts/msprof_perf_summary.py",
+    ]
+    utility_path = next((p for p in utility_paths if p.is_file()), None)
+    if utility_path is None:
+        raise FileNotFoundError("canonical ops-profiling input utilities missing")
+    utils = _load(utility_path, "_sd_input_utils")
+    sys.path.insert(0, str(task_dir))
+    sys.path.insert(0, str(task_dir / "kernel/build"))
+    utils._seed_model(0, device)
     ref_mod = _load(task_dir / "model.py", "_sd_ref")
     cand_mod = _load(task_dir / "model_new_ascendc.py", "_sd_cand")
-    groups = _input_groups(ref_mod)
+    groups = utils._resolve_input_groups(ref_mod)
     if len(groups) < 2:
         print("[stateful-detect] SKIP: 只有 1 组用例,无法做变输入探测")
         return 2
 
-    init_inputs = list(ref_mod.get_init_inputs()) if hasattr(ref_mod, "get_init_inputs") else []
+    utils._seed_model(0, device)
+    init_inputs = ref_mod.get_init_inputs() if hasattr(ref_mod, "get_init_inputs") else []
     g0, g1 = groups[0], groups[1]
 
+    def run(model, case, run_device=device):
+        inputs = utils._move(utils._clone(case), run_device)
+        args, kwargs = utils._bind_case(ref_mod.Model, inputs)
+        return utils._clone(model(*args, **kwargs))
+
     with torch.no_grad():
-        ref = _find_class(ref_mod, "Model")(*init_inputs).to(device).eval()
-        r0 = ref(*_to_device(g0, device))
-        r1 = ref(*_to_device(g1, device))
+        utils._seed_model(0, device)
+        ref = utils._find_cls(ref_mod, "Model")(*utils._clone(init_inputs)).to(device).eval()
+        try:
+            r0, r1 = run(ref, g0), run(ref, g1)
+        except Exception as exc:
+            if device == "cpu":
+                raise
+            # Match verification_ascendc: unsupported reference operations may
+            # run on CPU; the candidate must still execute on the leased NPU.
+            print(f"[stateful-detect] reference fallback to CPU: {type(exc).__name__}: {exc}")
+            ref = ref.to("cpu")
+            r0, r1 = run(ref, g0, "cpu"), run(ref, g1, "cpu")
         if _same(r0, r1):
             print("[stateful-detect] SKIP: golden 对这两组输入本就产生相同输出,判据不适用")
             return 2
 
-        cand = _find_class(cand_mod, "ModelNew")(*init_inputs).to(device).eval()
-        c0 = cand(*_to_device(g0, device))
-        c1 = cand(*_to_device(g1, device))
+        utils._seed_model(0, device)
+        cand = utils._find_cls(cand_mod, "ModelNew")(*utils._clone(init_inputs)).to(device).eval()
+        c0, c1 = run(cand, g0), run(cand, g1)
 
     if _same(c0, c1):
         print(
@@ -103,4 +107,10 @@ def main(argv=None) -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    try:
+        code = main()
+    except Exception:
+        print("[stateful-detect] ERROR: 检测未完成", file=sys.stderr)
+        traceback.print_exc()
+        code = 3
+    raise SystemExit(code)

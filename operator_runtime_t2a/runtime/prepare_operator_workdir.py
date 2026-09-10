@@ -117,14 +117,14 @@ class _OpSig:
 _SCHEMA_TYPE = {
     "tensor": "Tensor", "tensor?": "Tensor?",
     "int": "int", "int?": "int?", "float": "float", "float?": "float?",
-    "bool": "bool", "str": "str", "int[]": "int[]", "int[]?": "int[]?",
+    "bool": "bool", "str": "str", "str?": "str?", "int[]": "int[]", "int[]?": "int[]?",
     "tensor[]": "Tensor[]",
 }
 _CPP_TYPE = {
     "tensor": "const at::Tensor &", "tensor?": "const c10::optional<at::Tensor> &",
     "int": "int64_t ", "int?": "const c10::optional<int64_t> &",
     "float": "double ", "float?": "const c10::optional<double> &",
-    "bool": "bool ", "str": "const std::string &",
+    "bool": "bool ", "str": "const std::string &", "str?": "const c10::optional<std::string> &",
     "int[]": "at::IntArrayRef ", "int[]?": "at::OptionalIntArrayRef ",
     "tensor[]": "at::TensorList ",
 }
@@ -221,7 +221,7 @@ def _ann_kind(node) -> str | None:
 
 
 def _json_param_kinds(json_path: Path | None) -> dict:
-    """读 case json 首行,按输入项 name 给 forward 参数定型(NPUKernelBench 形态)。
+    """按全部 case 的输入项定型；int/list 参数沿用 cannbot 的单元素列表约定。
 
     type 字段权威:tensor/scalar/attr/tensor_list。scalar 一律放宽为 float(schema float
     兼容 int 传入);required:false 的 tensor 按 Tensor? 处理。
@@ -231,28 +231,40 @@ def _json_param_kinds(json_path: Path | None) -> dict:
         return kinds
     try:
         with open(json_path, encoding="utf-8") as f:
-            for line in f:
+            for line_number, line in enumerate(f, 1):
                 if line.strip():
                     case = json.loads(line)
-                    break
-            else:
-                return kinds
-    except Exception:
+                    for ent in case.get("inputs", []):
+                        name, typ = ent.get("name"), ent.get("type")
+                        if not name:
+                            continue
+                        if typ == "tensor":
+                            kind = "tensor?" if ent.get("required") is False else "tensor"
+                        elif typ == "tensor_list":
+                            kind = "tensor[]"
+                        elif typ == "scalar":
+                            kind = "float"
+                        elif typ == "attr":
+                            kind = _value_kind(ent.get("value"))
+                            if kind == "unknown":
+                                continue  # None 不应抢先把后续字符串/列表定成 int。
+                        else:
+                            continue
+                        previous = kinds.get(name, kind)
+                        if {previous, kind} <= {"int", "int[]"}:
+                            kind = "int[]" if "int[]" in (previous, kind) else "int"
+                        elif {previous, kind} <= {"tensor", "tensor?"}:
+                            kind = "tensor?" if "tensor?" in (previous, kind) else "tensor"
+                        elif {previous, kind} <= {"int", "float"}:
+                            kind = "float" if "float" in (previous, kind) else "int"
+                        elif previous != kind:
+                            raise ValueError(
+                                f"{json_path}:{line_number}: incompatible case types for "
+                                f"parameter {name!r}: {previous} and {kind}"
+                            )
+                        kinds[name] = kind
+    except (OSError, json.JSONDecodeError):
         return kinds
-    for ent in case.get("inputs", []):
-        name, typ = ent.get("name"), ent.get("type")
-        if not name:
-            continue
-        if typ == "tensor":
-            kinds[name] = "tensor?" if ent.get("required") is False else "tensor"
-        elif typ == "tensor_list":
-            kinds[name] = "tensor[]"
-        elif typ == "scalar":
-            kinds[name] = "float"   # 放宽:schema float 兼容 int 传入
-        elif typ == "attr":
-            v = ent.get("value")
-            kind = _value_kind(v) if v is not None else "unknown"
-            kinds[name] = kind if kind != "unknown" else "int"
     return kinds
 
 
@@ -277,6 +289,7 @@ def _opt_wrap(kind: str) -> str:
         "tensor": "tensor?",
         "int": "int?",
         "float": "float?",
+        "str": "str?",
         "int[]": "int[]?",
     }.get(kind, kind)
 
@@ -307,6 +320,13 @@ def _extract_op_signature(task_path: Path, json_path: Path | None) -> _OpSig | N
     json_kinds = _json_param_kinds(json_path)
     notes: list[str] = []
 
+    def _default_source(dflt) -> str | None:
+        if dflt is None:
+            return None
+        value = _eval_const(dflt, consts)
+        # Python wrapper 与 schema 共用已解析的值，不能引用 reference 私有的常量名。
+        return repr(value) if value is not _UNKNOWN else ast.unparse(dflt)
+
     def _fwd_kind(arg, dflt) -> str:
         kind = json_kinds.get(arg.arg) or _ann_kind(arg.annotation)
         if kind is None and dflt is not None:
@@ -319,7 +339,7 @@ def _extract_op_signature(task_path: Path, json_path: Path | None) -> _OpSig | N
             kind = "tensor"
         # 无注解时放宽默认 tensor —— cudallm/KernelBench 多参 forward 已验证全是 tensor;
         # NPUKernelBench 由 json type 字段覆盖。
-        if isinstance(dflt, ast.Constant) and dflt.value is None:
+        if dflt is not None and _eval_const(dflt, consts) is None:
             kind = _opt_wrap(kind)
         return kind
 
@@ -340,10 +360,10 @@ def _extract_op_signature(task_path: Path, json_path: Path | None) -> _OpSig | N
         defaults = [None] * (len(pos) - len(a.defaults)) + list(a.defaults)
         for arg, dflt in zip(pos, defaults):
             fwd.append(_Param(arg.arg, _fwd_kind(arg, dflt),
-                              ast.unparse(dflt) if dflt is not None else None))
+                              _default_source(dflt)))
         for arg, dflt in zip(a.kwonlyargs, a.kw_defaults):
             kind = _fwd_kind(arg, dflt)
-            kwonly.append(_Param(arg.arg, kind, ast.unparse(dflt) if dflt is not None else "None"))
+            kwonly.append(_Param(arg.arg, kind, _default_source(dflt) if dflt is not None else "None"))
     else:
         fwd = [_Param("x", "tensor")]
 
@@ -376,7 +396,7 @@ def _extract_op_signature(task_path: Path, json_path: Path | None) -> _OpSig | N
                     if dv is not _UNKNOWN:
                         kind = _value_kind(dv)
                 in_op = kind != "unknown"
-                if in_op and isinstance(dflt, ast.Constant) and dflt.value is None:
+                if in_op and dflt is not None and _eval_const(dflt, consts) is None:
                     # None 默认值 → optional 形式(对齐 _fwd_kind)。不包的话 schema 写成
                     # `int stride=None`(类型仍是非 optional int,schema 能解析),
                     # 但生成的 C++ impl 是 int64_t 非可选,模型真传 None 时调用即崩
@@ -386,7 +406,7 @@ def _extract_op_signature(task_path: Path, json_path: Path | None) -> _OpSig | N
                     notes.append(f"init 参数 {arg.arg} 的值无法静态解析,未纳入 op 签名;"
                                  f"若 kernel 需要请自行接线并同步 register.cpp/ops.h/op_host")
                 init.append(_Param(arg.arg, kind,
-                                   ast.unparse(dflt) if dflt is not None else None,
+                                   _default_source(dflt),
                                    in_op=in_op))
     return _OpSig(fwd=fwd, kwonly=kwonly, init=init, ret_arity=ret_arity,
                   init_storage=init_storage, fwd_vararg=fwd_vararg, notes=notes)
@@ -401,17 +421,19 @@ def _schema_default(p: _Param) -> str | None:
         # 小写 true/false 会被 parse_schema 拒("invalid numeric default value")。
         # d 来自 ast.unparse,本身就是 "True"/"False",原样透传。
         return d
-    if p.kind == "str":
-        return json.dumps(d.strip("'\""))
     if d == "None":
         return "None"
-    if p.kind.endswith("[]"):
+    if p.kind in ("str", "str?"):
+        return json.dumps(ast.literal_eval(d), ensure_ascii=False)
+    if p.kind in ("int[]", "int[]?"):
         # list 默认值必须是 torch 的方括号语法 [1, 1];ast.unparse 给出的 Python
         # 元组 (1, 1) / (1,) 直接被拒 —— 且单元素元组去尾逗号,(1,) → [1] 而非 [1,]。
         try:
             vals = ast.literal_eval(d)
         except (ValueError, SyntaxError):
             vals = None
+        if isinstance(vals, int) and not isinstance(vals, bool):
+            vals = [vals]
         if isinstance(vals, (tuple, list)):
             return "[" + ", ".join(str(v) for v in vals) + "]"
     return d
@@ -513,9 +535,14 @@ def _render_model_new(op: str, sig: _OpSig) -> str:
         for p in sig.kwonly:
             parts.append(f"{p.name}={p.default if p.default is not None else 'None'}")
     lines.append(f"    def forward(self, {', '.join(parts)}):")
-    call_args = [p.name for p in sig.fwd if p.in_op]
-    call_args += [f"self.{p.name}" for p in sig.init if p.in_op]
-    call_args += [f"{p.name}={p.name}" for p in sig.kwonly if p.in_op]
+    def call_arg(p, value):
+        if p.kind in ("int[]", "int[]?"):
+            return f"([{value}] if isinstance({value}, int) else {value})"
+        return value
+
+    call_args = [call_arg(p, p.name) for p in sig.fwd if p.in_op]
+    call_args += [call_arg(p, f"self.{p.name}") for p in sig.init if p.in_op]
+    call_args += [f"{p.name}={call_arg(p, p.name)}" for p in sig.kwonly if p.in_op]
     lines.append(f"        # 必须真调 torch.ops.npu.{op}(AST 退化检测会查),不要加 plain-torch 兜底。")
     lines.append(f"        return torch.ops.npu.{op}({', '.join(call_args)})")
     return "\n".join(lines) + "\n"
@@ -544,7 +571,7 @@ namespace {{
 // 要改请四处同步。
 TORCH_LIBRARY_FRAGMENT(npu, m)
 {{
-    m.def("{op}({schema_args}) -> {ret}");
+    m.def({json.dumps(f'{op}({schema_args}) -> {ret}', ensure_ascii=False)});
 }}
 
 TORCH_LIBRARY_IMPL(npu, {dispatch_key}, m)
@@ -581,7 +608,7 @@ def _render_op_host_cpp(op: str, sig: _OpSig, ordered: list[_Param], cpp_args: s
     tensor_lists = [p for p in ordered if p.kind == "tensor[]"]
     unwired = [
         p for p in ordered
-        if p.kind in ("tensor?", "int?", "float?", "str", "int[]", "int[]?", "tensor[]")
+        if p.kind in ("tensor?", "int?", "float?", "str", "str?", "int[]", "int[]?", "tensor[]")
     ]
     scalars = [p for p in ordered if p.kind in _KERNEL_SCALAR]
     lines: list[str] = []
@@ -679,7 +706,7 @@ def _render_op_host_cpp(op: str, sig: _OpSig, ordered: list[_Param], cpp_args: s
     a("    int64_t _formerLength = _totalLengthCoreAlign;")
     a("    int64_t _tailLength = _totalLength - _formerNum * _formerLength;")
     a("")
-    a("    int64_t _bufferCoefficient = _dtypeSize * 4;  // 按 UB 分配表调整(in/out 双 buffer)")
+    a(f"    int64_t _bufferCoefficient = _dtypeSize * {2 * (max(1, len(tensors)) + 1)};  // 全部输入 queue + 输出 queue，各双 buffer")
     a("    if (_bufferCoefficient <= 0) { _bufferCoefficient = 1; }")
     a("    int64_t _maxTileElements = static_cast<int64_t>(_ubSize) / _bufferCoefficient;")
     a("    int64_t _alignElements = 32 / (_dtypeSize > 0 ? _dtypeSize : 1);")

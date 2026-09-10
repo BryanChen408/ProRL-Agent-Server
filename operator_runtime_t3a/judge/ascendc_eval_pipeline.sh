@@ -51,7 +51,8 @@ run_npu_phase() {
   fi
 }
 
-OP_NAME="" IMPL_FILE="" TASK_FILE="" OUT_DIR="" INCREMENTAL=0
+# Agent 默认复用本会话构建；独立 judge 在下方强制关闭增量。
+OP_NAME="" IMPL_FILE="" TASK_FILE="" OUT_DIR="" INCREMENTAL=1
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --op_name)     OP_NAME="$2"; shift 2;;
@@ -78,6 +79,7 @@ EVALUATED_CANDIDATE_SHA256=""
 
 SRC_DIR="$WORK_ROOT/$OP_NAME"
 AGENT_SIDE=0; [[ -d "$SRC_DIR" ]] && AGENT_SIDE=1
+[[ "$AGENT_SIDE" == "1" ]] || INCREMENTAL=0  # 独立 judge 始终从源码重建。
 STATE_DIR="$WORK_ROOT/output/.selfcheck"
 PACK_SH="${_SCRIPT_DIR}/pack_submission.sh"
 
@@ -671,7 +673,13 @@ rm -f "$OUT_DIR/metrics.json" "$OUT_DIR/metrics_error.log" \
 
 # Step0
 WORK="$OUT_DIR/work"
-[[ "$INCREMENTAL" == "1" ]] || rm -rf "$WORK"
+PREVIOUS_WORK="$OUT_DIR/work.previous"
+rm -rf "$PREVIOUS_WORK"
+if [[ "$INCREMENTAL" == "1" && -d "$WORK" ]]; then
+  mv "$WORK" "$PREVIOUS_WORK" || exit 1
+else
+  rm -rf "$WORK"
+fi
 mkdir -p "$WORK"
 if [[ ! -f "$IMPL_FILE" ]]; then
   if [[ ! -d "$SRC_DIR" ]]; then
@@ -756,6 +764,52 @@ if ! cp -r "$ASCENDC_SKILLS_SRC/$TRANS_SKILL" "$SK/$TRANS_SKILL" \
   write_metrics false false false "" "" "" \
     "judge 环境异常(get_input 之前):无法从 $ASCENDC_SKILLS_SRC 铺设评测脚本"
   echo "[ascendc-eval] skills setup FAILED"; fail_hint; exit 1
+fi
+
+if [[ "$INCREMENTAL" == "1" ]]; then
+  # Reuse cannbot/CMake dependency tracking, never binaries from the submission.
+  # The candidate was extracted into a fresh tree and stripped of build products.
+  if ! BUILD_TYPE="$BUILD_TYPE" "$AST_CHECK_PYTHON" - "$TASK_DIR" "$WORK" "$PREVIOUS_WORK" "$SK/$TRANS_SKILL/scripts/build_ascendc.py" <<'PYINCREMENTAL'
+import hashlib, json, os, shutil, sys
+from pathlib import Path
+task, work, previous, builder = map(Path, sys.argv[1:])
+digest = lambda p: hashlib.sha256(p.read_bytes()).hexdigest()
+files = {str(p.relative_to(task)): digest(p) for p in task.rglob('*') if p.is_file()}
+context = {k: os.environ.get(k, '') for k in ('SOC_VERSION', 'BUILD_TYPE', 'ASCEND_HOME_PATH', 'ASCEND_INSTALL_PATH', 'CC', 'CXX', 'CFLAGS', 'CXXFLAGS', 'LDFLAGS')}
+context['builder'] = digest(builder)
+manifest = {'op': task.name, 'files': files, 'context': context}
+try:
+    old = json.loads((previous / '.incremental.json').read_text())
+except (OSError, ValueError):
+    old = {}
+old_task = previous / task.name
+old_files = old.get('files', {})
+# Deletion/renaming and build-configuration changes conservatively invalidate.
+# ponytail: cache reuse is limited to one task/runtime context; no cross-session cache.
+compatible = (old.get('op') == task.name and old.get('context') == context
+              and old_files.keys() == files.keys()
+              and all(old_files.get(n) == h for n, h in files.items()
+                      if Path(n).name in {'CMakeLists.txt', 'setup.py', 'pyproject.toml'}
+                      or Path(n).suffix == '.cmake'))
+if compatible and (old_task / 'kernel/build').is_dir():
+    for name, value in files.items():
+        path, old_path = task / name, old_task / name
+        if old_files.get(name) == value and old_path.is_file():
+            stat = old_path.stat()
+            os.utime(path, ns=(stat.st_atime_ns, stat.st_mtime_ns))
+        else:
+            os.utime(path, None)  # A restored older candidate must still rebuild changed source.
+    shutil.move(str(old_task / 'kernel/build'), str(task / 'kernel/build'))
+    print('[ascendc-eval] incremental: reuse local build; CMake tracks changed inputs')
+else:
+    print('[ascendc-eval] incremental: clean build (no compatible local cache)')
+(work / '.incremental.json').write_text(json.dumps(manifest))
+shutil.rmtree(previous, ignore_errors=True)
+PYINCREMENTAL
+  then
+    write_metrics false false false "" "" "" "增量构建缓存准备失败" "" "build_cache_error"
+    fail_hint; exit 1
+  fi
 fi
 
 # Step1
@@ -902,12 +956,18 @@ if [[ -f "$DETECT" ]]; then
   echo "[ascendc-eval] Step2c stateful/cache detection (NPU lease)"
   DET_OUT=$(cd "$WORK" && run_npu_phase detect "$PY_BIN" "$DETECT" "$TASK_DIR" 2>&1); DET_RC=$?
   printf "%s\n" "$DET_OUT" > "$OUT_DIR/detect.log"
-  if [[ "$DET_RC" == "1" ]]; then
+  if [[ "$DET_RC" == "1" ]] && grep -q '^\[stateful-detect\] FAIL:' "$OUT_DIR/detect.log"; then
     write_metrics true false false "" "" "" "对拍结果不可信(缓存/常量输出): $DET_OUT" \
       "$OUT_DIR/detect.log" "stateful_impl_detected"
     echo "[ascendc-eval] stateful/cache DETECTED"; fail_hint; exit 1
   fi
-  [[ "$DET_RC" == "2" ]] && echo "  ↳ ${DET_OUT}"
+  if [[ "$DET_RC" == "2" ]] && grep -q '^\[stateful-detect\] SKIP:' "$OUT_DIR/detect.log"; then
+    echo "  ↳ ${DET_OUT}"
+  elif [[ "$DET_RC" != "0" ]]; then
+    write_metrics true true false "" "" "" "stateful 检测未完成: $DET_OUT" \
+      "$OUT_DIR/detect.log" "stateful_detector_error"
+    echo "[ascendc-eval] stateful detector ERROR"; fail_hint; exit 1
+  fi
 fi
 
 # Step3

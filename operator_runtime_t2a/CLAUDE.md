@@ -77,8 +77,8 @@ Phase 0 必须读取原始 `input/{op_name}.py` 的 `Model.__init__()`、`forwar
 当 Phase 4/5/6 出现争议（如 skill 修复建议与 archive 实现矛盾、API 用法不确定、性能分析结论有分歧）时，agent 作为仲裁者查阅以下资源：
 | 资源 | 路径 | 用途 |
 |------|------|------|
-| API 文档 | `asc-devkit/docs/api/` | 确认 API 签名、dtype 支持矩阵 |
-| 官方示例 | `asc-devkit/examples/` | 确认正确的编程模式和用法 |
+| API 文档 | `$ASC_DEVKIT_DIR/docs/zh/api/` | 确认 API 签名、dtype 支持矩阵 |
+| 官方示例 | `$ASC_DEVKIT_DIR/examples/` | 确认正确的编程模式和用法 |
 | 历史成功任务 | `.claude/workflows/templates/archive_tasks/` | 确认 host/kernel 的正确传参模式 |
 
 > asc-devkit 的查阅路线写在 `.claude/skills/tilelang2ascend-translator/SKILL.md`；直接 Read 该文件后，只按当前错误或拟用 API 查必要文档。
@@ -89,7 +89,7 @@ Phase 0 必须读取原始 `input/{op_name}.py` 的 `Model.__init__()`、`forwar
 - `model_new_tilelang.py` 和 `model_new_ascendc.py` 中禁止使用 torch 算子；只允许进行张量创建，张量变换以及调用你实现的自定义算子。
 - 在 TileLang / AscendC 实现中不能用标量逐元素写法，只能使用 `T.copy`、`T.tile.*`、矩阵/向量原语等块级或向量化操作
 - 只允许修改或新增 `{output_dir}/` 目录中的文件，不要改动其他目录中的文件。
-- 只允许读取当前工作区目录结构内的文件与子目录；禁止读取当前工作区之外的任何路径。
+- 允许读取当前工作区，以及本环境覆盖区「开发源码只读范围」列出的官方资料和工具链源码；禁止读取其他工作区外路径。
 - archive_tasks 目录是历史成功任务，可作为参考实现
 
 ---
@@ -146,6 +146,15 @@ Phase 0 必须读取原始 `input/{op_name}.py` 的 `Model.__init__()`、`forwar
 - `ascendc-api-best-practices/references/api-repeat-limits.md`
 - `ascendc-api-best-practices/references/api-restrictions.md`
 - `ascendc-api-best-practices/references/api-transpose.md`
+- `ascendc-code-gen/templates/(整棵目录)`
+- `ascendc-code-gen/references/GUIDE.md`
+- `ascendc-code-gen/references/basic-data-structures-api.md`
+- `ascendc-code-gen/references/data-copy-api.md`
+- `ascendc-code-gen/references/kernel-constraints.md`
+- `ascendc-code-gen/references/resource-management-api.md`
+- `ascendc-code-gen/references/sort_topk-api.md`
+- `ascendc-code-gen/references/sync-control-api.md`
+- `ascendc-code-gen/references/vector-compute-api.md`
 - `ascendc-crash-debug/SKILL.md`
 - `ascendc-crash-debug/references/crash_workflow.md`
 - `ascendc-crash-debug/references/memcheck/README.md`
@@ -154,6 +163,14 @@ Phase 0 必须读取原始 `input/{op_name}.py` 的 `Model.__init__()`、`forwar
 - `ascendc-crash-debug/scripts/memcheck_input.json.template`
 - `ascendc-crash-debug/scripts/parse_plog.py`
 - `ascendc-crash-debug/scripts/run_memcheck_pre.sh`
+- `ascendc-design-doc-generator/templates/(整棵目录)`
+- `ascendc-design-doc-generator/references/elementwise-tiling.md`
+- `ascendc-design-doc-generator/references/general-tiling-principles.md`
+- `ascendc-design-doc-generator/references/hardware-architecture.md`
+- `ascendc-design-doc-generator/references/index-tiling.md`
+- `ascendc-design-doc-generator/references/pooling-tiling.md`
+- `ascendc-design-doc-generator/references/reduction-tiling.md`
+- `ascendc-design-doc-generator/references/sort-tiling.md`
 - `ascendc-docs-search/SKILL.md`
 - `ascendc-docs-search/references/api-index.md`
 - `ascendc-docs-search/references/compatibility.md`
@@ -652,6 +669,29 @@ Phase 4 的固定入口已经完成正确性验证和第一轮逐 case 测速，
 `references/` 文件。不要尝试调用 Skill，也不要等待 Skill 返回内容；读完后由当前会话直接
 检查和修改工程。路径不确定时先列出 `.claude/skills/`，不要猜路径。
 
+首次设计或找参考实现时，先 Read `.claude/workflows/cannbot-reference-index.md`。
+它列出 cannbot 原版设计资料、host/kernel 模板及 archive 的真实文件名；只读本题相关条目，
+已读且未变化的资料不重复读。旧资料仅提供实现参考，其中的调度、初始化与评测指令不适用。
+Read 找不到时先 Glob 所在目录，再按真实文件名 Read；不要连续猜 `_kernel.cpp` 等后缀。
+
+新增的两个目录是纯资料包，没有 `SKILL.md`，直接从以下文件读取：
+- `.claude/skills/ascendc-design-doc-generator/templates/design-template.md`
+- `.claude/skills/ascendc-code-gen/references/GUIDE.md`
+
+以上 `.claude/...` 路径均相对会话工作目录 `/opt/workspace/agent_workdir/`，
+不要使用宿主仓库的 `operator_runtime_t2a/skills/` 路径。两包的其他资料在各自
+`references/`、`templates/` 下，具体文件名见上述索引；目录本身用 Glob，不用 Read。
+
+## 开发源码只读范围
+
+除工作区和 `$ASC_DEVKIT_DIR` 外，允许只读查阅**当前评测工具链**的 CANN 头文件、
+实现源码、CMake 定义、官方 OPP 源码，以及当前 Python 安装的 TileLang 包源码和仓内示例。
+只在文档不足、类型/签名不明或修复具体错误时读取，不重复探索已确认的目录。
+先按 `.claude/workflows/cannbot-reference-index.md` 的「当前工具链源码」步骤定位，
+复用 `tools/env.sh`，以实际存在的路径为准；不照搬历史版本目录、不搜索其他 SDK 版本。
+这允许 Read/Grep/Glob 诊断，不允许改写 SDK/库文件、安装包、导入未知示例或执行其中的
+构建/测试脚本。评测、设备选择、精度和预算仍由固定 pipeline 管理。
+
 ## 预生成骨架是唯一工程起点，不是算子语义契约
 
 Polar prepare 在 Agent 启动前已经读取本题 `model.py` 的 `__init__` / `forward`，并在
@@ -794,18 +834,20 @@ Phase 6(全量恢复)因此已从工作流移除。不要自行精简、修改�
   实现代码在 `$ASC_DEVKIT_DIR/impl/`。写 kernel 前用 `ascendc-docs-search` 查 API 签名与
   命名空间,不要凭记忆写。
 - 文档里凡写 `asc-devkit/...` 的地方,一律读作 `$ASC_DEVKIT_DIR/...`。
-- skill 文档里 `$ASC_DEVKIT_DIR/examples/00_introduction/...` 这类路径是旧版布局,
-  本版实际是 `examples/{01_simd_cpp_api,02_simd_c_api,03_simt_api}/`,用 find 定位。
+- 示例入口见 `.claude/skills/ascendc-docs-search/references/example-catalog.md`；
+  目录随版本变化，先列实际目录再读取，不照搬历史绝对路径。
 - 编译报 `no template named 'TQue'` / `did you mean 'AscendC::...'` 这类,是命名空间或签名
   记错,查 `$ASC_DEVKIT_DIR/docs/zh/api/` 核实,不要靠猜改。
 - 检索文档一律从 `$ASC_DEVKIT_DIR` 根目录搜(Grep/Glob 的 path 填根目录),不要凭记忆
-  猜子路径——docs/ 下有两棵树(`docs/zh/api/` 与 `docs/api/`),只搜子树会漏;
-  搜不到时换关键词(去后缀、换同义词),不要直接下「API 不存在」的结论。
+  猜子路径或假定存在 `docs/api/`；API 根目录搜索无结果时再扩大到整个资料仓；
+  搜不到时换关键词(去后缀、换同义词)，再按「开发源码只读范围」查实际 SDK 定义，
+  不要直接下「API 不存在」的结论。
 
 ## 禁止
 
 - 自行设置 `ASCEND_RT_VISIBLE_DEVICES`。
 - 运行 `npu-smi` 或任何探测 NPU 的命令。`SOC_VERSION` 已在环境变量里。
-- 读取、修改或删除 `tools/` 与 `.claude/skills/*/scripts/` 下的脚本。
+- 修改或删除 `tools/` 与 `.claude/skills/*/scripts/` 下的脚本。允许用 Read/Grep
+  只读检查脚本，定位输入契约、参数和报错；不允许复制改写后执行或绕过固定入口判分。
 - 修改评测参数(SOC_VERSION / warmup / repeats / 精度阈值)。
 - 向用户提问。这是非交互运行,没有人会回答。
