@@ -130,6 +130,34 @@ fi
   || { echo "[pack] best 未更新:本次评测没有可读 metrics"; exit 0; }
 [[ -f "$CANDIDATE" ]] \
   || { echo "[pack] best 未更新:实际评测 candidate 不存在:$CANDIDATE"; exit 0; }
+
+# Managed T2A: preserve the evaluated source before returning the tool result.
+# Local best/meta can be deleted freely without resetting the host comparison.
+# Standalone and older gateways keep the existing local promotion path below.
+if [[ -n "${POLAR_OPERATOR_BEST_URL:-}" ]]; then
+  CANDIDATE="$CANDIDATE" METRICS="$METRICS" "$PY_BIN" - <<'PY'
+import json
+import os
+import sys
+import urllib.request
+
+http = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+data = json.dumps({"candidate": os.environ["CANDIDATE"], "metrics": os.environ["METRICS"]}).encode()
+for attempt in range(2):
+    try:
+        req = urllib.request.Request(os.environ["POLAR_OPERATOR_BEST_URL"], data=data,
+                                     headers={"Content-Type": "application/json"}, method="POST")
+        with http.open(req, timeout=30) as response:
+            result = json.load(response)
+        print(result["message"])
+        print("[pack] judge 优先使用 Gateway 留存的历史 best")
+        break
+    except Exception as exc:
+        if attempt == 1:
+            sys.exit(f"[pack] FAILED: Gateway best 留存失败: {exc}")
+PY
+  exit $?
+fi
 mkdir -p "$SUB_DIR"
 
 # 比较与替换在同一个文件锁内完成。reward_score 与 server 端 reward_from_metrics 顺序一致；
@@ -184,6 +212,17 @@ def integer(value, default=0):
     except (TypeError, ValueError, OverflowError):
         return default
 
+def atomic_json(path: Path, data: dict):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, name = tempfile.mkstemp(prefix=path.name + ".tmp.", dir=str(path.parent))
+    os.close(fd)
+    tmp = Path(name)
+    try:
+        tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+        os.replace(tmp, path)
+    finally:
+        tmp.unlink(missing_ok=True)
+
 def score(metrics: dict):
     error_type = str(metrics.get("error_type") or "")
     if error_type in INFRA:
@@ -231,15 +270,29 @@ if str(metrics.get("op_name") or "") != op:
     raise SystemExit(0)
 
 current_score, tier, label = score(metrics)
-if current_score is None:
-    print(f"SKIP\t{label}")
-    raise SystemExit(0)
-
 candidate_hash = sha256(candidate)
 metrics_hash = sha256(metrics_path)
 evaluated_hash = str(metrics.get("evaluated_candidate_sha256") or "")
 if not evaluated_hash or evaluated_hash != candidate_hash:
     print("SKIP\tmetrics 与实际 candidate 哈希不匹配；拒绝把旧结论贴到新源码")
+    raise SystemExit(0)
+record_path = os.environ.get("POLAR_EVALUATION_RECORD_PATH")
+record_id = Path(record_path).stem if record_path else None
+if record_path and not Path(record_path).exists():
+    # The Gateway supplies a private path. HTTP retries reuse this record;
+    # scores are computed exactly once by the same selector that updates best.
+    atomic_json(Path(record_path), {
+        "record_id": record_id, "op_name": op, "score": current_score,
+        "candidate_sha256": candidate_hash, "metrics_sha256": metrics_hash,
+        "metrics": metrics,
+    })
+elif record_path:
+    recorded = json.loads(Path(record_path).read_text())
+    if (recorded["candidate_sha256"] != candidate_hash or recorded["metrics_sha256"] != metrics_hash):
+        raise ValueError("Evaluation record identity mismatch")
+    current_score = recorded["score"]
+if current_score is None:
+    print(f"SKIP\t{label}")
     raise SystemExit(0)
 lock_path.parent.mkdir(parents=True, exist_ok=True)
 with lock_path.open("a+") as lock:
@@ -312,16 +365,10 @@ with lock_path.open("a+") as lock:
         "candidate_sha256": candidate_hash,
         "candidate_path": str(candidate.resolve()),
         "metrics_sha256": metrics_hash,
+        "evaluation_record_id": record_id,
         "updated_at_unix": time.time(),
     }
-    fd, tmp_name = tempfile.mkstemp(prefix=meta_path.name + ".tmp.", dir=str(meta_path.parent))
-    os.close(fd)
-    tmp_meta = Path(tmp_name)
-    try:
-        tmp_meta.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-        os.replace(tmp_meta, meta_path)
-    finally:
-        tmp_meta.unlink(missing_ok=True)
+    atomic_json(meta_path, payload)
 
     # meta 先落盘，best 后落盘。若在中间被杀，外部 judge 至多继续读旧 best；
     # 下次调用会依据 meta 中的不可变 candidate_path 自动完成这次提升。

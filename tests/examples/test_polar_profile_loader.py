@@ -45,6 +45,7 @@ def test_real_profiles_separate_attempt_credit_from_call_limits(tmp_path, name):
     assert op["evaluator"]["config"]["judge_timeout"] == 5400
     assert topology["gateway"]["nodes"][0]["inference"]["base_url"] == profile["service"]["sglang_router_url"]
     if name == "t3a":
+        assert "operator_completion_guard" not in op["agent"]["settings"]
         assert env["POLAR_T3A_ATTEMPT_SPANS"] == "1"
         assert env["POLAR_PIPELINE_BUDGET_ENABLED"] == "0"
         assert env["POLAR_GEN_PIPELINE_MAX"] == env["POLAR_OPT_PIPELINE_MAX"] == ""
@@ -53,13 +54,19 @@ def test_real_profiles_separate_attempt_credit_from_call_limits(tmp_path, name):
         assert "max_turns" not in op["agent"]["settings"]
         assert "--max-turns" not in command
     else:
+        assert op["agent"]["settings"]["operator_completion_guard"] == {
+            "generation_max": profile["operator_runtime"]["budget"]["generation_max"],
+            "optimization_max": profile["operator_runtime"]["budget"]["optimization_max"],
+            "perf_target": 1.1,
+        }
         assert env["POLAR_T3A_ATTEMPT_SPANS"] == "0"
         assert env["POLAR_PIPELINE_BUDGET_ENABLED"] == "1"
         assert env["POLAR_GEN_PIPELINE_MAX"] == str(profile["operator_runtime"]["budget"]["generation_max"])
         assert env["POLAR_OPT_PIPELINE_MAX"] == str(profile["operator_runtime"]["budget"]["optimization_max"])
         assert op["runtime"]["env"]["POLAR_GEN_PIPELINE_MAX"] == env["POLAR_GEN_PIPELINE_MAX"]
-        assert op["agent"]["settings"]["max_turns"] == 150
-        assert "--max-turns 150" in command
+        max_turns = profile["operator"]["agent"]["max_turns"]
+        assert op["agent"]["settings"]["max_turns"] == max_turns
+        assert f"--max-turns {max_turns}" in command
 
 
 def test_time_only_start_stops_old_watcher_without_starting_another(tmp_path):

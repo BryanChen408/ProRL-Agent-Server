@@ -22,6 +22,8 @@ from polar.gateway.dispatcher import (
     SessionStage,
 )
 from polar.gateway.inflight import InflightGenerationTracker
+from polar.gateway.operator_completion import completion_state
+from polar.gateway.operator_best import best_root, selected_candidate, retain_best, evaluation_records
 from polar.gateway.session import SessionRegistry
 from polar.gateway.storage import SessionStore
 from polar.agent.base import BaseHarness
@@ -38,7 +40,7 @@ from polar.rollout.models import (
     SessionStatus,
 )
 from polar.rollout.timer import StageTimer
-from polar.runtime.base import BaseRuntime
+from polar.runtime.base import BaseRuntime, RUNTIME_SESSION_DIR
 from polar.runtime.factory import create_runtime
 from polar.runtime.models import ExecInput, RuntimeSpec
 from polar.trajectory.models import EvalResult, EvaluatorSpec, StrategySpec, Trajectory
@@ -294,6 +296,31 @@ class GatewayNodeManager:
         snapshot = await self._dispatcher.snapshot()
         return self._snapshot_to_metrics(snapshot)
 
+    def _operator_task_state(self, request: SessionDispatchRequest) -> dict | None:
+        policy = request.agent.settings.get("operator_completion_guard")
+        if policy is None:
+            return None
+        records = self.storage.get_completions(request.session_id, limit=1)
+        return completion_state(
+            request.session_id, records[-1] if records else {},
+            workdir=self._resolve_runtime_spec(request).workdir or RUNTIME_SESSION_DIR,
+            generation_max=policy["generation_max"],
+            optimization_max=policy["optimization_max"], perf_target=policy["perf_target"],
+            op_name=str(request.evaluator.config.get("op_name") or ""),
+        )
+
+    async def operator_task_state(self, session_id: str) -> dict | None:
+        managed = await self._dispatcher.get_session(session_id)
+        if managed is None:
+            return None
+        return await asyncio.to_thread(self._operator_task_state, managed.request)
+
+    async def retain_operator_best(self, session_id: str, candidate: str, metrics: str) -> dict | None:
+        managed = await self._dispatcher.get_session(session_id)
+        if managed is None or managed.stage != SessionStage.RUNNING:
+            return None
+        return await retain_best(managed, candidate, metrics)
+
     def _handle_dispatcher_stage_change(self, managed: ManagedSession) -> None:
         status = {
             SessionStage.INIT: SessionStatus.INITIALIZING,
@@ -435,6 +462,22 @@ class GatewayNodeManager:
             # Postprocess always runs so harnesses can collect artifacts from
             # failed or timed-out agent runs before post-run evaluation.
             await self._await_with_budget(harness.postprocess(runtime, agent_result), managed)
+            if (agent_result.status == "completed"
+                    and request.agent.settings.get("operator_completion_guard") is not None):
+                try:
+                    state = await asyncio.to_thread(self._operator_task_state, request)
+                except Exception as exc:
+                    logger.exception("Operator completion check failed for %s", request.session_id)
+                    # Keep post-run judging even if the completion authority fails.
+                    state = {"stop_allowed": False, "completion_reason": "guard_unavailable",
+                             "reason": f"Operator completion check unavailable: {exc}"}
+                if state is not None:
+                    agent_result.metadata["operator_completion_state"] = state
+                    if not state["stop_allowed"]:
+                        agent_result.status = "failed"
+                        agent_result.return_code = 1
+                        agent_result.error = state["reason"]
+                        agent_result.metadata["termination_reason"] = "operator_task_incomplete"
             managed.agent_result = agent_result
 
         except GatewayExecutionTimeout as exc:
@@ -863,6 +906,11 @@ class GatewayNodeManager:
         finally:
             managed.timer.mark("build", "finished")
 
+        if agent_result.metadata.get("operator_completion_state") is not None:
+            trajectory.metadata["operator_completion_state"] = agent_result.metadata["operator_completion_state"]
+            if (agent_result.metadata.get("termination_reason") == "operator_task_incomplete"
+                    and trajectory.metadata.get("completed_pipeline_prefix") is None):
+                trajectory.metadata["termination_reason"] = "operator_task_incomplete"
         error = trajectory.error
         recovered_prefix = (
             trajectory.status == "COMPLETED"
@@ -991,6 +1039,12 @@ class GatewayNodeManager:
         agent_result: AgentRunResult | None = None,
     ) -> Trajectory:
         completion_session = self.storage.load_completion_session(request.session_id)
+        if (session_dir is not None and request.evaluator is not None
+                and request.evaluator.strategy == "operator_judge"
+                and "ascendc_eval_pipeline.sh" in str(request.evaluator.config.get("judge_command", ""))):
+            completion_session.operator_evaluations = evaluation_records(
+                session_dir, str(request.evaluator.config.get("op_name") or ""),
+            )
         if request.agent.harness == "claude_code" and session_dir is not None:
             annotate_completion_roles(completion_session, session_dir)
         if (
@@ -1071,6 +1125,11 @@ class GatewayNodeManager:
             config=evaluator_spec.config,
         )
 
+        submission_context = {}
+        if (evaluator_spec.strategy == "operator_judge"
+                and "ascendc_eval_pipeline.sh" in str(evaluator_spec.config.get("judge_command", ""))):
+            submission_context = await self._extract_operator_judge_submission(managed, evaluator_spec)
+
         max_attempts = 1 + self._judge_infra_retries(evaluator_spec)
         judge_rt = fresh_eval_runtime
         eval_result = None
@@ -1095,6 +1154,7 @@ class GatewayNodeManager:
                         fresh_eval_runtime=judge_rt,
                         runtime_spec=eval_runtime_spec,
                         refresh_runtime=evaluator_spec.refresh_runtime,
+                        **submission_context,
                     ),
                     managed,
                 )
@@ -1304,6 +1364,15 @@ class GatewayNodeManager:
         if runtime is None:
             raise RuntimeError("runtime is required to extract operator submission")
 
+        op_name = str(evaluator_spec.config.get("op_name") or "")
+        if "ascendc_eval_pipeline.sh" in str(evaluator_spec.config.get("judge_command", "")):
+            async with managed.operator_best_lock:
+                protected = await asyncio.to_thread(selected_candidate, managed.session_dir, op_name)
+                if protected is not None:
+                    return {
+                        "submission_host_path": str(protected),
+                        "submission_used": f"gateway_best/{op_name}_impl.best.tar.gz",
+                    }
         candidates = self._operator_judge_submission_candidates(evaluator_spec)
         artifact_dir = managed.artifacts_dir / "operator_judge"
         artifact_dir.mkdir(parents=True, exist_ok=True)
@@ -1459,7 +1528,7 @@ class GatewayNodeManager:
             agent_log_dir = runtime.runtime_agent_log_dir
             runtime_env = dict(runtime.spec.env)
         agent_env = dict(request.agent.env) if include_agent_env else {}
-        return {
+        env = {
             "ANTHROPIC_BASE_URL": self.gateway_url,
             "ANTHROPIC_API_KEY": request.session_id,
             "OPENAI_BASE_URL": f"{self.gateway_url.rstrip('/')}/v1",
@@ -1475,6 +1544,16 @@ class GatewayNodeManager:
             **{key: str(value) for key, value in runtime_env.items()},
             **{key: str(value) for key, value in agent_env.items()},
         }
+        if request.agent.settings.get("operator_completion_guard") is not None:
+            env["POLAR_OPERATOR_CONTROL_URL"] = (
+                f"{self.gateway_url}/sessions/{request.session_id}/operator_task_state"
+            )
+        if (request.evaluator is not None and request.evaluator.strategy == "operator_judge"
+                and "ascendc_eval_pipeline.sh" in str(request.evaluator.config.get("judge_command", ""))):
+            env["POLAR_OPERATOR_BEST_URL"] = (
+                f"{self.gateway_url}/sessions/{request.session_id}/operator_best"
+            )
+        return env
 
     @staticmethod
     def _evaluator_env(
@@ -1702,13 +1781,13 @@ class GatewayNodeManager:
         if os.environ.get("POLAR_KEEP_SESSION_DIR"):
             logger.info("POLAR_KEEP_SESSION_DIR set; KEEP session dir for %s: %s", session_id, session_dir)
             return
-        try:
-            await asyncio.to_thread(shutil.rmtree, session_dir)
-        except FileNotFoundError:
-            return
-        except Exception:
-            logger.warning(
-                "Failed to remove session directory for session %s",
-                session_id,
-                exc_info=True,
-            )
+        for directory in (session_dir, best_root(session_dir)):
+            try:
+                await asyncio.to_thread(shutil.rmtree, directory)
+            except FileNotFoundError:
+                pass
+            except Exception:
+                logger.warning(
+                    "Failed to remove session directory %s for session %s",
+                    directory, session_id, exc_info=True,
+                )

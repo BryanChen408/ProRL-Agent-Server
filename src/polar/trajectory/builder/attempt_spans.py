@@ -98,9 +98,15 @@ from typing import Any
 #
 # Multi-line continuations (bash ... \ newline) are folded by _normalize_command first.
 _SAFE_ENV_NAME = r"(?:OPERATOR_NAME|OPERATOR_ARCH|ASCEND_HOME|ASCEND_HOME_PATH)"
+# The fixed pipeline also accepts a SoC selector. Only literal chip names here:
+# accepting arbitrary shell expressions would permit command substitution.
+_SAFE_ENV_ASSIGNMENT = (
+    rf"(?:{_SAFE_ENV_NAME}=\S+|(?:SOC_VERSION|ASCENDC_SOC_VERSION)="
+    r"(?:[A-Za-z0-9_]+|'[A-Za-z0-9_]+'|\"[A-Za-z0-9_]+\"))"
+)
 _PIPELINE_CMD_RE = re.compile(
     r"^"
-    rf"(?:(?:export\s+)?{_SAFE_ENV_NAME}=\S+\s*(?:&&\s*|\s+))*"
+    rf"(?:(?:export\s+)?{_SAFE_ENV_ASSIGNMENT}\s*(?:&&\s*|\s+))*"
     r"(?:timeout\s+(?:-k\s+\S+\s+)?\d+[smhd]?\s+)?"
     r"bash\s+(?:/\S*/)?tools/ascendc_eval_pipeline\.sh"
     r"\s+--op_name\s+\S+(?:\s+--impl\s+\S+)?(?:\s+--task\s+\S+)?\s+--out_dir\s+\S+"
@@ -132,13 +138,13 @@ _PIPELINE_CMD_RE = re.compile(
 # So the prefix must be a pure file operation (nothing that writes text to stdout, which
 # is the only way to smuggle a fake verdict line into the tool result) AND must keep away
 # from three things: the budget counter, the shared NPU lock dir, and tools/ itself.
-_SEGMENT_SPLIT_RE = re.compile(r"\s*(?:&&|;)\s*")
+_SEGMENT_SPLIT_RE = re.compile(r"\s*(?:&&|;|\r?\n)\s*")
 _PREFIX_CMD_RE = re.compile(
     r"^(?:rm|tar|cp|mv|mkdir|touch|chmod|true)\b"
     r"|^cd\s+(?!\S*\.\.)/\S*\s*$"
     # `export ASCEND_HOME=... && bash ...` — same allow-list as the inline env prefix
     # inside _PIPELINE_CMD_RE; it just lands in its own segment once we split on `&&`.
-    rf"|^(?:export\s+)?{_SAFE_ENV_NAME}=\S+\s*$"
+    rf"|^(?:export\s+)?{_SAFE_ENV_ASSIGNMENT}\s*$"
 )
 _PREFIX_FORBIDDEN_RE = re.compile(
     r"\.budget|budget\.json"          # 预算计数器 -> 绕过 attempt 预算
@@ -152,7 +158,10 @@ def is_pipeline_invocation(command: str) -> bool:
     output verbatim. The invocation must be the LAST segment (a trailing
     ``; echo '[ascendc-eval] ...'`` would otherwise inject a forged verdict), and every
     preceding segment must be a harmless file operation."""
-    segments = _SEGMENT_SPLIT_RE.split(_normalize_command(command))
+    # Fold escaped continuations first, but keep real command boundaries until
+    # splitting: normalizing all whitespace here loses multiline export/cd calls.
+    command = command.replace("\\\n", " ").replace("\\\r\n", " ").strip()
+    segments = [_normalize_command(seg) for seg in _SEGMENT_SPLIT_RE.split(command)]
     if not _PIPELINE_CMD_RE.match(segments[-1]):
         return False
     return all(
@@ -181,6 +190,7 @@ _VERDICT_RE = re.compile(
     r"(?:\s+task_complete=(?P<complete>\S+))?"
     r"(?:\s+ast_check_ok=(?P<ast>\S+))?(?:\s+correctness_ok=(?P<corr>\S+))?"
     r"(?:\s+error_type=(?P<etype>\S+))?\s+speedup_vs_torch=(?P<speedup>[-+0-9.eE]+|None|null|nan|NaN)\b"
+    r"(?:[ \t]+cases_passed=(?P<cases_passed>\S+)[ \t]+cases_total=(?P<cases_total>\S+))?"
 )
 # 为什么 speedup 必须是「真数字或显式空值」而不是 \S+:pipeline 自己的源码里有一行
 #   echo "[ascendc-eval] done — success=true correctness_ok=true speedup_vs_torch=$SP"
@@ -297,6 +307,14 @@ def parse_verdict(tool_content: Any) -> dict[str, Any] | None:
         "correctness_ok": corr_ok,
         "error_type": etype,
     }
+    # Older verdicts have no counts. Leave them absent to retain the existing
+    # fallback; reward_from_metrics validates the integer range and denominator.
+    try:
+        passed, total = int(m.group("cases_passed")), int(m.group("cases_total"))
+    except (TypeError, ValueError):
+        pass
+    else:
+        metrics.update(cases_passed=passed, cases_total=total)
     if success:
         if speedup is None:
             # 成功档的分完全由 speedup 决定(0.75 + 0.25*tanh(ln s)),取不到数就是取不到,
@@ -330,10 +348,21 @@ def verdict_score(metrics: dict[str, Any]) -> float:
     return 0.2
 
 
+def evaluation_record_id(tool_content: Any) -> str | None:
+    text = _as_text(tool_content) or ""
+    # Native Read can prefix lines with numbers and a tab/arrow.
+    ids = set(re.findall(
+        r"^[ \t]*(?:\d+[\t→][ \t]*)?\[pack\] evaluation_record=([0-9a-f]{64})[ \t]*$",
+        text, re.M,
+    ))
+    return ids.pop() if len(ids) == 1 else None
+
+
 def claim_backgrounded_verdicts(
     ordinal_by_completion_id: dict[str, tuple[int, str]],
     verdict_by_call_id: dict[str, Any],
     calls_in_order: list[tuple[str, str]],
+    evaluation_records: dict[str, Any] | None = None,
 ) -> int:
     """Re-attach verdicts that came back through the background-output channel.
 
@@ -357,10 +386,15 @@ def claim_backgrounded_verdicts(
 
     Mutates ``verdict_by_call_id`` in place; returns the number of claims made.
     """
+    def has_result(content):
+        if evaluation_records is not None:
+            return evaluation_record_id(content) in evaluation_records
+        return parse_verdict(content) is not None
+
     position = {call_id: i for i, (call_id, _) in enumerate(calls_in_order)}
     claimed = 0
     for _ordinal, call_id in ordinal_by_completion_id.values():
-        if parse_verdict(verdict_by_call_id.get(call_id)) is not None:
+        if has_result(verdict_by_call_id.get(call_id)):
             continue
         handle = background_handle(verdict_by_call_id.get(call_id))
         if handle is None:
@@ -371,7 +405,7 @@ def claim_backgrounded_verdicts(
         for other_id, command in calls_in_order[start + 1:]:
             if not any(n in command for n in needles):
                 continue
-            if parse_verdict(verdict_by_call_id.get(other_id)) is not None:
+            if has_result(verdict_by_call_id.get(other_id)):
                 verdict_by_call_id[call_id] = verdict_by_call_id[other_id]
                 claimed += 1
     return claimed

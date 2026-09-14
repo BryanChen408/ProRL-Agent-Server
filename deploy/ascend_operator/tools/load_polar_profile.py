@@ -346,6 +346,12 @@ def main() -> int:
     allowed_tools = str(agent.get("allowed_tools") or "").strip()
     if allowed_tools:
         agent_settings["allowed_tools"] = allowed_tools
+    if backend == "ascendc" and workflow == "legacy" and budget_enabled:
+        agent_settings["operator_completion_guard"] = {
+            "generation_max": int(gen_max),
+            "optimization_max": int(opt_max),
+            "perf_target": float(runtime_env.get("POLAR_PERF_TARGET", "1.1")),
+        }
     agent_block["settings"] = agent_settings
     # harness 侧 env(AgentSpec.env -> ExecInput.env,随 `claude` 那条 exec 下发)。
     # 与上面的 runtime.env 是两份、优先级不同:runtime.env 是容器 env,而 ExecInput.env

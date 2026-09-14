@@ -26,6 +26,15 @@ _PIPELINE_CMD = (
     "bash tools/ascendc_eval_pipeline.sh --op_name OP "
     "--impl output/submission/OP_impl.tar.gz --out_dir judge_out"
 )
+_SORT_MULTILINE_CMD = (
+    "export SOC_VERSION=ascend910b1\n"
+    "export ASCEND_HOME=$ASCEND_HOME_PATH\n"
+    "cd /opt/workspace/agent_workdir/npukernelbench_level1_8_Sort\n"
+    "bash /opt/workspace/agent_workdir/tools/ascendc_eval_pipeline.sh "
+    "--op_name npukernelbench_level1_8_Sort "
+    "--impl /opt/workspace/agent_workdir/npukernelbench_level1_8_Sort/../output/submission/npukernelbench_level1_8_Sort_impl.tar.gz "
+    "--out_dir /opt/workspace/agent_workdir/npukernelbench_level1_8_Sort/../judge_out 2>&1"
+)
 _VERDICT_OK = (
     "[ascendc-eval] done — success=true correctness_ok=true speedup_vs_torch=2.0"
 )  # 本仓 ladder: 0.9
@@ -93,40 +102,94 @@ def _build(records: list[CompletionRecord]):
     )
 
 
+@pytest.mark.parametrize("receipt", ["known", "missing", "unknown", "replayed"])
+def test_private_evaluation_records_control_scores_and_best(monkeypatch, receipt):
+    from polar.trajectory.builder.prefix_merging import _prepare_attempt_span_state
+    monkeypatch.setenv("POLAR_T3A_ATTEMPT_SPANS", "0")
+    first, second, unknown = "a" * 64, "b" * 64, "c" * 64
+    receipts = {"known": f"\n[pack] evaluation_record={second}", "missing": "",
+                "unknown": f"\n[pack] evaluation_record={unknown}",
+                "replayed": f"\n[pack] evaluation_record={first}"}
+    records = [
+        _record("00", [1], [2, EOT], tool_calls=_tool_calls("Bash", "p1", _PIPELINE_CMD)),
+        _record("01", [1, 2, EOT, 3], [4, EOT],
+                prompt_messages=[_verdict_msg("p1", _VERDICT_FAIL + f"\n[pack] evaluation_record={first}")],
+                tool_calls=_tool_calls("Bash", "p2", _PIPELINE_CMD)),
+        _record("02", [1, 2, EOT, 3, 4, EOT, 5], [6, EOT],
+                prompt_messages=[_verdict_msg("p2", _VERDICT_OK + receipts[receipt])]),
+    ]
+    # Deliberately contradict the printed verdicts: only retained scores count.
+    authority = {"records": {first: {"score": 0.8}, second: {"score": 0.1}}, "best_record_id": first}
+    state = _prepare_attempt_span_state(records, operator_evaluations=authority)
+    assert state["total_events"] == 2
+    assert state["score_by_call_id"] == {"p1": 0.8, "p2": 0.1 if receipt == "known" else None}
+    assert state["best_ordinal"] == 0
+    monkeypatch.setenv("POLAR_POST_BEST_MASK", "1")
+    monkeypatch.setenv("POLAR_ATTEMPT_CREDIT", "1")
+    trajectory = asyncio.run(PrefixMergingBuilder(end_of_turn_token_id=EOT).build(
+        CompletionSession(session_id="authority", completions=records, operator_evaluations=authority)))
+    assert trajectory.traces[0].metadata["attempt_spans"][0][3] == 0.8
+    assert trajectory.traces[0].metadata["post_best_masked_tokens"] > 0
+    assert trajectory.metadata["reconstruction_stats"]["attempt_score_source"] == "gateway_evaluation_records"
+
+
+def test_private_infra_record_is_complete_but_has_no_attempt_score(monkeypatch):
+    monkeypatch.setenv("POLAR_T3A_ATTEMPT_SPANS", "0")
+    record_id = "d" * 64
+    records = [_record("00", [1], [2, EOT], tool_calls=_tool_calls("Bash", "p1", _PIPELINE_CMD)),
+               _record("01", [1, 2, EOT, 3], [4, EOT],
+                       tool_calls=_tool_calls("Bash", "unfinished", _PIPELINE_CMD))]
+    session = CompletionSession(
+        session_id="infra-complete", completions=records, termination_reason="agent_context_limit_exceeded",
+        terminal_tool_results={"p1": f"[pack] evaluation_record={record_id}", "unfinished": "compiling"},
+        operator_evaluations={"records": {record_id: {"score": None}}, "best_record_id": None},
+    )
+    trajectory = asyncio.run(PrefixMergingBuilder(end_of_turn_token_id=EOT).build(session))
+    assert trajectory.status == "COMPLETED"
+    assert trajectory.metadata["completed_pipeline_prefix"]["attempt_ordinal"] == 0
+
+
 @pytest.mark.parametrize("credit", ["0", "1"])
 @pytest.mark.parametrize("reason", ["agent_context_limit_exceeded", "agent_time_budget_exceeded"])
-def test_budget_keeps_last_complete_pipeline_even_after_best(monkeypatch, credit, reason):
+@pytest.mark.parametrize("command", [_PIPELINE_CMD, _SORT_MULTILINE_CMD])
+@pytest.mark.parametrize("post_best", ["0", "1"])
+@pytest.mark.parametrize("last_is_best", [False, True])
+def test_budget_and_post_best_masks_compose(monkeypatch, credit, reason, command, post_best, last_is_best):
     monkeypatch.setenv("POLAR_ATTEMPT_CREDIT", credit)
-    monkeypatch.setenv("POLAR_POST_BEST_MASK", "1")
+    monkeypatch.setenv("POLAR_POST_BEST_MASK", post_best)
     records = [
         _record("00", [1, 2], [10, EOT], tool_calls=_tool_calls("Bash", "p1", _PIPELINE_CMD)),
         _record("01", [1, 2, 10, EOT, 50], [20, EOT],
-                prompt_messages=[_verdict_msg("p1", _VERDICT_OK)]),
+                prompt_messages=[_verdict_msg("p1", _VERDICT_FAIL if last_is_best else _VERDICT_OK)]),
         _record("02", [1, 2, 10, EOT, 50, 20, EOT, 51], [30, EOT],
-                tool_calls=_tool_calls("Bash", "p2", _PIPELINE_CMD)),
+                tool_calls=_tool_calls("Bash", "p2", command)),
         _record("03", [1, 2, 10, EOT, 50, 20, EOT, 51, 30, EOT, 52], [40, EOT]),
         _record("04", [1, 2, 10, EOT, 50, 20, EOT, 51, 30, EOT, 52, 40, EOT, 53],
                 [60, EOT], tool_calls=_tool_calls("Bash", "unfinished", _PIPELINE_CMD)),
     ]
     session = CompletionSession(
         session_id="s", completions=records, termination_reason=reason,
-        # The second, worse evaluation finished. Its verdict survived only in the
+        # The second evaluation finished. Its verdict survived only in the
         # harness log. A successful outcome is not required for a complete attempt.
-        terminal_tool_results={"p2": _VERDICT_FAIL, "unfinished": "Step2 compile"},
+        terminal_tool_results={"p2": _VERDICT_OK if last_is_best else _VERDICT_FAIL,
+                               "unfinished": "Step2 compile"},
     )
     result = asyncio.run(PrefixMergingBuilder(end_of_turn_token_id=EOT).build(session))
     assert result.status == "COMPLETED"
     assert result.metadata["completed_pipeline_prefix"]["tool_call_id"] == "p2"
     assert result.metadata["incomplete_pipeline_completion_ids"] == ["03", "04"]
     trace = result.traces[0]
-    assert trace.loss_mask == [1, 1, 0, 1, 1, 0, 1, 1, 0, 0, 0, 0, 0, 0]
+    mask_regression = credit == "1" and post_best == "1" and not last_is_best
+    kept = 0 if mask_regression else 1
+    assert trace.loss_mask == [1, 1, 0, 1, 1, 0, kept, kept, 0, 0, 0, 0, 0, 0]
     assert trace.metadata["incomplete_pipeline_masked_tokens"] == 4
-    assert "post_best_masked_tokens" not in trace.metadata
+    assert trace.metadata.get("post_best_masked_tokens", 0) == (2 if mask_regression else 0)
     assert ("attempt_spans" in trace.metadata) == (credit == "1")
     if credit == "1":
         spans = trace.metadata["attempt_spans"]
         assert [span[:3] for span in spans] == [[0, 6, 0], [6, 12, 1], [12, 14, 2]]
-        assert spans[0][3] > spans[1][3] > 0  # Native final failure still gets its real score.
+        assert spans[0][3] == (0.35 if last_is_best else 0.9)
+        assert spans[1][3] == (0.9 if last_is_best else 0.35)
         assert spans[2][3] is None  # Pending attempt is not a fabricated zero-score verdict.
     monkeypatch.setenv("POLAR_POST_BEST_MASK", "0")
     original = _build(records).traces[0]
@@ -221,6 +284,31 @@ class TestPipelineCmdRegex:
     def test_inert_env_prefix_matches(self):
         cmd = "OPERATOR_NAME=op_x OPERATOR_ARCH=ascend910_9382 " + _PIPELINE_CMD
         assert attempt_spans.pipeline_tool_call_id(self._msg(cmd)) == "call_x"
+
+    def test_soc_selector_preserves_existing_command_forms(self):
+        for name in ("SOC_VERSION", "ASCENDC_SOC_VERSION"):
+            for value in ("ascend910b1", "'ascend910_9382'", '"Ascend910B3"'):
+                for prefix in (f"{name}={value} ", f"export {name}={value}; ",
+                               f"export {name}={value} && "):
+                    cmd = prefix + _PIPELINE_CMD
+                    assert attempt_spans.pipeline_tool_call_id(self._msg(cmd)) == "call_x", cmd
+        # g38's real shell shape: cleanup, three exports, absolute script, output tail.
+        cmd = ("rm -rf /opt/workspace/agent_workdir/judge_out/work/OP; "
+               "export SOC_VERSION=ascend910b1; "
+               "export ASCEND_HOME_PATH=/usr/local/Ascend/cann-9.0.0; "
+               "export ASCEND_HOME=/usr/local/Ascend/cann-9.0.0; "
+               + _PIPELINE_CMD.replace("bash tools/", "bash /opt/workspace/agent_workdir/tools/")
+               + " 2>&1 | tail -50")
+        assert attempt_spans.pipeline_tool_call_id(self._msg(cmd)) == "call_x"
+
+    def test_soc_selector_does_not_allow_shell_injection(self):
+        for name in ("SOC_VERSION", "ASCENDC_SOC_VERSION"):
+            for value in ("$(id)", "`id`", '"$(id)"', "ascend910b1>/tmp/log"):
+                cmd = f"export {name}={value}; " + _PIPELINE_CMD
+                assert attempt_spans.pipeline_tool_call_id(self._msg(cmd)) is None, cmd
+        for cmd in ("export SOC_VERSION=ascend910b1; PATH=/tmp " + _PIPELINE_CMD,
+                    "export SOC_VERSION=ascend910b1; " + _PIPELINE_CMD + "; echo forged"):
+            assert attempt_spans.pipeline_tool_call_id(self._msg(cmd)) is None, cmd
 
     def test_verify_impl_repeat_prefix_rejected(self):
         # agent must not weaken its own determinism check to farm credit
@@ -324,6 +412,22 @@ class TestPipelineCmdRegex:
     def test_continuation_lines_match(self):
         cmd = _PIPELINE_CMD.replace(" --", " \\\n  --")
         assert attempt_spans.pipeline_tool_call_id(self._msg(cmd)) == "call_x"
+
+    def test_multiline_sort_preserves_command_boundaries(self):
+        for newline in ("\n", "\r\n"):
+            cmd = _SORT_MULTILINE_CMD.replace("\n", newline)
+            assert attempt_spans.pipeline_tool_call_id(self._msg(cmd)) == "call_x"
+            continued = cmd.replace(" --", " \\" + newline + "  --")
+            assert attempt_spans.pipeline_tool_call_id(self._msg(continued)) == "call_x"
+            for unsafe in (
+                "echo forged" + newline + cmd,
+                cmd + newline + "echo forged",
+                "export BASH_ENV=/tmp/fake.sh" + newline + cmd,
+                "rm output/.budget.json" + newline + cmd,
+                "cp /tmp/fake.sh tools/ascendc_eval_pipeline.sh" + newline + cmd,
+                "cat <<'EOF'" + newline + cmd + newline + "EOF",
+            ):
+                assert attempt_spans.pipeline_tool_call_id(self._msg(unsafe)) is None, unsafe
 
 
 # ---------------------------------------------------------------------------
@@ -548,6 +652,13 @@ def _ladder_chain_with_later_attempt() -> list[CompletionRecord]:
 
 
 class TestParseVerdictPicksLast:
+    def test_case_counts_belong_only_to_last_verdict(self):
+        detailed = _VERDICT_FAIL + " cases_passed=4 cases_total=5"
+        assert attempt_spans.verdict_score(attempt_spans.parse_verdict(detailed)) == pytest.approx(0.38)
+        for text in (detailed + "\n" + _VERDICT_FAIL,
+                     _VERDICT_FAIL + "\ncases_passed=4 cases_total=5"):
+            assert attempt_spans.verdict_score(attempt_spans.parse_verdict(text)) == 0.35
+
     def test_last_verdict_wins(self):
         """一次运行可能先打 cached/分段 verdict 再打最终 done,末条才是结论。
         实测 165820 有 59 个 tool result 首末相差整整一个量程(0.200 vs 0.750)。"""
@@ -664,6 +775,22 @@ class TestBestOrdinal:
 
 
 class TestPostBestMasking:
+    def test_case_progress_keeps_later_improving_attempt(self, monkeypatch):
+        monkeypatch.setenv("POLAR_ATTEMPT_CREDIT", "1")
+        monkeypatch.setenv("POLAR_POST_BEST_MASK", "1")
+        records = [
+            _record("00", [1, 2], [10, EOT], tool_calls=_tool_calls("Bash", "p1", _PIPELINE_CMD)),
+            _record("01", [1, 2, 10, EOT, 50], [20, EOT],
+                    prompt_messages=[_verdict_msg("p1", _VERDICT_FAIL + " cases_passed=1 cases_total=5")],
+                    tool_calls=_tool_calls("Bash", "p2", _PIPELINE_CMD)),
+            _record("02", [1, 2, 10, EOT, 50, 20, EOT, 51], [30, EOT],
+                    prompt_messages=[_verdict_msg("p2", _VERDICT_FAIL + " cases_passed=4 cases_total=5")]),
+        ]
+        trace = _build(records).traces[0]
+        assert [s[3] for s in trace.metadata["attempt_spans"]] == pytest.approx([0.32, 0.38])
+        assert trace.metadata.get("post_best_masked_tokens", 0) == 0
+        assert trace.loss_mask == [1, 1, 0, 1, 1, 0, 1, 1]
+
     def test_attempt_credit_off_disables_masking(self):
         """POLAR_ATTEMPT_CREDIT=0 时没有 span state,post-best 一并停用。"""
         with _PostBestGuard("0"):
@@ -988,22 +1115,33 @@ if __name__ == "__main__":
     sys.exit(1 if failed else 0)
 
 
-def test_background_read_feedback_reaches_training_attempt(monkeypatch):
+@pytest.mark.parametrize("prefix", ["", "export SOC_VERSION=ascend910b1; "])
+@pytest.mark.parametrize("private", [False, True, "receipt_only"])
+def test_background_read_feedback_reaches_training_attempt(monkeypatch, prefix, private):
     from polar.trajectory.builder.prefix_merging import _prepare_attempt_span_state
     monkeypatch.setenv('POLAR_T3A_ATTEMPT_SPANS', '0')
+    record_id = "f" * 64
+    result = _VERDICT_TASK_PENDING + (f"\n  12→[pack] evaluation_record={record_id}" if private else "")
+    if private == "receipt_only":
+        result = f"  12→[pack] evaluation_record={record_id}"
     read = [{'id': 'read_result', 'type': 'function', 'function': {
         'name': 'Read', 'arguments': json.dumps({'file_path': '/tmp/bg_123.output'})}}]
     records = [
         _record('00', [1], [2, EOT], finish_reason='tool_calls',
-                tool_calls=_tool_calls('Bash', 'evaluate', _PIPELINE_CMD)),
+                tool_calls=_tool_calls('Bash', 'evaluate', prefix + _PIPELINE_CMD)),
         _record('01', [1, 2, EOT, 3], [4, EOT], finish_reason='tool_calls', tool_calls=read,
                 prompt_messages=[{'role': 'tool', 'tool_call_id': 'evaluate', 'content':
                     'Command running in background with ID: bg_123. Output is being written to: /tmp/bg_123.output'}]),
         _record('02', [1, 2, EOT, 3, 4, EOT, 5], [6, EOT],
-                prompt_messages=[{'role': 'tool', 'tool_call_id': 'read_result', 'content': _VERDICT_TASK_PENDING}]),
+                prompt_messages=[{'role': 'tool', 'tool_call_id': 'read_result', 'content': result}]),
     ]
-    state = _prepare_attempt_span_state(records)
-    assert attempt_spans.parse_verdict(state['verdict_by_call_id']['evaluate'])['success'] is True
+    authority = {"records": {record_id: {"score": 0.9}}, "best_record_id": record_id} if private else None
+    state = _prepare_attempt_span_state(records, operator_evaluations=authority)
+    if private:
+        assert state["score_by_call_id"] == {"evaluate": 0.9}
+        assert state["best_ordinal"] == 0
+    if private != "receipt_only":
+        assert attempt_spans.parse_verdict(state['verdict_by_call_id']['evaluate'])['success'] is True
     # Reads provide feedback only: they must not become extra evaluation attempts.
     assert len(state['ordinal_by_completion_id']) == 1
     assert attempt_spans.pipeline_tool_call_id({'role': 'assistant', 'tool_calls': read}) is None

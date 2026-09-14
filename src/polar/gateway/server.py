@@ -853,6 +853,36 @@ async def stream_events(request: Request):
     )
 
 
+@app.get("/sessions/{session_id}/operator_task_state")
+async def get_operator_task_state(session_id: str) -> dict[str, Any]:
+    try:
+        safe = clean_session_id(session_id)
+    except InvalidSessionIdError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if safe is None:
+        raise HTTPException(status_code=400, detail="Session id required")
+    state = await get_state().node_manager.operator_task_state(safe)
+    if state is None:
+        raise HTTPException(status_code=404, detail="No active operator completion guard")
+    return state
+
+
+@app.post("/sessions/{session_id}/operator_best")
+async def retain_operator_best(session_id: str, request: Request) -> dict[str, Any]:
+    try:
+        safe = clean_session_id(session_id)
+        body = await request.json()
+        if (safe is None or not isinstance(body, dict)
+                or not all(isinstance(body.get(key), str) and body[key] for key in ("candidate", "metrics"))):
+            raise ValueError("Session id, candidate and metrics paths required")
+        result = await get_state().node_manager.retain_operator_best(safe, body["candidate"], body["metrics"])
+    except (InvalidSessionIdError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if result is None:
+        raise HTTPException(status_code=404, detail="No running operator session")
+    return result
+
+
 @app.post("/sessions", response_model=SessionCreateResponse | SessionDispatchResponse)
 async def create_session(request: Request):
     state = get_state()

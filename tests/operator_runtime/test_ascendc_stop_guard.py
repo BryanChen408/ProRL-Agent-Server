@@ -7,12 +7,37 @@ import json
 import os
 import subprocess
 import sys
+import io
 from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[2]
 GUARD = ROOT / "operator_runtime_t2a" / "tools" / "ascendc_stop_guard.py"
 PREPARE = ROOT / "operator_runtime_t2a" / "runtime" / "prepare_operator_workdir.py"
+
+
+def test_gateway_authority_overrides_local_completion_and_fails_closed(monkeypatch, capsys):
+    spec = importlib.util.spec_from_file_location("remote_stop_guard_test", GUARD)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    monkeypatch.setenv("POLAR_OPERATOR_CONTROL_URL", "http://gateway/state")
+    monkeypatch.setattr(module, "_hook_input", lambda: {})
+    monkeypatch.setattr(module, "_load_task_state", lambda _: {"task_complete": True})
+
+    class Opener:
+        def open(self, url, timeout):
+            assert url == "http://gateway/state"
+            if isinstance(response, Exception):
+                raise response
+            return io.StringIO(json.dumps(response))
+
+    monkeypatch.setattr(module.urllib.request, "build_opener", lambda *_: Opener())
+    for response in ({"stop_allowed": False, "reason": "still optimizing"}, {}, OSError("down")):
+        assert module.main() == 0
+        assert json.loads(capsys.readouterr().out)["decision"] == "block"
+    response = {"stop_allowed": True}
+    assert module.main() == 0
+    assert capsys.readouterr().out == ""
 
 
 def _run_guard(

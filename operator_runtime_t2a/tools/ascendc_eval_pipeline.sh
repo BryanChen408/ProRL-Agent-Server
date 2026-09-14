@@ -73,6 +73,10 @@ EVALUATED_CANDIDATE_SHA256=""
 SRC_DIR="$WORK_ROOT/$OP_NAME"
 AGENT_SIDE=0; [[ -d "$SRC_DIR" ]] && AGENT_SIDE=1
 [[ "$AGENT_SIDE" == "1" ]] || INCREMENTAL=0  # 独立 judge 始终从源码重建。
+if [[ "$AGENT_SIDE" == "0" && -f "$IMPL_FILE" ]]; then
+  EVALUATED_CANDIDATE_SHA256=$(sha256sum "$IMPL_FILE" | cut -d' ' -f1)
+  export EVALUATED_CANDIDATE_SHA256
+fi
 STATE_DIR="$WORK_ROOT/output/.selfcheck"
 PACK_SH="${_SCRIPT_DIR}/pack_submission.sh"
 
@@ -197,7 +201,7 @@ print('%d %d' % (sum(1 for x in oks if x), len(oks)) if isinstance(oks, list) an
 }
 
 fail_hint() {
-  python3 -c "import json;d=json.load(open('$OUT_DIR/metrics.json'));p=d.get('perf_data') or {};print('[ascendc-eval] verdict — operator_valid=%s task_complete=%s ast_check_ok=%s correctness_ok=%s error_type=%s speedup_vs_torch=%s'%(d.get('operator_valid',d.get('success')),d.get('task_complete'),d.get('ast_check_ok'),d.get('correctness_ok'),d.get('error_type'),p.get('speedup_vs_torch')))" 2>/dev/null || true
+  python3 -c "import json;d=json.load(open('$OUT_DIR/metrics.json'));p=d.get('perf_data') or {};print('[ascendc-eval] verdict — operator_valid=%s task_complete=%s ast_check_ok=%s correctness_ok=%s error_type=%s speedup_vs_torch=%s cases_passed=%s cases_total=%s'%(d.get('operator_valid',d.get('success')),d.get('task_complete'),d.get('ast_check_ok'),d.get('correctness_ok'),d.get('error_type'),p.get('speedup_vs_torch'),d.get('cases_passed'),d.get('cases_total')))" 2>/dev/null || true
   python3 - "$OUT_DIR/metrics.json" "$OUT_DIR/metrics_error.log" "$WORK_ROOT" <<'CLASSIFY' 2>/dev/null || true
 import json, re, sys
 try:
@@ -560,7 +564,7 @@ if [[ "$AGENT_SIDE" == "1" ]]; then
              -o -name '*.py' -o -name 'CMakeLists.txt' \) 2>/dev/null | head -1)
       [[ -n "$_STRAY_SRC" ]] && echo "[ascendc-eval] ⚠ 但 $WORK_ROOT/output/submission/ 下有源码文件(如 $_STRAY_SRC)——评测只打包 $SRC_DIR,如果你在 submission 下写代码,改动从未被评测,请合并进工程目录再提交"
     fi
-    python3 -c "import json;d=json.load(open('$OUT_DIR/metrics.json'));p=d.get('perf_data') or {};print('[ascendc-eval] cached evaluation — operator_valid=%s task_complete=%s ast_check_ok=%s correctness_ok=%s speedup_vs_torch=%s'%(d.get('operator_valid',d.get('success')),d.get('task_complete'),d.get('ast_check_ok'),d.get('correctness_ok'),p.get('speedup_vs_torch')))" 2>/dev/null || true
+    python3 -c "import json;d=json.load(open('$OUT_DIR/metrics.json'));p=d.get('perf_data') or {};print('[ascendc-eval] cached evaluation — operator_valid=%s task_complete=%s ast_check_ok=%s correctness_ok=%s error_type=%s speedup_vs_torch=%s cases_passed=%s cases_total=%s'%(d.get('operator_valid',d.get('success')),d.get('task_complete'),d.get('ast_check_ok'),d.get('correctness_ok'),d.get('error_type'),p.get('speedup_vs_torch'),d.get('cases_passed'),d.get('cases_total')))" 2>/dev/null || true
     exit 0
   fi
   if [[ -f "$BEST_META" ]] && python3 -c "

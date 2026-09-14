@@ -386,6 +386,60 @@ def test_lazy_refresh_runtime_skips_run_stage_eval_prewarm(tmp_path: Path) -> No
     assert managed.postrun_steps == [ExecInput(command="postrun-cleanup")]
 
 
+@pytest.mark.parametrize("unavailable", [False, True])
+def test_completion_guard_rejects_early_exit_but_still_judges(monkeypatch, tmp_path, unavailable):
+    from types import SimpleNamespace
+
+    request = _request(lazy=True)
+    request.agent.settings["operator_completion_guard"] = {
+        "generation_max": 3, "optimization_max": 50, "perf_target": 1.1,
+    }
+    events = []
+    agent = FakeRuntime("agent", events, tmp_path / "agent", files={f"{WORKDIR}/{SUB}": "# best"})
+    judge = FakeRuntime("judge", events, tmp_path / "judge", files={
+        f"{WORKDIR}/{METRICS}": json.dumps({"success": True, "perf_data": {"speedup_vs_torch": 2.0}}),
+    })
+    manager = _run_manager()
+    manager._resolve_runtime_spec = lambda _: request.runtime
+
+    def completions(*args, **kwargs):
+        if unavailable:
+            raise OSError("history temporarily unavailable")
+        return [{"original_request": {"messages": [
+            {"role": "assistant", "content": [{"type": "tool_use", "id": "p1", "name": "Bash",
+             "input": {"command": f"bash tools/ascendc_eval_pipeline.sh --op_name {OP} --out_dir judge_out"}}]},
+            {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "p1", "content":
+             "[ascendc-eval] verdict — success=False ast_check_ok=False correctness_ok=False "
+             "error_type=ascendc_compile_failed speedup_vs_torch=None"}]},
+        ]}}]
+
+    manager.storage = SimpleNamespace(get_completions=completions)
+    manager.node_id = "node-test"
+    manager.session_registry = SessionRegistry()
+    manager.session_registry.register("s", task_id="t")
+    manager.evaluators = default_evaluator_registry()
+    manager._build_trajectory = lambda *args: Trajectory(status="COMPLETED", traces=[
+        Trace(prompt_ids=[1], response_ids=[2], loss_mask=[1], response_logprobs=[-.1])])
+    monkeypatch.setattr("polar.gateway.node.create_runtime", lambda *args: judge)
+    managed = _managed(request, agent, tmp_path)
+
+    async def run():
+        await manager._handle_run(managed)
+        assert managed.final_result is None
+        assert managed.agent_result.status == "failed"
+        if not unavailable:
+            decision = managed.agent_result.metadata["operator_completion_state"]
+            assert decision["completion_reason"] == "pending_generation"
+            assert decision["next_step"]["generation_remaining"] == 2
+        return await manager._build_session_result(managed)
+
+    result = asyncio.run(run())
+    assert result.status == "ERROR"
+    assert result.trajectory.metadata["termination_reason"] == "operator_task_incomplete"
+    assert result.trajectory.traces[0].reward == .9
+    assert any(call["command"] == "bash pipeline.sh" for call in judge.exec_calls)
+
+
 def test_non_lazy_refresh_runtime_still_prewarms_during_run(tmp_path: Path) -> None:
     events: list[str] = []
     manager = _run_manager()

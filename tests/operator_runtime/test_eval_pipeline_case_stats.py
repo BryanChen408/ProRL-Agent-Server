@@ -16,6 +16,11 @@ import re
 import subprocess
 from pathlib import Path
 
+import pytest
+
+from polar.trajectory.builder import attempt_spans
+from polar.trajectory.evaluator.operator_reward import reward_from_metrics
+
 PIPELINE = (
     Path(__file__).resolve().parents[2]
     / "operator_runtime_t2a"
@@ -97,3 +102,34 @@ def test_metrics_fields_nullable_shape():
     i = ns["i"]
     assert i("") is None and i(None) is None and i("junk") is None
     assert i("9") == 9
+
+
+@pytest.mark.parametrize("error_type,passed,total", [
+    ("correctness_failed", 1, 5),
+    ("correctness_failed", 4, 5),
+    ("output_precheck_failed", 0, 5),
+    ("correctness_failed", None, None),
+    ("correctness_failed", 6, 5),
+    ("correctness_failed", 0, 0),
+    ("correctness_failed", "invalid", 5),
+    ("ascendc_run_crashed", None, None),
+])
+def test_live_and_cached_verdicts_preserve_attempt_score(tmp_path, error_type, passed, total):
+    """Execute the real emitters: both must preserve the judge's case ladder."""
+    metrics = dict(success=False, ast_check_ok=True, correctness_ok=False,
+                   error_type=error_type, cases_passed=passed, cases_total=total)
+    (tmp_path / "metrics.json").write_text(json.dumps(metrics))
+    src = PIPELINE.read_text()
+    emitters = re.findall(r'python3 -c "([^\n]*print\(\'\[ascendc-eval\][^\n]*)" 2>/dev/null', src)
+    assert len(emitters) == 2
+    scores = []
+    for emitter in emitters:
+        result = subprocess.run(
+            ["python3", "-c", emitter.replace("$OUT_DIR", str(tmp_path))],
+            capture_output=True, text=True, check=True,
+        )
+        parsed = attempt_spans.parse_verdict(result.stdout)
+        assert parsed is not None
+        assert parsed["error_type"] == error_type
+        scores.append(attempt_spans.verdict_score(parsed))
+    assert scores == pytest.approx([reward_from_metrics(metrics)] * 2)

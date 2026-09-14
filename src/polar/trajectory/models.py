@@ -81,6 +81,9 @@ class CompletionSession(BaseModel):
     completions: list[CompletionRecord] = Field(default_factory=list)
     # Harness results can arrive after the last saved model completion.
     terminal_tool_results: dict[str, Any] = Field(default_factory=dict)
+    # Supplied by the Gateway from its private evaluated-candidate store.
+    # None preserves the legacy transcript-only attempt scoring path.
+    operator_evaluations: dict[str, Any] | None = None
     termination_reason: str | None = None
 
     @model_validator(mode="after")

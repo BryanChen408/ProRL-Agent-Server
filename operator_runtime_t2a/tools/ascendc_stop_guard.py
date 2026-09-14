@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Claude Code Stop hook for unfinished AscendC optimization.
 
-The hook is intentionally read-only: the fixed evaluation pipeline owns task state;
-this script only prevents an end turn while that state says useful budget remains.
+Polar's gateway owns completion authority; this hook queries its read-only endpoint.
+Standalone runs without that endpoint retain the legacy local-state check.
 """
 
 from __future__ import annotations
@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import os
 import sys
+import urllib.request
 from pathlib import Path
 from typing import Any
 
@@ -113,14 +114,30 @@ def _block_message(
     )
 
 
+def _gateway_message(url: str) -> str | None:
+    try:
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        with opener.open(url, timeout=5) as response:
+            state = json.load(response)
+        if not isinstance(state, dict) or type(state.get("stop_allowed")) is not bool:
+            raise ValueError("missing gateway stop_allowed decision")
+        return None if state["stop_allowed"] else str(state.get("reason") or "Gateway 拒绝结束任务。")
+    except Exception as exc:
+        # Never fall back to agent-writable files when the authority is unavailable.
+        return f"Gateway 完成状态暂不可用（{type(exc).__name__}）；不能用本地 task_state 放行，请重试。"
+
+
 def main() -> int:
     payload = _hook_input()
-    project_dir = _project_dir(payload)
-    metrics = _load_metrics(project_dir)
-    # task_state survives a broken optimization candidate overwriting metrics.json.  Old
-    # workdirs without it retain the original metrics-only behaviour.
-    state = _load_task_state(project_dir) or metrics
-    message = _block_message(state, metrics) if state is not None else None
+    control_url = os.environ.get("POLAR_OPERATOR_CONTROL_URL")
+    if control_url:
+        message = _gateway_message(control_url)
+    else:
+        # Compatibility for standalone/old deployments without gateway enforcement.
+        project_dir = _project_dir(payload)
+        metrics = _load_metrics(project_dir)
+        state = _load_task_state(project_dir) or metrics
+        message = _block_message(state, metrics) if state is not None else None
     if message:
         print(
             json.dumps(

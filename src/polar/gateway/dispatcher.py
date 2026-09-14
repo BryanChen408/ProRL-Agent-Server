@@ -74,6 +74,7 @@ class ManagedSession:
     cancel_requested: bool = False
     cancel_reason: str | None = None
     cancel_event: asyncio.Event = field(default_factory=asyncio.Event)
+    operator_best_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     execution_deadline: float | None = None
     postrun_deadline: float | None = None
     stage: SessionStage = SessionStage.INIT
@@ -122,6 +123,10 @@ class SessionDispatcher:
             *(asyncio.create_task(self._postrun_worker()) for _ in range(self.max_postrun_workers)),
         ]
         self._started = True
+
+    async def get_session(self, session_id: str) -> ManagedSession | None:
+        async with self._lock:
+            return self._sessions.get(session_id)
 
     async def stop(self) -> None:
         if not self._started:

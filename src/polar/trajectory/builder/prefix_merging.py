@@ -107,6 +107,7 @@ def _pipeline_call_id(messages: list[dict[str, Any]]) -> str | None:
 
 def _prepare_attempt_span_state(
     kept: list[CompletionRecord], terminal_tool_results: dict[str, Any] | None = None,
+    operator_evaluations: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Session-wide pre-pass for P3 attempt spans (plan §6.2/§6.3).
 
@@ -153,9 +154,10 @@ def _prepare_attempt_span_state(
             next_ordinal += 1
     verdict_by_call_id.update(terminal_tool_results or {})
     _attempt_spans.claim_backgrounded_verdicts(
-        ordinal_by_completion_id, verdict_by_call_id, calls_in_order
+        ordinal_by_completion_id, verdict_by_call_id, calls_in_order,
+        operator_evaluations["records"] if operator_evaluations is not None else None,
     )
-    return {
+    state = {
         "verdict_by_call_id": verdict_by_call_id,
         "ordinal_by_completion_id": ordinal_by_completion_id,
         "prev_ordinal_by_completion_id": prev_ordinal_by_completion_id,
@@ -166,6 +168,29 @@ def _prepare_attempt_span_state(
             ordinal_by_completion_id, verdict_by_call_id
         ),
     }
+    if operator_evaluations is not None:
+        # The transcript locates executed calls only. Scores and the selected
+        # best come from the same private records used for artifact promotion.
+        # A missing receipt never falls back to agent-visible verdict text.
+        records = operator_evaluations["records"]
+        scores = {}
+        bound_records = {}
+        claimed = set()
+        best = None
+        for ordinal, call_id in sorted(ordinal_by_completion_id.values()):
+            record_id = _attempt_spans.evaluation_record_id(verdict_by_call_id.get(call_id))
+            scores[call_id] = None
+            if record_id not in records or record_id in claimed:
+                continue
+            claimed.add(record_id)
+            bound_records[call_id] = record_id
+            scores[call_id] = records[record_id]["score"]
+            if record_id == operator_evaluations.get("best_record_id"):
+                best = ordinal
+        state.update(score_by_call_id=scores, best_ordinal=best,
+                     evaluation_record_by_call_id=bound_records,
+                     completed_call_ids=set(bound_records))
+    return state
 
 
 def _t3a_message_text(message: dict[str, Any]) -> str:
@@ -530,10 +555,15 @@ class PrefixMergingBuilder(BaseTrajectoryBuilder):
             "agent_context_limit_exceeded", "agent_time_budget_exceeded",
         }
         span_state = (
-            _prepare_attempt_span_state(filter_result.kept, session.terminal_tool_results)
+            _prepare_attempt_span_state(filter_result.kept, session.terminal_tool_results,
+                                        session.operator_evaluations)
             if _attempt_spans.env_on() or recover_budget
             else None
         )
+        if session.operator_evaluations is not None:
+            stats["attempt_score_source"] = "gateway_evaluation_records"
+            stats["attempt_records_bound"] = len((span_state or {}).get("evaluation_record_by_call_id", {}))
+            stats["best_evaluation_record_id"] = session.operator_evaluations.get("best_record_id")
         budget_metadata = {}
         if recover_budget:
             last_complete = None
@@ -543,6 +573,8 @@ class PrefixMergingBuilder(BaseTrajectoryBuilder):
                     continue
                 ordinal, call_id = event
                 complete = (
+                    call_id in span_state["completed_call_ids"]
+                    if "completed_call_ids" in span_state else
                     span_state["score_by_call_id"].get(call_id) is not None
                     if "score_by_call_id" in span_state
                     else _attempt_spans.parse_verdict(
@@ -832,16 +864,17 @@ class PrefixMergingBuilder(BaseTrajectoryBuilder):
         _want_spans = span_state is not None and _attempt_spans.env_on()
         budget_ids = span_state.get("budget_completion_ids") if span_state is not None else None
         event_records: list[tuple[int, int, str]] = []
-        # Post-best masking: chain position of the best attempt's calling turn;
-        # every LATER turn is post-best. None -> nothing to mask here.
+        # Post-best masking starts at the next attempt after best. Both masks
+        # apply: budget recovery must not re-enable a post-best response.
         # POLAR_POST_BEST_MASK 独立开关:关时峰值后段不再掩零,交由 attempt credit
         # 的 R_e=0 负项柔和接管(A/B 对照用);spans 与 credit 不受影响。
         _pb = (
             self._post_best_pos(chain, span_state, chain_continues)
-            if _want_spans and budget_ids is None and _attempt_spans.post_best_mask_on()
+            if _want_spans and _attempt_spans.post_best_mask_on()
             else None
         )
         _pb_masked = 0
+        _budget_masked = 0
 
         _rs = len(stream_ids) - len(prompt_ids)
         _prev_discarded = _is_discarded_empty_truncation(first_trace)
@@ -851,13 +884,15 @@ class PrefixMergingBuilder(BaseTrajectoryBuilder):
             # 作为 interstitial 恒掩零 —— 不产生全零 loss 孤儿 trace,前缀也不重复送。
             pass
         else:
-            _pb_masked += self._append_response_tokens(
+            _budget_mask = budget_ids is not None and chain[0].completion_id not in budget_ids
+            _masked = self._append_response_tokens(
                 first_trace, stream_ids, response_slots, loss_mask,
-                force_zero_loss=(
-                    chain[0].completion_id not in budget_ids if budget_ids is not None
-                    else _pb is not None and 0 > _pb
-                ),
+                force_zero_loss=_budget_mask or (_pb is not None and 0 > _pb),
             )
+            if _budget_mask:
+                _budget_masked += _masked
+            else:
+                _pb_masked += _masked
         if _want_spans:
             _ev = span_state["ordinal_by_completion_id"].get(chain[0].completion_id)
             if _ev is not None:
@@ -936,13 +971,15 @@ class PrefixMergingBuilder(BaseTrajectoryBuilder):
             if _prev_discarded:
                 pass  # 空截断轮 response 不入流(见上)
             else:
-                _pb_masked += self._append_response_tokens(
+                _budget_mask = budget_ids is not None and chain[i].completion_id not in budget_ids
+                _masked = self._append_response_tokens(
                     Ci_trace, stream_ids, response_slots, loss_mask,
-                    force_zero_loss=(
-                        chain[i].completion_id not in budget_ids if budget_ids is not None
-                        else _pb is not None and i > _pb
-                    ),
+                    force_zero_loss=_budget_mask or (_pb is not None and i > _pb),
                 )
+                if _budget_mask:
+                    _budget_masked += _masked
+                else:
+                    _pb_masked += _masked
             if _want_spans:
                 _ev = span_state["ordinal_by_completion_id"].get(chain[i].completion_id)
                 if _ev is not None:
@@ -995,9 +1032,11 @@ class PrefixMergingBuilder(BaseTrajectoryBuilder):
             if _spans:
                 _metadata["attempt_spans"] = _spans
 
+        # Attribute overlap to budget recovery; post-best counts only extra masking.
+        if _budget_masked:
+            _metadata["incomplete_pipeline_masked_tokens"] = _budget_masked
         if _pb_masked:
-            key = "incomplete_pipeline_masked_tokens" if budget_ids is not None else "post_best_masked_tokens"
-            _metadata[key] = _pb_masked
+            _metadata["post_best_masked_tokens"] = _pb_masked
 
         trace = Trace(
             prompt_ids=prompt_ids,
