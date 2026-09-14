@@ -23,7 +23,14 @@ description: Ascend C 算子精度调试技能，提供精度问题诊断和解�
 
 > 进入调试前**必须**完成以下三步
 
-### 1. 固定最小可复现用例
+### 1. 从正式失败用例构造最小复现
+
+先从原版用例和 `judge_out/metrics_error.log` 选择一个失败 case，再用工作区内独立的
+调试脚本缩小 shape、固定输入，做 CPU 语义、索引、dtype 对照或已有输出分析。
+缩小用例时保留触发错误的条件；诊断结果只用于定位问题。
+不得修改、删减或替换正式评测的用例、reference、输入生成逻辑和精度阈值，
+不得把自写测试接入正式评测或用其结果代替固定 pipeline 的通过结论。
+候选 kernel 的编译、NPU 运行和最终复验仍走固定 pipeline，使用原版评测用例。
 
 | 项目 | 说明 | 示例 |
 |------|------|------|
@@ -44,25 +51,26 @@ description: Ascend C 算子精度调试技能，提供精度问题诊断和解�
 2. 按同一文件指引查阅 API 文档。
 3. 对比官方实现与当前实现。
 
-### 3. 清理缓存和临时文件
+### 3. 确认正在评测本轮源码
 
-```bash
-rm -rf build input output
-mkdir -p build/input build/output
-```
+核对固定入口输出中的实际检查目录、修改文件路径和编译日志。收到“源码未变化”表示
+没有发生新的评测，先修正路径或实施有效源码修改；不要反复重跑、加注释改 hash，
+也不要清空 `input/`、`output/`、`judge_out/`、`.selfcheck/` 或 `.best`。
+只有日志明确支持二进制/加载问题时，才 Read
+`../ascendc-runtime-debug/references/kernel_binary_debug.md` 的相关诊断，固定入口仍负责构建。
 
 ---
 
 ## 快速决策树
 
 ```
-[前置检查] 已固定用例？已检索API？已清理缓存？
+[前置检查] 已定位原版失败用例？已检索API？已确认评测源码？
     │
     └─ 否 → 先完成前置步骤
     └─ 是 → 继续
         │
         ├─ [第0步] ⭐ 代码修改后输出完全不变？
-        │   ├─ 是 → 清理 build/ 和 kernel_cache 后重试
+        │   ├─ 是 → 先区分缓存复用与真实复验；核对目录、源码和编译日志
         │   └─ 否 → 继续
         │
         ├─ [第0.5步] ⭐ 多 dtype 交叉验证
@@ -105,7 +113,18 @@ mkdir -p build/input build/output
 | `Cast 后数据错误` | RoundMode 错误 | half → float用CAST_NONE，float → half用CAST_ROUND |
 | **BF16 通过但 FP16/FP32 失败** | (1) 部分 API 不支持 BF16，BF16 走了更简单的 fallback 路径反而正确；(2) BF16 与 FP16/FP32 精度特性不同（BF16 mantissa 7bit vs FP16 10bit），精度阈值或溢出行为差异 | 先排查 API fallback 分支差异，再检查精度阈值（rtol/atol）是否适配各 dtype |
 | **FP32 通过但 FP16/BF16 失败** | 半精度中间计算精度不足 | 升精度：Cast → FP32 计算 → Cast 回半精度 |
-| **修改代码后输出完全不变** | 二进制未更新 / 编译器缓存 | 清理 build/ 和 $HOME/atc_data/kernel_cache/ 后重试 |
+| **修改代码后输出完全不变** | 改错目录 / 缓存复用 / 修改未触及根因 / 二进制加载问题 | 先核对实际评测源码与日志，再按证据选择分支；不清空受控状态 |
+
+### 先核对语义，再选择精度修复
+
+- Sum/scan 先明确轴、负轴、多轴、stride、keepdim 和输出 dtype；不能将非末轴归约
+  直接 reshape 成连续行而不验证索引映射。
+- 对照本题完整 reference 的累加顺序和中间 dtype。若 reference 指定 FP16 逐步舍入，
+  一律改为 FP32 累加可能反而不匹配；下文“升精度”只是待验证方向，不是通用修复。
+- 分开定位 fp32/fp16/bf16 的失败，不能把某一 dtype 成功当成其他 dtype 的保证。
+- reference 使用 CPU/NumPy 不代表候选允许搬回 CPU；修复仍须实现自定义 AscendC 计算，
+  不用 `at::sum/cumsum` 或框架同名算子替代。历史轨迹的 dtype 转换和 CPU 路径只能作为
+  语义分析线索，不能覆盖当前任务的实现约束。
 
 ### 诊断模式："FP32 通过但 FP16/BF16 失败"
 

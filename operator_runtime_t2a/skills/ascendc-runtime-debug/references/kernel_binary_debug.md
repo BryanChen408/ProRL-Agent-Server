@@ -1,10 +1,13 @@
 # Kernel 二进制与构建系统调试
 
+本文件在 T2A 中只用于诊断。目录按固定 pipeline 的实际日志定位；不直接构建、安装或
+卸载 SDK/vendor 包，不清空评测状态、输入和提交物。修改仅限本题工程，再由固定入口复验。
+
 ## 症状-根因速查
 
 | 症状 | 最可能根因 | 详细步骤 |
 |------|-----------|---------|
-| 修改Kernel代码后输出不变 | 二进制缓存未清理 / 安装了旧包 | [流程1](#流程1修改后输出不变的调试) |
+| 修改Kernel代码后输出不变 | 评测目录不一致 / 未触及根因 / 二进制或加载问题 | [流程1](#流程1修改后输出不变的调试) |
 | `561003 FIND_KERNEL_ERROR` | TilingKey 与 SEL 声明不匹配 | [流程2](#流程2tilingkey--sel-不匹配) |
 | 特定 dtype 返回 361001 | SEL 缺少该 dtype 条目 | [流程3](#流程3sel-dtype-条目缺失) |
 | 多版本 vendor 包冲突 | vendors/ 和 opp/vendors/ 同时存在 | [流程4](#流程4多版本-vendor-包冲突) |
@@ -14,21 +17,12 @@
 
 ## 流程1：修改后输出不变的调试
 
-### 检查点1：编译缓存
+### 检查点1：实际评测目录与编译记录
 
-```bash
-# 1. 清理编译缓存
-rm -rf build/
-# 注意：仅清理 build 目录可能不够，opc 编译器有独立缓存
-
-# 2. 检查 opc 编译器缓存（如果存在）
-ls -la $HOME/atc_data/kernel_cache/ 2>/dev/null
-# 如果存在且包含当前算子 → 删除对应条目
-
-# 3. 完全清理后重新构建
-rm -rf build/ $HOME/atc_data/kernel_cache/
-bash build.sh
-```
+先区分“源码未变化，复用上次结论”和真实重新编译。前者核对修改文件是否位于实际检查目录；
+后者按编译日志确认参与构建的源文件、生成二进制和加载路径。注释修改可能不改变二进制，
+二进制变化也不保证修到了根因，不能仅凭输出相同就断言编译缓存故障。
+保留日志证据，由固定入口管理重建；不得清空 hash/budget、`.best` 或整个工作目录来强迫复测。
 
 ### 检查点2：二进制文件是否更新
 
@@ -38,7 +32,7 @@ sha256sum build/op_kernel/*.o 2>/dev/null
 # 或
 sha256sum build/out/*/op_kernel/lib/*.so 2>/dev/null
 
-# 如果 edit 后 sha256 不变 → 编译器缓存问题，按检查点1处理
+# 如果有效 edit 后 sha256 不变 → 回到检查点1核对源码和编译日志，尚不能断言缓存问题
 # 如果 sha256 变了但运行结果不变 → 检查点3
 ```
 
@@ -55,16 +49,10 @@ sha256sum $ASCEND_OPP_PATH/vendors/<vendor_name>/op_impl/ai_core/tbe/op_kernel/l
 # 不一致 → install 脚本问题
 ```
 
-### 检查点4：是否清理了旧安装包
+### 检查点4：是否存在旧安装包冲突
 
-```bash
-# 完全卸载旧包
-rm -rf $ASCEND_OPP_PATH/vendors/<vendor_name>/
-rm -rf $ASCEND_HOME_PATH/vendors/<vendor_name>/
-
-# 重新安装新包
-bash build.sh
-```
+只读对照加载路径与构建产物。发现 vendor/SDK 安装冲突时保留具体路径和日志，交由环境侧
+处理；agent 不删除或重装 SDK/vendor 包，也不以此为由改写判分状态。
 
 ---
 
@@ -209,14 +197,8 @@ done
 
 ### 修复方法
 
-```bash
-# 完全清理后重新安装
-rm -rf $ASCEND_OPP_PATH/vendors/<vendor_name>/
-rm -rf $ASCEND_HOME_PATH/vendors/<vendor_name>/
-bash build.sh
-# 验证只有一个安装位置
-find $ASCEND_OPP_PATH/vendors/ $ASCEND_HOME_PATH/vendors/ -name "<vendor_name>" -type d
-```
+记录冲突的安装位置、版本与 kernel JSON 差异，交由环境侧修复；不在 agent 会话内删除
+vendor 包或运行 `build.sh`。仅本题工程接线错误时，原位修复后运行固定 pipeline。
 
 ---
 
@@ -261,5 +243,4 @@ grep '"opParaSize"' build/op_kernel/*.json
 | `cat build/op_kernel/*.json \| grep kernelList` | 检查生成的所有 kernel 变体 |
 | `find $ASCEND_OPP_PATH/vendors -name "*.so"` | 检查已安装的二进制 |
 | `find $ASCEND_HOME_PATH/vendors -name "*.so"` | 检查兜底位置的二进制 |
-| `rm -rf $HOME/atc_data/kernel_cache/` | 清理 opc 编译器缓存 |
-| `rm -rf build/` | 清理构建产物 |
+| 固定 pipeline 的编译日志 | 确认输入源码、构建结果与实际加载路径 |

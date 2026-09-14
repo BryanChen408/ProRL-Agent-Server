@@ -746,11 +746,17 @@ bash /opt/workspace/agent_workdir/tools/ascendc_eval_pipeline.sh --op_name {op_n
 并自动把 `{op_name}/` 打包成提交物、保留历史最优版本。
 
 - 每轮有效源码修改后跑一次；源码未变化时禁止重复运行。被中途截断时按历史最优版本判分。
+- “有效修改”必须改变计算、访存、同步或必要接线；添加注释、时间戳、改文件名来触发 hash
+  不算修复。收到“源码未变化”后先核对输出中的实际检查目录与本轮修改文件，再修改实现；
+  不删除缓存状态来强迫复测。不要把 pipeline 输出管道接到 `head`（会提前关闭输出管道）。
 - 迭代时可加 `--incremental` 复用上次解包目录,走增量编译。
 - 它评的是 **AscendC 提交物**。Phase 3 的 TileLang 阶段还没有 AscendC kernel,
   那时跑它只会得到 `submission_missing` 并白白消耗一次评测配额。
-- 不要另跑 `cmake` / `make` / `python setup.py` / 自写测试脚本,也不要直接调 skill 里的
+- 不要另跑 `cmake` / `make` / `python setup.py`,也不要直接调 skill 里的
   AscendC 评测/对拍/测速脚本 —— 绕过它就没有基准复位、缓存检测和抢卡,结果不作数。
+- 允许独立调试脚本做 CPU 语义、索引、dtype 对照和已有输出分析；候选 kernel 的
+  编译与 NPU 运行仍走固定入口。不得修改、删减或替换正式评测用例、reference、
+  输入生成逻辑和精度阈值，不得将自写测试接入正式评测或用其结果宣称评测通过。
 
 ## Phase 3 的 TileLang AST 门禁
 
@@ -772,11 +778,28 @@ bash /opt/workspace/agent_workdir/tools/ascendc_eval_pipeline.sh --op_name {op_n
 上游的 `skill_script_hook.py` 命令拦截机制仍然**未启用**。你的 Bash 调用一律直通执行，
 不会被托管代跑；凡上游文中说“由 Hook 拦截/代为执行”的脚本，仍一律改跑上方固定入口。
 
-本环境只安装一个 `Stop` 完成门禁。它只读 `judge_out/metrics.json` 与持久的
-`judge_out/task_state.json`，不执行评测、不替换 Bash、也不修改任何文件。当历史最佳实现已经
+本环境只安装一个 `Stop` 完成门禁。Polar 启用评测预算时，它向 gateway 只读查询完成状态；
+gateway 根据宿主侧记录的固定入口调用结果与服务端预算判定，本地
+`judge_out/task_state.json`、`metrics.json` 只作提示，修改它们不能改变完成判定。
+gateway 查询失败时不按本地文件放行，agent 退出后服务端还会再次核验。
+生成阶段尚未得到正确实现时，普通编译、精度或性能评测失败不能提前结束；
+按 gateway 返回的 `generation_remaining` 继续修复，直到生成预算耗尽或明确 INFRA。
+生成预算耗尽只表示允许结束失败任务，不表示已经解对；首次正确后转入独立优化预算。
+独立运行且未配置 gateway 完成检查时才保留原本的本地状态检查。
+门禁不执行评测、不替换 Bash、也不修改任何文件。当历史最佳实现已经
 正确但 `task_complete=false`（性能目标未达且仍有优化预算）时，即使当前优化候选编译或运行
 失败，它仍会拒绝结束；只有达到目标、预算耗尽，或当前属于 INFRA 时才放行。不要尝试绕过
 或修改这个门禁。
+
+`judge_out/`、`output/.selfcheck/`、`.best` 及其元数据均由固定入口维护，只读。
+禁止修改或删除 `task_state.json`、`metrics.json`、budget/hash 状态来结束任务或重置次数；
+也不要清空 `input/`、`output/`、整个 `judge_out/` 来“修编译缓存”。
+`success=true`、已有 `.best`、自认为无法再优化，都不能替代 `task_complete=true`。
+Stop feedback 要求继续时，下一轮执行一个新的诊断或实质修改，不重复提交最终总结。
+
+- 保持计算在自定义 AscendC kernel。`at::add/sum/cumsum/repeat`、
+  `at_npu::native::custom_ops::*` 等框架计算不能作为修复或性能优化的替代；
+  保留一个未被调用的 kernel、实际返回框架结果，同样不符合要求。历史 PASS 不能豁免此约束。
 
 本环境没有插件的 SessionStart 上下文注入。执行所需的路径、环境事实和流程约束已经写在
 当前 `CLAUDE.md` 中，不要等待 hook 补充，也不要把“可能会被 hook 接管”作为跳过步骤的理由。
