@@ -96,7 +96,7 @@ if _DEPS:
 
 def test_success_speedup_reward():
     res, _agent, judge = _run({"success": True, "perf_data": {"speedup_vs_torch": 2.0}})
-    assert res.outcome_reward == 0.9   # 0.75+0.25*(s^2-1)/(s^2+1), s=2 -> 0.9
+    assert res.outcome_reward == 0.92   # 0.80+0.20*(s^2-1)/(s^2+1), s=2 -> 0.92
     assert res.metadata["success"] is True and res.metadata["error_type"] is None
     assert len(judge.uploaded) == 1 and len(judge.execs) == 1  # impl crossed + judge ran
     # 无 process_info.json:分量 0,与改造前逐分一致(优雅回退)
@@ -129,7 +129,7 @@ def test_t3a_relocates_candidates_and_returns_process_reward(tmp_path):
     assert "judge/t3a_attempt_stream.jsonl" in uploaded
     assert judge.exec_envs[0]["POLAR_T3A_CANDIDATES_DIR"] == "judge/t3a_candidates"
     assert result.metadata["process_validation"] == "t3a_stream"
-    assert result.outcome_reward == pytest.approx(0.94)
+    assert result.outcome_reward == pytest.approx(0.96)
 
     # On a retry, a missing new process result must not reuse the old +0.04.
     judge.files.pop("judge_out/process_reward.json")
@@ -188,7 +188,7 @@ def test_process_reward_merges_into_score():
         info = _mk_process_info([("done", "pass", None, 1.0), ("done", "pass", None, 1.2)])
         res, *_ = _run({"success": True, "perf_data": {"speedup_vs_torch": 1.2}},
                        process_info=info)
-        raw = 0.75 + 0.25 * (1.2**2 - 1) / (1.2**2 + 1)
+        raw = 0.80 + 0.20 * (1.2**2 - 1) / (1.2**2 + 1)
         assert abs(res.metadata["reward_outcome_raw"] - raw) < 1e-9
         assert abs(res.metadata["process_reward"] - 0.10) < 1e-9
         assert res.metadata["process_validation"] == "ok"
@@ -211,10 +211,10 @@ def test_process_reward_same_outcome_different_path():
             [("compile", "fail", "ascendc_compile_failed", None)] * 5
             + [("done", "pass", None, 1.0)]))
         assert clean.outcome_reward > messy.outcome_reward
-        # clean:b_fp 满 0.06;raw=0.75 -> 0.81
-        assert abs(clean.outcome_reward - 0.81) < 1e-9, clean.outcome_reward
-        # messy:k=6,b_fp=0.06*(6+1-6)/6=0.01;p_repeat=0.04 -> raw+0.01-0.04=0.72
-        assert abs(messy.outcome_reward - 0.72) < 1e-9, messy.outcome_reward
+        # clean:b_fp 满 0.06;raw=0.8 -> 0.86
+        assert abs(clean.outcome_reward - 0.86) < 1e-9, clean.outcome_reward
+        # messy:k=6,b_fp=0.06*(6+1-6)/6=0.01;p_repeat=0.04 -> raw+0.01-0.04=0.77
+        assert abs(messy.outcome_reward - 0.77) < 1e-9, messy.outcome_reward
     finally:
         _process_env_restore(saved)
 
@@ -246,7 +246,7 @@ def test_process_reward_ignores_unfinished_budget_attempts():
                        budget_status={"gen_count": 5, "opt_count": 0})
         assert res.metadata["process_validation"] == "ok"
         assert abs(res.metadata["process_reward"] - 0.06) < 1e-9
-        assert abs(res.outcome_reward - 0.81) < 1e-9
+        assert abs(res.outcome_reward - 0.86) < 1e-9
     finally:
         _process_env_restore(saved)
 
@@ -259,7 +259,7 @@ def test_process_reward_env_off():
         info = _mk_process_info([("done", "pass", None, 1.0)])
         res, *_ = _run({"success": True, "perf_data": {"speedup_vs_torch": 1.0}},
                        process_info=info)
-        assert res.outcome_reward == 0.75
+        assert res.outcome_reward == 0.8
         assert res.metadata["process_reward"] == 0.0
         assert res.metadata["process_validation"] == "ok"
         assert res.metadata["process_components"] == {"disabled": "env"}
@@ -358,7 +358,7 @@ def test_operator_failure_scored_not_raised():
                     "error_type": "correctness_failed"})
     assert res.outcome_reward == 0.0 and res.metadata["error_type"] == "correctness_failed"
     res2, *_ = _run({"success": False, "correctness_ok": True, "error_type": "benchmark_failed"})
-    assert res2.outcome_reward == 0.4
+    assert res2.outcome_reward == 0.5
 
 
 def test_downloads_metrics_error_log_artifact():
@@ -479,7 +479,7 @@ def test_workdir_resolves_relative_submission_to_absolute():
             runtime=agent, fresh_eval_runtime=judge, refresh_runtime=True,
             artifacts_dir=d, env={}, timeout_seconds=None, session_id="s", task_id="t",
         ))
-    assert res.metadata["error_type"] is None and res.outcome_reward == 0.9   # found + scored, NOT missing
+    assert res.metadata["error_type"] is None and res.outcome_reward == 0.92   # found + scored, NOT missing
     assert res.metadata["submission_used"] == SUB[:-3] + ".best.py"           # logical (relative) label kept
     assert judge.uploaded and judge.uploaded[0][1] == f"{wd}/{SUB}"           # uploaded to the ABSOLUTE dest
 
@@ -522,7 +522,7 @@ def test_host_submission_artifact_skips_agent_download():
             submission_host_path=str(host_impl),
             submission_used=SUB,
         ))
-    assert res.outcome_reward == 0.9   # 0.75+0.25*(s^2-1)/(s^2+1), s=2 -> 0.9
+    assert res.outcome_reward == 0.92   # 0.80+0.20*(s^2-1)/(s^2+1), s=2 -> 0.92
     assert res.metadata["submission_used"] == SUB
     assert judge.uploaded and judge.uploaded[0][1] == SUB
     assert agent.files == {}
@@ -587,7 +587,7 @@ def test_cannbot_judge_runs_native_verify_benchmark_without_budget_env():
             task_id="t",
         ))
 
-    assert res.outcome_reward == 0.9   # 0.75+0.25*(s^2-1)/(s^2+1), s=2 -> 0.9
+    assert res.outcome_reward == 0.92   # 0.80+0.20*(s^2-1)/(s^2+1), s=2 -> 0.92
     assert res.metadata["submission_used"] == "output/optimized_code.py"
     assert len(judge.execs) == 3
     assert "stage_verifier_inputs.py" in judge.execs[0]
@@ -637,7 +637,7 @@ def test_cannbot_judge_prefers_phase5_final_artifact():
         ))
 
     assert res.metadata["submission_used"] == f"{OP}_generated.py"
-    assert res.outcome_reward == 0.9   # 0.75+0.25*(s^2-1)/(s^2+1), s=2 -> 0.9
+    assert res.outcome_reward == 0.92   # 0.80+0.20*(s^2-1)/(s^2+1), s=2 -> 0.92
 
 
 def test_cannbot_judge_verify_failure_does_not_run_benchmark():

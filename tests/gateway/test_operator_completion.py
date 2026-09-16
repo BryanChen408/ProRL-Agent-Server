@@ -82,6 +82,19 @@ def test_soc_prefix_and_bare_command_have_same_completion_state():
             assert state(history(*outputs, command=command)) == state(history(*outputs))
 
 
+def test_expanded_command_recognition_is_shared_with_completion_and_budget():
+    commands = (
+        '# tools/ascendc_eval_pipeline.sh is the fixed entry\n'
+        'export SOC_VERSION=ascend910b1 ASCEND_DEVKIT_DIR=/opt/asc-devkit && ' + COMMAND,
+        COMMAND + ' | grep -E "verdict|evaluation_record"',
+        'bash "tools/ascendc_eval_pipeline.sh" --out_dir judge_out --op_name Abs',
+        '# evaluate\ncd /work &&\n' + COMMAND,
+    )
+    for command in commands:
+        for outputs in ((FAIL,), (PASS.format(.72), FAIL), (PASS.format(1.2),), (None,)):
+            assert state(history(*outputs, command=command)) == state(history(*outputs)), command
+
+
 def test_completion_resolves_script_against_last_cd():
     absolute = COMMAND.replace("tools/", "/work/tools/")
     for command in (

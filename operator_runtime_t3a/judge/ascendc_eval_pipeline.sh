@@ -336,8 +336,8 @@ PIPELINE_GEN_COUNT=0; PIPELINE_OPT_COUNT=0; PIPELINE_FIRST_SUCCESS=0
 BEST_META="$WORK_ROOT/output/submission/.${OP_NAME}_impl.best.meta.json"
 TASK_STATE_FILE="$OUT_DIR/task_state.json"
 CUR_HASH=""
-# 性能目标线。reward = 0.75 + 0.25*tanh(ln speedup)(operator_reward.reward_from_metrics):
-# 1.0x 只拿 0.75,低于 1.0x 反而往 0.5 掉。CLAUDE.md 4-S.4 的达标判定必须同步这个数。
+# 性能目标线。reward = 0.6 + 0.4*s²/(s²+1)(operator_reward.reward_from_metrics):
+# 1.0x 拿 0.8,低于 1.0x 逐渐接近 0.6。CLAUDE.md 4-S.4 的达标判定必须同步这个数。
 PERF_TARGET="${POLAR_PERF_TARGET:-1.1}"
 
 # 预算状态写进 $ARTIFACTS_DIR(gateway 侧 session 目录),不是 workdir —— 逐字对齐 triton 侧的

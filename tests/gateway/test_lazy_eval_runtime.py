@@ -260,7 +260,7 @@ def test_expired_solving_budget_still_builds_and_scores_with_fresh_budget(
         return await manager._build_session_result(managed)
 
     result = asyncio.run(run())
-    assert result.trajectory.traces[0].reward == 0.9
+    assert result.trajectory.traces[0].reward == 0.92
     assert result.trajectory.traces[0].response_logprobs == [-0.1]
     assert result.trajectory.traces[0].metadata["attempt_index"] == 0
     assert result.trajectory.metadata["policy_version"] == 7
@@ -436,7 +436,7 @@ def test_completion_guard_rejects_early_exit_but_still_judges(monkeypatch, tmp_p
     result = asyncio.run(run())
     assert result.status == "ERROR"
     assert result.trajectory.metadata["termination_reason"] == "operator_task_incomplete"
-    assert result.trajectory.traces[0].reward == .9
+    assert result.trajectory.traces[0].reward == .92
     assert any(call["command"] == "bash pipeline.sh" for call in judge.exec_calls)
 
 
@@ -538,7 +538,7 @@ def test_non_lazy_fresh_judge_receives_pipeline_lease_env(tmp_path: Path) -> Non
 
     updated = asyncio.run(run_eval())
 
-    assert updated.metadata["evaluation"]["outcome_reward"] == 0.9
+    assert updated.metadata["evaluation"]["outcome_reward"] == 0.92
     judge_calls = [
         call
         for call in judge.exec_calls
@@ -589,7 +589,7 @@ def test_lazy_eval_stops_agent_before_starting_judge_and_uploads_submission(
         )
     )
 
-    assert updated.metadata["evaluation"]["outcome_reward"] == 0.9
+    assert updated.metadata["evaluation"]["outcome_reward"] == 0.92
     assert events.index("agent.stop") < events.index("judge.start")
     assert f"judge.upload:{WORKDIR}/{SUB}" in events
     assert f"judge.exec:{request.evaluator.config['judge_command']}" in events
@@ -689,7 +689,7 @@ def test_lazy_fresh_judge_uses_pipeline_lease_spec_after_agent_stop(
         )
     )
 
-    assert updated.metadata["evaluation"]["outcome_reward"] == 0.9
+    assert updated.metadata["evaluation"]["outcome_reward"] == 0.92
     assert len(captured) == 1
     runtime_spec, events_at_create = captured[0]
     assert runtime_spec.kwargs["ascend"]["lease_at_start"] is False
@@ -745,7 +745,7 @@ def test_evaluator_env_overrides_runtime_env_for_judge_command(tmp_path: Path) -
 
     updated = asyncio.run(run_eval())
 
-    assert updated.metadata["evaluation"]["outcome_reward"] == 0.9
+    assert updated.metadata["evaluation"]["outcome_reward"] == 0.92
     judge_calls = [
         call
         for call in judge.exec_calls

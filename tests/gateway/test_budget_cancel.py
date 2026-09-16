@@ -45,7 +45,7 @@ def _managed(tmp_path: Path, *, reason: str | None = "pipeline_budget_exceeded")
     )
 
 
-@pytest.mark.parametrize("ending", ["context", "timeout", "other_400", "502", "policy_cutoff", "judge_failure"])
+@pytest.mark.parametrize("ending", ["context", "output", "output_not_error", "timeout", "other_400", "502", "policy_cutoff", "judge_failure", "output_judge_failure"])
 def test_budget_prefix_is_judged_and_accepted_without_hiding_other_failures(tmp_path, ending):
     command = "bash tools/ascendc_eval_pipeline.sh --op_name OP --out_dir judge_out"
     call = {"id": "p1", "type": "function", "function": {
@@ -88,12 +88,18 @@ def test_budget_prefix_is_judged_and_accepted_without_hiding_other_failures(tmp_
     if ending != "timeout":
         events.append({"type": "result", "is_error": True, "api_error_status": 502 if ending == "502" else 400,
                        "result": "maximum context length is 262144" if ending in {"context", "policy_cutoff", "judge_failure"} else "invalid request"})
+        if ending.startswith("output"):
+            events[-1].update(
+                is_error=ending != "output_not_error", api_error_status=None,
+                result="API Error: Claude's response exceeded the 32768 output token maximum. "
+                       "To configure this behavior, set the CLAUDE_CODE_MAX_OUTPUT_TOKENS environment variable.",
+            )
     log.write_text("\n".join(json.dumps(e) for e in events) + '\n{"partial":')
     judged = []
 
     async def judge(request, trajectory, **kwargs):
         judged.append(trajectory)
-        if ending == "judge_failure":
+        if ending in {"judge_failure", "output_judge_failure"}:
             raise RuntimeError("judge container unavailable")
         for trace in trajectory.traces:
             trace.reward = 0.9
@@ -108,17 +114,20 @@ def test_budget_prefix_is_judged_and_accepted_without_hiding_other_failures(tmp_
 
     result = asyncio.run(run())
     assert len(judged) == 1
-    if ending == "judge_failure":
+    if ending in {"judge_failure", "output_judge_failure"}:
         assert result.status == "ERROR"
         assert "judge container unavailable" in result.error
         assert result.trajectory.metadata["completed_pipeline_prefix"]["tool_call_id"] == "p1"
         return
     assert result.trajectory.traces[0].reward == 0.9
-    if ending in {"context", "timeout"}:
+    if ending in {"context", "output", "timeout"}:
         assert result.status == "COMPLETED"
         assert result.error is None
         assert result.trajectory.metadata["completed_pipeline_prefix"]["tool_call_id"] == "p1"
         assert result.trajectory.traces[0].loss_mask == [1, 1, 0, 0, 0]
+        if ending == "output":
+            assert result.trajectory.metadata["termination_reason"] == "agent_output_limit_exceeded"
+            assert result.trajectory.metadata["agent_error"] == "agent stopped"
     else:
         assert result.status == "ERROR"
         assert "completed_pipeline_prefix" not in result.trajectory.metadata

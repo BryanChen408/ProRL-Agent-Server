@@ -164,7 +164,11 @@ Agent 仍只需要知道公开路径 `output/submission/{op}_impl.tar.gz`。预�
 历史机制在评测前就改 `.best`，并把所有失败粗压成同一个 T1；同档又采用末写覆盖。结果是
 后来的编译失败、运行失败或更低 case 通过率候选能覆盖更好的 correctness 候选。现在排序与
 `operator_reward.reward_from_metrics` 同梯度：infra 不参与，失败侧按 0/0.1/0.2/0.25/
-`0.3+weight×通过率`/0.4，成功侧按 speedup reward；只有严格变大才提升，同分保留首次最高。
+`0.3+weight×通过率`/0.5，`weight` 默认 0.15；用例统计缺失或无效时，部分正确档回退为 0.35。
+通过率按 `cases_passed/cases_total` 计算，不固定 case 数；例如 8/10 得 0.42，9/10 得 0.435。
+正确性全过但性能评测失败得 0.5；评测成功后按 `0.80+0.20×(speedup²-1)/(speedup²+1)` 计分，
+即 `0.6+0.4×speedup²/(speedup²+1)`，1× 得 0.8，2× 得 0.92。
+这些都是基础分；终局随后合并过程奖励及截断惩罚。best 只有基础分严格变大才提升，同分保留首次最高。
 
 `.best.tar.gz`、meta 和 session mirror 的外部路径均不变。比较与替换持文件锁；meta 记录
 candidate 绝对路径与哈希。若进程在 meta/best 两次原子替换之间被杀，下次提升先从该不可变

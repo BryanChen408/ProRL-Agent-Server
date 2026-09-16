@@ -11,7 +11,11 @@ import shlex
 from pathlib import PurePosixPath
 from typing import Any
 
-from polar.trajectory.builder.attempt_spans import is_pipeline_invocation, parse_verdict
+from polar.trajectory.builder.attempt_spans import (
+    is_pipeline_invocation,
+    parse_verdict,
+    pipeline_command_segments,
+)
 from polar.trajectory.evaluator.operator_reward import INFRA_ERROR_TYPES
 from polar.trajectory.pipeline_budget import analyze_budget
 
@@ -39,11 +43,17 @@ def completion_state(
         # mount; a copied /tmp/tools script is not the fixed evaluation entry.
         if not is_pipeline_invocation(call.command):
             continue
-        command = call.command.replace("\\\r\n", " ").replace("\\\n", " ")
-        lexer = shlex.shlex(command.replace("\n", ";"), posix=True, punctuation_chars=";&|")
-        lexer.whitespace_split = True
-        lexer.commenters = ""
-        tokens = list(lexer)
+        segments = pipeline_command_segments(call.command)
+        if segments is not None:
+            tokens = [token for argv, separator in segments
+                      for token in [*argv, separator] if token]
+        else:
+            # Keep the legacy path for already-recognized shell forms.
+            command = call.command.replace("\\\r\n", " ").replace("\\\n", " ")
+            lexer = shlex.shlex(command.replace("\n", ";"), posix=True, punctuation_chars=";&|")
+            lexer.whitespace_split = True
+            lexer.commenters = ""
+            tokens = list(lexer)
         scripts = [t for t in tokens if t.endswith("/ascendc_eval_pipeline.sh")]
         if len(scripts) != 1:
             continue

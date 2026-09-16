@@ -6,6 +6,7 @@ import asyncio
 import logging
 import os
 import posixpath
+import re
 import shlex
 import shutil
 from contextlib import suppress
@@ -1068,6 +1069,14 @@ class GatewayNodeManager:
                 ))
             ):
                 completion_session.termination_reason = "agent_context_limit_exceeded"
+            elif (
+                cli_result.get("is_error") is True
+                and re.match(
+                    r"^API Error: Claude's response exceeded the \d+ output token maximum\.",
+                    str(cli_result.get("result", "")),
+                )
+            ):
+                completion_session.termination_reason = "agent_output_limit_exceeded"
             if completion_session.termination_reason:
                 completion_session.terminal_tool_results = tool_results
         builder = self.builders.create(request.builder)

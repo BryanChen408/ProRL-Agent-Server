@@ -342,7 +342,7 @@ def test_concurrent_promotions_keep_global_maximum(tmp_path: Path):
 
     assert all(rc == 0 for _out, _err, rc in results), results
     assert _best(tmp_path).read_bytes() == high.read_bytes()
-    assert json.loads(_meta(tmp_path).read_text(encoding="utf-8"))["reward_score"] == pytest.approx(0.4)
+    assert json.loads(_meta(tmp_path).read_text(encoding="utf-8"))["reward_score"] == pytest.approx(0.5)
 
 
 def test_incomplete_meta_first_transaction_recovers_from_immutable_candidate(tmp_path: Path):

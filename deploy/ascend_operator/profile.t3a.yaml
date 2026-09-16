@@ -112,7 +112,7 @@ operator:
     # per-attempt span:本 profile 的 gateway.t3a_attempt_spans 开启
     # POLAR_T3A_ATTEMPT_SPANS=1，gateway 的 attempt_spans
     #   从 hook 判决块([skill_script_hook intercepted execution])切 span 并给分
-    #   (PASS→0.4 / D→0.3+0.1·通过率 / A→0.2,与终局 reward 同 ladder;缺块=None 不给分)。
+    #   (PASS→0.5 / D→0.3+0.15·通过率 / A→0.2,与终局 reward 同 ladder;缺块=None 不给分)。
     #   该环境变量属于 **polar gateway 启动环境**;t2a 会话没有 hook 标记,天然零影响。
     judge_command: "bash /opt/workspace/agent_workdir/judge/judge_best.sh --op_name {op_name} --out_dir judge_out"
     submission_path: output/submission/{op_name}_impl.tar.gz

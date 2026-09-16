@@ -65,6 +65,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shlex
 from typing import Any
 
 # Whitelisted pipeline invocation. The bar is "this shell line can only have run the
@@ -153,21 +154,172 @@ _PREFIX_FORBIDDEN_RE = re.compile(
 )
 
 
+# Tokenize only simple shell commands, preserving quoted separators as words.
+# shlex decodes each word; it does not execute expansions. Unsupported shell
+# constructs fail closed. Keep this separate from T3A command normalization.
+_SHELL_PART_RE = re.compile(
+    r"(?P<space>[^\S\r\n]+)|(?P<comment>\#[^\r\n]*)"
+    r"|(?P<redirect>2>&1(?=$|[\s;|])|2>/dev/null(?=$|[\s;&|]))"
+    r"|(?P<separator>&&|;|\||\r?\n)"
+    r'''|(?P<word>(?:[^\s\\'";&|<>()]+|\\[^\r\n]|'[^']*'|"(?:\\.|[^"\\])*")+)'''
+)
+
+
+def pipeline_command_segments(command: str) -> list[tuple[list[str], str]] | None:
+    """Return (argv, following separator) for the supported simple-shell subset."""
+    command = command.replace("\\\r\n", "").replace("\\\n", "")
+    if "$(" in command or "`" in command:
+        return None
+    segments: list[tuple[list[str], str]] = []
+    words: list[str] = []
+    pos = 0
+    while pos < len(command):
+        match = _SHELL_PART_RE.match(command, pos)
+        if match is None:
+            return None
+        pos = match.end()
+        kind, raw = match.lastgroup, match.group()
+        if kind in {"space", "comment"}:
+            continue
+        if kind == "separator":
+            if words:
+                segments.append((words, raw.strip() or ";"))
+                words = []
+            elif raw.strip():
+                return None
+        elif kind == "redirect":
+            # Redirections are retained as single tokens for the existing checks.
+            words.append(raw)
+        else:
+            try:
+                decoded = shlex.split(raw)
+            except ValueError:
+                return None
+            # Quoted/escaped redirect-shaped words are arguments, not redirects.
+            # Reject this ambiguous subset instead of dropping a filename later.
+            if len(decoded) != 1 or decoded[0] in {"2>&1", "2>/dev/null"}:
+                return None
+            words.append(decoded[0])
+    if words:
+        segments.append((words, ""))
+    if not segments or segments[-1][1] in {"&&", "|"}:
+        return None
+    return segments
+
+
+def _expanded_pipeline_invocation(command: str) -> bool:
+    """Accept equivalent spellings without relaxing executable/receipt checks."""
+    segments = pipeline_command_segments(command)
+    if segments is None:
+        return False
+    pipeline_seen = False
+    previous_separator = ""
+    for words, separator in segments:
+        if pipeline_seen:
+            if previous_separator != "|" or words[0] not in {"tail", "head", "grep", "cat"}:
+                return False
+            # Newly accepted quoted filters must read stdin only, not a file of
+            # unrelated verdicts. Existing spellings retain their legacy checks.
+            args = [arg for arg in words[1:] if arg != "2>&1"]
+            if words[0] == "cat" and args:
+                return False
+            if words[0] in {"tail", "head"}:
+                while args:
+                    arg = args.pop(0)
+                    if arg in {"-n", "-c", "--lines", "--bytes"}:
+                        if not args or not re.fullmatch(r"[+]?\d+", args.pop(0)):
+                            return False
+                    elif not re.fullmatch(r"-[qv]+|-\d+|-[nc][+]?\d+|--(?:lines|bytes)=[+]?\d+", arg):
+                        return False
+            if words[0] == "grep":
+                # A single pattern, optional ordinary flags; no -f/--file or files.
+                while args and re.fullmatch(r"-[EFinovxwqsch]+", args[0]):
+                    args = args[1:]
+                explicit_pattern = bool(args and args[0] in {"-e", "--"})
+                if explicit_pattern:
+                    args = args[1:]
+                if len(args) != 1 or (args[0].startswith("-") and not explicit_pattern):
+                    return False
+        else:
+            argv = list(words)
+            assignments = []
+            if argv[0] == "export":
+                argv.pop(0)
+                export = True
+            else:
+                export = False
+            while argv and re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", argv[0]):
+                assignment = argv.pop(0)
+                name, value = assignment.split("=", 1)
+                safe = re.fullmatch(_SAFE_ENV_ASSIGNMENT, assignment) is not None
+                if name in {"SOC_VERSION", "ASCENDC_SOC_VERSION"}:
+                    # Self-reference/default expansion, never arbitrary shell code.
+                    safe = safe or re.fullmatch(
+                        rf"\${name}|\$\{{{name}(?::-[A-Za-z0-9_]+)?\}}", value
+                    ) is not None
+                if name in {"ASCEND_DEVKIT_DIR", "ASC_DEVKIT_DIR"}:
+                    safe = re.fullmatch(r"/[A-Za-z0-9_./+-]+", value) is not None
+                if not safe:
+                    return False
+                assignments.append(assignment)
+            if export or not argv:
+                if argv or not assignments or separator == "|":
+                    return False
+            elif argv[0] in {"rm", "tar", "cp", "mv", "mkdir", "touch", "chmod", "true", "cd"}:
+                text = " ".join(argv)
+                if (assignments or separator == "|" or not _PREFIX_CMD_RE.match(text)
+                        or _PREFIX_FORBIDDEN_RE.search(text)):
+                    return False
+            else:
+                if argv[0] == "timeout":
+                    argv.pop(0)
+                    if len(argv) >= 2 and argv[0] == "-k" and re.fullmatch(r"\d+[smhd]?", argv[1]):
+                        del argv[:2]
+                    if not argv or not re.fullmatch(r"\d+[smhd]?", argv.pop(0)):
+                        return False
+                if len(argv) < 2 or argv[0] != "bash" or not re.fullmatch(
+                    r"(?:/[^\s]*/)?tools/ascendc_eval_pipeline\.sh", argv[1]
+                ):
+                    return False
+                args = [arg for arg in argv[2:] if arg != "2>&1"]
+                options = {}
+                while args:
+                    option = args.pop(0)
+                    if option in options:
+                        return False
+                    if option == "--incremental":
+                        options[option] = True
+                    elif option in {"--op_name", "--impl", "--task", "--out_dir"} and args:
+                        value = args.pop(0)
+                        if not value or value.startswith("--"):
+                            return False
+                        options[option] = value
+                    else:
+                        return False
+                if not {"--op_name", "--out_dir"} <= options.keys():
+                    return False
+                pipeline_seen = True
+        previous_separator = separator
+    return pipeline_seen
+
+
 def is_pipeline_invocation(command: str) -> bool:
-    """True iff this shell line can only have run the real pipeline and shown its
-    output verbatim. The invocation must be the LAST segment (a trailing
-    ``; echo '[ascendc-eval] ...'`` would otherwise inject a forged verdict), and every
-    preceding segment must be a harmless file operation."""
+    """Recognize supported fixed-pipeline commands; result binding is separate.
+
+    Preserve legacy matches, then accept equivalent simple-shell spellings.
+    Prefixes remain restricted and only selecting filters may follow the call.
+    This recognizes a candidate invocation, not proof that execution completed.
+    """
     # Fold escaped continuations first, but keep real command boundaries until
     # splitting: normalizing all whitespace here loses multiline export/cd calls.
+    original_command = command
     command = command.replace("\\\n", " ").replace("\\\r\n", " ").strip()
     segments = [_normalize_command(seg) for seg in _SEGMENT_SPLIT_RE.split(command)]
-    if not _PIPELINE_CMD_RE.match(segments[-1]):
-        return False
-    return all(
+    legacy = bool(_PIPELINE_CMD_RE.match(segments[-1])) and all(
         _PREFIX_CMD_RE.match(seg) and not _PREFIX_FORBIDDEN_RE.search(seg)
         for seg in segments[:-1]
     )
+    return legacy or _expanded_pipeline_invocation(original_command)
 
 
 def _normalize_command(command: str) -> str:
@@ -317,8 +469,8 @@ def parse_verdict(tool_content: Any) -> dict[str, Any] | None:
         metrics.update(cases_passed=passed, cases_total=total)
     if success:
         if speedup is None:
-            # 成功档的分完全由 speedup 决定(0.75 + 0.25*tanh(ln s)),取不到数就是取不到,
-            # 不能拿 1.0 顶上 —— 那等于凭空判一个 0.75。真实成功路径必然带得出数字
+            # 成功档的分完全由 speedup 决定(0.80 + 0.20*tanh(ln s)),取不到数就是取不到,
+            # 不能拿 1.0 顶上 —— 那等于凭空判一个 0.8。真实成功路径必然带得出数字
             # (pipeline 在 $SP 为空时走的是 benchmark FAILED 分支,根本到不了 done 行),
             # 所以到这里只说明这行不是真的运行输出。返回 None,交给既有的 score=None 兜底:
             # 位置保留、不给分、绝不编造。
@@ -338,11 +490,11 @@ def verdict_score(metrics: dict[str, Any]) -> float:
     except Exception:
         pass
     # Conservative fallback mirroring this repo's ladder coarse shape
-    # (0.2/0.25/0.3/0.35/0.4/0.5-0.75+): only used when the import/scoring breaks.
+    # (0.2/0.25/0.3/0.35/0.5/0.6-0.8+): only used when the import/scoring breaks.
     if metrics.get("success"):
-        return 0.5
+        return 0.6
     if metrics.get("correctness_ok"):
-        return 0.4
+        return 0.5
     if metrics.get("ast_check_ok"):
         return 0.25
     return 0.2
@@ -660,18 +812,18 @@ def t3a_case_stats(stdout: str) -> tuple[int, int]:
 def t3a_verdict_score(classification: str | None, case_pass: int = 0, case_total: int = 0) -> float | None:
     """hook 分类 → operator_reward ladder 同尺度分(终局 reward 同一把尺):
 
-      PASS(本地全过) -> 0.4   correctness_ok 档;benchmark 只有 judge 可判,不进 success 档
-      D(对拍跑完没对)-> 0.3 + 0.1*通过率(缺统计回退 0.35)  correctness_failed 档同公式
+      PASS(本地全过) -> 0.5   correctness_ok 档;benchmark 只有 judge 可判,不进 success 档
+      D(对拍跑完没对)-> 0.3 + 0.15*通过率(缺统计回退 0.35)  correctness_failed 档同公式
       A(编译/崩溃)   -> 0.2   「编译过但没能有效跑完」档
       UNKNOWN/无判决 -> None  位置保留、不给分、绝不编造(与 t2a score=None 同语义)
 
-    全档严格低于 judge success 下限 0.5:本地 PASS ≠ success,正确性门控语义不变。
+    全档严格低于 judge success 下限 0.6:本地 PASS ≠ success,正确性门控语义不变。
     """
     if classification == "PASS":
-        return 0.4
+        return 0.5
     if classification == "D":
         if case_total > 0 and 0 <= case_pass <= case_total:
-            return 0.3 + 0.1 * min(case_pass / case_total, 0.999)
+            return 0.3 + 0.15 * min(case_pass / case_total, 0.999)
         return 0.35
     if classification == "A":
         return 0.2

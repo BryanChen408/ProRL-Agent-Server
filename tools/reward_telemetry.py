@@ -60,18 +60,18 @@ def _reward_band(ev: dict[str, Any], status: str) -> str:
     ast_ok = bool(m.get("ast_check_ok", False))
     corr_ok = bool(m.get("correctness_ok", False))
     if corr_ok:
-        return "fail: correctness_ok(0.4)"
+        return "fail: correctness_ok(0.5)"
     if not ast_ok:
         if et == "submission_missing":
-            return "fail: submission_missing(0.2)"
-        return "fail: AST没过(0.2)"
+            return "fail: submission_missing(0.0)"
+        return "fail: AST没过(0.0)"
     if et == "ascendc_compile_failed":
-        return "fail: 编译没过(0.25)"
+        return "fail: 编译没过(0.1)"
     if et in ("op_not_registered", "ascendc_run_crashed"):
-        return "fail: 崩溃/未注册(0.3)"
+        return "fail: 崩溃/未注册(0.2)"
     if et in ("correctness_failed", "output_precheck_failed"):
-        return "fail: 精度/输出错(0.35)"
-    return "fail: 其他(0.3)"
+        return "fail: 精度/输出错(0.30≤基础分<0.45；缺统计0.35)"
+    return "fail: 其他(0.25)"
 
 
 def load_run(run_dir: str) -> list[dict[str, Any]]:
@@ -123,8 +123,8 @@ def analyze(rows: list[dict[str, Any]]) -> dict[str, Any]:
             "dead_groups": {g: round(v[0], 3) for g, v in sorted(dead.items())},
         }
 
-    # 反事实:把 blank/AST没过/submission_missing 的 0.2 降到 0.0,能新拆开几个死组
-    floor_bands = {"fail: submission_missing(0.2)", "fail: AST没过(0.2)"}
+    # 反事实:把 blank/AST没过/submission_missing 的最终分置为 0.0（基础分已为 0）,能新拆开几个死组
+    floor_bands = {"fail: submission_missing(0.0)", "fail: AST没过(0.0)"}
     revived = 0
     for g, v in groups_eff.items():
         if len(v) <= 1 or _std(v) >= 1e-6:
@@ -141,7 +141,7 @@ def analyze(rows: list[dict[str, Any]]) -> dict[str, Any]:
         "dead_raw": dead_stats(groups_raw),
         "dead_effective": dead_stats(groups_eff),
         "floor_counterfactual": {
-            "note": "把 0.2 floor 档降到 0.0 后,原死组里能新拆开的数量",
+            "note": "把 AST/无提交档最终分置为 0.0 后（基础分已为 0）,原死组里能新拆开的数量",
             "revived_dead_groups": revived,
         },
         "truncation_penalty": {
@@ -153,7 +153,7 @@ def analyze(rows: list[dict[str, Any]]) -> dict[str, Any]:
 
 
 def _fmt(report: dict[str, Any]) -> str:
-    L = [f"总 session: {report['n_sessions']}", "", "== reward 分档 =="]
+    L = [f"总 session: {report['n_sessions']}", "", "== reward 分档（括号为默认基础分） =="]
     for band, c in report["bands"].items():
         pct = 100 * c / max(report["n_sessions"], 1)
         L.append(f"  {band:32} {c:4}  ({pct:4.1f}%)")
@@ -164,7 +164,7 @@ def _fmt(report: dict[str, Any]) -> str:
         if d["dead_groups"]:
             L.append(f"  死组明细(组:同分值): {d['dead_groups']}")
     cf = report["floor_counterfactual"]
-    L += ["", "== fail 地板反事实(0.2→0.0) ==",
+    L += ["", "== fail 地板反事实(最终分→0.0) ==",
           f"  {cf['note']}: {cf['revived_dead_groups']} 个"]
     tp = report["truncation_penalty"]
     L += ["", "== 截断惩罚生效面 ==",

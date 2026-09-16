@@ -41,7 +41,7 @@ end-of-turn token (auto-detected, or set explicitly with the builder's
 `end_of_turn_token_id` config). Training bridges expect trainable tokens to have
 matching logprob data.
 
-For `operator_judge` sessions that hit the context or agent time limit,
+For `operator_judge` sessions that hit the context, output, or agent time limit,
 `prefix_merging` retains training through the last pipeline invocation with a
 complete verdict (including failed evaluations). The gateway also reads terminal
 Claude tool results that never reached a subsequent saved completion. Later

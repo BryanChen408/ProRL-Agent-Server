@@ -553,6 +553,7 @@ class PrefixMergingBuilder(BaseTrajectoryBuilder):
         # and verdicts pair across chain breaks.
         recover_budget = session.termination_reason in {
             "agent_context_limit_exceeded", "agent_time_budget_exceeded",
+            "agent_output_limit_exceeded",
         }
         span_state = (
             _prepare_attempt_span_state(filter_result.kept, session.terminal_tool_results,
