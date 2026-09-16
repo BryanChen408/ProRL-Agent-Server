@@ -125,6 +125,7 @@ docs/
 graphify-out/
 
 # Dashboard frontend build artifacts
+!web/src/lib/
 web/node_modules/
 web/dist/
 

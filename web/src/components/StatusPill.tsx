@@ -1,11 +1,13 @@
+import type { ReactNode } from "react";
 import { statusClass } from "../lib/utils";
 
 interface Props {
   status?: string | null;
   className?: string;
+  children?: ReactNode;
 }
 
-export function StatusPill({ status, className = "" }: Props) {
+export function StatusPill({ status, className = "", children }: Props) {
   const label = status || "unknown";
   return (
     <span
@@ -13,7 +15,7 @@ export function StatusPill({ status, className = "" }: Props) {
         status,
       )} ${className}`}
     >
-      {label}
+      {children ?? label}
     </span>
   );
 }
