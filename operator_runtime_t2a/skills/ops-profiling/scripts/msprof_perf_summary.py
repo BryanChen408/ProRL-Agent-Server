@@ -2777,7 +2777,7 @@ def main():
         help="快速模式采集引擎：grouped 将全部 case 合并为一次 msprof；per-case 用于回退",
     )
     parser.add_argument("--output-dir", dest="output_dir", help="算子输出目录（对比模式/快速模式）")
-    parser.add_argument("--warmup", type=int, default=3, help="msprof warmup 次数")
+    parser.add_argument("--warmup", type=int, default=30, help="msprof warmup 次数")
     parser.add_argument("--repeats", type=int, default=1, help="重复采集次数")
     parser.add_argument("--seed", type=int, default=0, help="随机种子")
     parser.add_argument("--retry", type=int, default=2, help="单 case 解析失败重试次数")
