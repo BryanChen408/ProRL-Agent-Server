@@ -10,9 +10,13 @@ force_type,不再走文本推断。
 
 from __future__ import annotations
 
+import json
 import re
 import subprocess
+import sys
 from pathlib import Path
+
+import pytest
 
 PIPELINE = (
     Path(__file__).resolve().parents[2]
@@ -198,3 +202,106 @@ def test_cannbot_class_boundaries_and_explicit_infra_types_are_locked():
     # 粗粒度 error_type 不能充当探索终止条件；停止只服从固定入口总预算。
     assert "update_conductor_state" not in src
     assert "C类-同一A类子类型连续失败" not in src
+
+
+def _run_fail_hint(tmp_path, error_type, log_text="", *, success=False):
+    """Run the real feedback code from a nested cwd, without invoking NPU evaluation."""
+    source = PIPELINE.read_text(encoding="utf-8")
+    snippet = source.split("<<'CLASSIFY'", 1)[1].split("\nCLASSIFY", 1)[0]
+    snippet = snippet.split("\n", 1)[1]
+    work_root = tmp_path / "work dir"
+    nested = work_root / "demo" / "kernel"
+    nested.mkdir(parents=True)
+    metrics = work_root / "metrics.json"
+    metrics.write_text(json.dumps({"success": success, "error_type": error_type}))
+    before = metrics.read_bytes()
+    log = work_root / "metrics_error.log"
+    log.write_text(log_text)
+    result = subprocess.run(
+        [sys.executable, "-c", snippet, str(metrics), str(log), str(work_root)],
+        cwd=nested, text=True, capture_output=True, check=True,
+    )
+    assert metrics.read_bytes() == before  # Guidance must not alter the judgement.
+    return result.stdout, work_root
+
+
+@pytest.mark.parametrize("error_type,log_text,topic,reference", [
+    ("ascendc_compile_failed", "", "编译/链接", "ascendc-docs-search/SKILL.md"),
+    ("ast_check_failed", "", "AST退化", "tilelang2ascend-translator/SKILL.md"),
+    ("op_not_registered", LOG_LOAD, "加载失败", "tilelang2ascend-translator/SKILL.md"),
+    ("ascendc_load_failed", LOG_LOAD, "加载失败", "ascendc-runtime-debug/references/kernel_binary_debug.md"),
+    ("ascendc_run_crashed", LOG_CRASH, "崩溃", "ascendc-crash-debug/references/crash_workflow.md"),
+    ("ascendc_run_timeout", LOG_TIMEOUT, "超时", "ascendc-crash-debug/references/crash_workflow.md"),
+    ("ascendc_launch_failed", LOG_LAUNCH, "启动失败", "ascendc-runtime-debug/references/error_codes.md"),
+    ("output_precheck_failed", LOG_SHAPE_MISMATCH, "输出契约", "tilelang2ascend-translator/SKILL.md"),
+    ("output_precheck_failed", LOG_NAN_MISMATCH, "输出契约", "ascendc-precision-debug/SKILL.md"),
+    ("correctness_failed", LOG_PRECISION, "D类-精度不匹配", "tilelang2ascend-precision-tuning/SKILL.md"),
+    ("correctness_failed", LOG_CRASH, "A类-kernel崩溃", "ascendc-crash-debug/references/crash_workflow.md"),
+    ("stateful_impl_detected", "", "状态化", "tilelang2ascend-translator/SKILL.md"),
+    ("benchmark_failed", "", "benchmark执行失败", "ops-profiling/SKILL.md"),
+])
+def test_fail_hint_links_existing_references_from_any_cwd(
+    tmp_path, error_type, log_text, topic, reference,
+):
+    output, work_root = _run_fail_hint(tmp_path, error_type, log_text)
+    assert topic in output
+    assert f"{work_root}/.claude/skills/{reference}" in output
+    paths = re.findall(re.escape(str(work_root)) + r"/\.claude/skills/([\w./-]+\.md)", output)
+    assert paths
+    for path in paths:
+        assert (PIPELINE.parent.parent / "skills" / path).is_file(), path
+    assert "Read .claude/" not in output
+    assert "已读内容可复用" in output
+    assert "Glob" in output
+    if error_type == "ast_check_failed":
+        assert "ascendc-docs-search" not in output
+    if error_type == "benchmark_failed":
+        assert "测速未完成" in output and "perf.log" in output
+        assert "ascendc-crash-debug/references/crash_workflow.md" in output
+
+
+@pytest.mark.parametrize("error_type,success", [
+    ("submission_missing", False), ("input_load_failed", False),
+    ("npu_runtime_unavailable", False), ("unknown_error", False), (None, True),
+])
+def test_fail_hint_does_not_route_non_repair_results_to_skills(tmp_path, error_type, success):
+    output, _ = _run_fail_hint(tmp_path, error_type, success=success)
+    assert ".claude/skills/" not in output
+    assert "资料读取:" not in output
+
+
+def test_reference_paths_survive_real_session_prepare(tmp_path):
+    output, work_root = _run_fail_hint(tmp_path, "correctness_failed", LOG_PRECISION)
+    runtime = PIPELINE.parent.parent
+    task = tmp_path / "demo.py"
+    task.write_text(
+        "import torch\nclass Model(torch.nn.Module):\n"
+        "    def forward(self, x: torch.Tensor): return x + 1\n"
+        "def get_inputs(): return [torch.ones(8)]\n"
+    )
+    subprocess.run(
+        [sys.executable, str(runtime / "runtime/prepare_operator_workdir.py"),
+         "--backend", "ascendc", "--op-name", "demo", "--task-path", str(task),
+         "--workdir", str(work_root), "--canonical-root", str(runtime)],
+        cwd=work_root / "demo/kernel", capture_output=True, text=True, check=True,
+    )
+    source = PIPELINE.read_text().split("<<'CLASSIFY'", 1)[1].split("\nCLASSIFY", 1)[0]
+    paths = set(re.findall(r"\.claude/skills/([\w./-]+\.md)", source))
+    for path in paths:
+        installed = work_root / ".claude/skills" / path
+        assert installed.read_bytes() == (runtime / "skills" / path).read_bytes()
+        # Follow local markdown links and the short skill's backtick reference paths.
+        links = re.findall(r"\]\(([^)]+)\)|`(references/[\w./-]+\.md)`", installed.read_text())
+        for markdown, backtick in links:
+            target = (markdown or backtick).split("#", 1)[0]
+            if target and "://" not in target:
+                assert (installed.parent / target).exists(), (path, target)
+    complex_guide = work_root / (
+        ".claude/skills/tilelang2ascend-precision-tuning/references/debug-workflow-complex.md"
+    )
+    text = complex_guide.read_text()
+    assert "lingxi-ascendc" not in text and ".lingxi_verify_logs" not in text
+    assert "evaluation_results.json" not in text
+    assert all(name in text for name in ("verify_report.json", "verify.log", "metrics.json"))
+    assert "ascendc_eval_pipeline.sh" in text
+    assert "固定评测入口为准" in output

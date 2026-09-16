@@ -75,9 +75,13 @@ def test_t2a_system_prompt_allows_brief_design_without_premature_evaluation():
     assert "不要因为没有 metrics 就评测未实现的骨架" in prompt
 
 
-def test_prompt_allows_read_only_diagnosis_without_bypassing_validation():
+def test_prompt_checks_candidate_paths_before_evaluator_diagnosis():
     text = _load_generator()._instruction("op_test", "input/op_test.py")
-    assert "Read/Grep/Glob may inspect tools/ and .claude/skills/*/scripts/" in text
+    assert "evaluated top-level `op_test/`, not `output/op_test/`" in text
+    assert "inspect the candidate and logs" in text
+    assert "Do not read build, packing or evaluation script internals" in text
+    assert "exception governed by CLAUDE.md, not a routine repair step" in text
+    assert "Read/Grep/Glob may inspect tools/ and .claude/skills/*/scripts/" not in text
     assert "cannbot-reference-index.md" in text
     assert "may source tools/env.sh without touching the NPU" in text
     assert "Do not read, modify, inspect" not in text

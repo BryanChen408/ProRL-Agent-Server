@@ -42,7 +42,7 @@ operator_runtime:
   asc_devkit_dir: /home/docker/asc-devkit-9.0.0-a2a3-readable
   budget:
     generation_max: 30
-    optimization_max: 5
+    optimization_max: 6
     interval_seconds: 2
   npu_lease:
     enabled: true
@@ -85,7 +85,7 @@ operator:
       SOC_VERSION: "ascend910b1"
       ASCENDC_SOC_VERSION: "ascend910b1"
       ASC_DEVKIT_DIR: "/opt/asc-devkit"
-      CLAUDE_CODE_MAX_CONTEXT_TOKENS: "262144"
+      CLAUDE_CODE_MAX_CONTEXT_TOKENS: "346112"
 
   agent:
     # ← harness 侧 env:随 `claude` 那条 exec 下发,覆盖容器 env。BASH_*_TIMEOUT_MS 只有
@@ -118,7 +118,7 @@ operator:
     #   项目级那份不能省:CLAUDE.md 和任务 prompt 里的命令都走相对路径 `.claude/skills/...`。
     #   triton 侧无此字段 = 保持 /opt/canonical/skills(它的 prepare 不拷 skills,必须靠用户级)。
     skills_path: ""
-    max_output_tokens: 32768
+    max_output_tokens: 49152
     inference_timeout_ms: 14400000
     # t2a 只把 skill 当本地知识文件使用，禁止 Skill 工具自动加载/反复调用；其他 profile 不变。
     allowed_tools: "Bash Read Edit Write Grep Glob"

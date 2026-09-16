@@ -258,6 +258,52 @@ def test_tuple_return(tmp_path):
     assert "std::tuple<at::Tensor, at::Tensor>" in ops_h
 
 
+@pytest.mark.parametrize("body,arity,needs_hint", [
+    ("return x, x", 2, False),
+    ("if x is None:\n    return x, x\nreturn x, x", 2, False),
+    ("return torch_npu.npu_dynamic_quant(x)", 1, True),
+    ("result = (x, x)\nreturn result", 1, True),
+    ("return x", 1, True),
+    ("return [x, x]", 1, True),
+    ("return {'output': x}", 1, True),
+    ("return (x,)", 1, True),
+    ("return ()", 1, True),
+    ("return x, *x", 2, True),
+    ("return x, (x, x)", 2, True),
+    ("if x is None:\n    return x, x\nreturn x, x, x", 3, True),
+    ("def helper():\n    return x, x\nreturn x", 2, True),
+    ("pass", 1, True),
+])
+def test_return_hint_preserves_generated_code(tmp_path, monkeypatch, body, arity, needs_hint):
+    """返回信息不足时提示原版设计核对，不改变已有签名或生成的执行代码。"""
+    from dataclasses import replace
+
+    source = "class Model:\n    def forward(self, x):\n        " + body.replace("\n", "\n        ") + "\n"
+    task, js = _write_model(tmp_path, source)
+    sig = prep._extract_op_signature(task, js)
+    assert sig.ret_arity == arity
+    assert any(n.startswith("返回结构待确认：") for n in sig.notes) is needs_hint
+    out = _instantiate(tmp_path, task, js)
+
+    baseline = tmp_path / "without_hint"
+    baseline.mkdir()
+    monkeypatch.setattr(prep, "_extract_op_signature", lambda *_: replace(
+        sig, notes=[n for n in sig.notes if not n.startswith("返回结构待确认：")],
+    ))
+    previous = _instantiate(baseline, task, js)
+    hinted = {"model_new_ascendc.py", "kernel/register.cpp", "kernel/op_host/my_op.cpp"}
+    current_files = {p.relative_to(out) for p in out.rglob("*") if p.is_file()}
+    assert current_files == {p.relative_to(previous) for p in previous.rglob("*") if p.is_file()}
+    for rel in current_files:
+        actual = (out / rel).read_text()
+        if needs_hint and str(rel) in hinted:
+            comment, actual = actual.split("\n", 1)
+            assert comment.startswith("# 返回结构待确认：" if rel.suffix == ".py" else "// 返回结构待确认：")
+            assert ".claude/workflows/templates/design-template.md §1.1" in comment
+        assert actual == (previous / rel).read_text()
+    assert (CANONICAL / "workflows/templates/design-template.md").is_file()
+
+
 def test_optional_tensor_from_json(tmp_path):
     task, js = _write_model(tmp_path, LAYERNORM_LIKE, LAYERNORM_CASE)
     sig = prep._extract_op_signature(task, js)

@@ -87,7 +87,9 @@ bash /opt/workspace/agent_workdir/tools/ascendc_eval_pipeline.sh --op_name {op_n
 
 - 每轮有效源码修改后跑一次；源码未变化时禁止重复运行。被中途截断时按历史最优版本判分。
 - “有效修改”必须改变计算、访存、同步或必要接线；添加注释、时间戳、改文件名来触发 hash
-  不算修复。收到“源码未变化”后先核对输出中的实际检查目录与本轮修改文件，再修改实现；
+  不算修复。收到“源码未变化”或修改后结果仍不符合预期时，先核对实际评测的顶层
+  `{op_name}/` 与本轮修改文件；`output/{op_name}/` 不是被评测工程。确认路径后检查本题
+  wrapper、注册、host 输出分配和 kernel 实现，不因结果未变就转查评测脚本；
   不删除缓存状态来强迫复测。不要把 pipeline 输出管道接到 `head`（会提前关闭输出管道）。
 - 迭代时可加 `--incremental` 复用上次解包目录,走增量编译。
 - 它评的是 **AscendC 提交物**。Phase 3 的 TileLang 阶段还没有 AscendC kernel,
@@ -210,7 +212,11 @@ Phase 6(全量恢复)因此已从工作流移除。不要自行精简、修改�
 
 - 自行设置 `ASCEND_RT_VISIBLE_DEVICES`。
 - 运行 `npu-smi` 或任何探测 NPU 的命令。`SOC_VERSION` 已在环境变量里。
-- 修改或删除 `tools/` 与 `.claude/skills/*/scripts/` 下的脚本。允许用 Read/Grep
-  只读检查脚本，定位输入契约、参数和报错；不允许复制改写后执行或绕过固定入口判分。
+- 修改或删除 `tools/` 与 `.claude/skills/*/scripts/` 下的脚本，或复制改写后执行、绕过固定入口判分。
+- 为了解骨架生成机制或修复普通编译、加载、shape/dtype、数值错误而读取构建、打包、
+  评测脚本内部实现。先检查本题实际工程与评测日志，按错误分类查已有 skill 和官方资料。
+  只有核对工程路径与输入后，仍有证据指向评测器自身异常，才允许 Grep 定位并 Read
+  相关函数片段；评测堆栈包含脚本名本身不构成该证据。已明确为 B 类 INFRA 时仍按分类停止。
+  本题构建配置、官方 SDK/API 源码与上方 `tools/env.sh` 环境定位用法不受此读取限制。
 - 修改评测参数(SOC_VERSION / warmup / repeats / 精度阈值)。
 - 向用户提问。这是非交互运行,没有人会回答。

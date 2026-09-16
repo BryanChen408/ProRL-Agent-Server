@@ -369,9 +369,32 @@ def _extract_op_signature(task_path: Path, json_path: Path | None) -> _OpSig | N
 
     # ---- 返回 arity(多返回值算子要生成多 Tensor 签名) ----
     ret_arity = 1
+    returns = []
     for sub in ast.walk(fwd_fn):
-        if isinstance(sub, ast.Return) and isinstance(sub.value, ast.Tuple):
-            ret_arity = max(ret_arity, len(sub.value.elts))
+        if isinstance(sub, ast.Return):
+            returns.append(sub)
+            if isinstance(sub.value, ast.Tuple):
+                ret_arity = max(ret_arity, len(sub.value.elts))
+
+    # 保留原有占位签名，只提示未确认的返回结构，不扩展为类型/数据流推断。
+    # 固定平铺 tuple 也只能看出外层数量，元素类型仍由 reference 决定。
+    if not returns or any(
+        not isinstance(ret.value, ast.Tuple)
+        or len(ret.value.elts) != ret_arity
+        or len(ret.value.elts) < 2
+        or any(isinstance(e, (ast.Starred, ast.Tuple, ast.List, ast.Dict, ast.Set))
+               for e in ret.value.elts)
+        for ret in returns
+    ) or any(
+        sub is not fwd_fn and isinstance(sub, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
+        for sub in ast.walk(fwd_fn)
+    ):
+        notes.append(
+            "返回结构待确认：当前返回签名仅为工程占位。按现有 translator 设计步骤，"
+            "对照原始 reference 与 .claude/workflows/templates/design-template.md §1.1 "
+            "核对输出结构/shape/dtype；仅在不一致时同步修改 model_new_ascendc.py、"
+            "register.cpp、ops.h 和 op_host。"
+        )
 
     # ---- __init__ ----
     init: list[_Param] = []
@@ -941,6 +964,11 @@ def _instantiate_kernel_skeleton(canonical: Path, workdir: Path, op: str,
         dst = workdir / op / rel
         if dst.exists():
             continue
+        if rel in ("model_new_ascendc.py", "kernel/register.cpp", f"kernel/op_host/{op}.cpp"):
+            prefix = "#" if rel.endswith(".py") else "//"
+            for note in sig.notes:
+                if note.startswith("返回结构待确认："):
+                    text = f"{prefix} {note}\n" + text
         dst.parent.mkdir(parents=True, exist_ok=True)
         dst.write_text(text, encoding="utf-8")
     note = f"; 放宽降级: {'; '.join(sig.notes)}" if sig.notes else ""

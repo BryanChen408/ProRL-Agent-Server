@@ -22,27 +22,15 @@
 
 ## 通用调试步骤
 
-先按下面顺序进入调试，不要把用例管理和 dump 流程拆开做。Lingxi 输入统一来自 `{task_dir}/model.py:get_input_groups()`，不要引入旧式的 `debug_case.csv` / `basic` / `general` 脚本入口。
+以下保留 CANNBot 的数据流定位方法，执行入口与日志位置对齐当前 Polar 工作目录的
+`CLAUDE.md`。输入以原始 reference 为准，不修改 reference、正式用例或评测脚本。
 
-1. 先从 `{task_dir}/evaluation_results.json` 或 `{task_dir}/.lingxi_verify_logs/latest.stdout.log` 找到最小失败 case；不要修改只读的 `{task_dir}/model.py` 或引入额外 case 文件。
+1. 从本轮固定入口实际 `--out_dir` 下的 `verify_report.json` 或 `verify.log` 找到失败 case；优先选择能复现问题的小 case。
 2. DumpTensor 插桩先只覆盖一个失败 case 的首块路径：`bx=0`、`t=0`、`slot=0`，`dumpSize=8/16/32`。如果首样本正常，再追加 tail slot、最后一轮或指定 block。
-3. 运行 Lingxi verify-runner 验证当前 task：
+3. 使用当前任务 `CLAUDE.md` 规定的固定 `ascendc_eval_pipeline.sh` 复验，沿用本题的 `--op_name`、`--impl` 和 `--out_dir`。编译、NPU 执行和原始用例验证都由固定入口管理。
+4. DumpTensor 输出随对拍 stdout/stderr 写入本轮 `--out_dir` 下的 `verify.log`。按 `desc` 过滤该日志，不从算子源码目录猜日志路径。
+5. 定位修复后移除调试插桩，用固定入口重新验证原始用例，并检查本轮 `metrics.json` 的 `correctness_ok`。
 
-```bash
-lingxi-ascendc verify-runner \
-    --target ascendc \
-    --workspace . \
-    --action-id "agent-${task}-dumptensor-debug" \
-    --task ${task}
-```
-
-4. DumpTensor 输出会进入 `{task_dir}/.lingxi_verify_logs/latest.stdout.log`。按 `desc` 过滤阅读：
-
-```bash
-grep -B1 "desc=300" {task_dir}/.lingxi_verify_logs/latest.stdout.log
-```
-
-5. 修复后必须用原始 `get_input_groups()` 回归一次 verify，并确认 `{task_dir}/evaluation_results.json.ok == true`。
 
 ## Flash Attention类算子推荐调试点位
 

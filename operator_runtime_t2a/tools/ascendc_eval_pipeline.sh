@@ -249,27 +249,41 @@ except Exception:
     _log_low = ""
 crash_failure = not bool(re.search(r"case\[\d+\]:", _log_low))
 
-# 错误分类行内嵌路由:agent 必读此行,把「下一步去哪查」直接写在这里。
-# 目标全部是现有 skill 的现有小文档,无新增内容;词表与分类行原话对齐(agent 能逐字命中)。
+# 错误分类行内嵌参考入口：只链接已引入的 CANNBot skill，具体诊断由 agent 选择。
+# 不增加 Skill 调用、编辑门禁或独立修复计数器。
 _SUBMISSION_ROUTE = (";下一步:检查工程顶层、model_new_ascendc.py、kernel/ 与 tarball 布局,"
                      "不需要读取调试 Skill")
-_COMPILE_ROUTE = (";下一步:先 Read .claude/skills/tilelang2ascend-translator/SKILL.md;"
-                  "符号/API 错再 Read .claude/skills/ascendc-docs-search/SKILL.md,"
-                  "按错误符号查 $ASC_DEVKIT_DIR 文档")
-_LOAD_ROUTE = (";下一步:先 Read .claude/skills/ascendc-runtime-debug/SKILL.md 和 "
-               ".claude/skills/ascendc-runtime-debug/references/kernel_binary_debug.md")
-_CRASH_ROUTE = (";下一步:先 Read .claude/skills/ascendc-crash-debug/SKILL.md 和 "
-                ".claude/skills/ascendc-crash-debug/references/crash_workflow.md;"
-                "ACL错误码再 Read .claude/skills/ascendc-runtime-debug/references/error_codes.md")
-_OUTPUT_ROUTE = (";下一步:shape/dtype/输出数量错误先 Read "
-                 ".claude/skills/tilelang2ascend-translator/SKILL.md;"
-                 "NaN/Inf/全零输出再 Read .claude/skills/ascendc-precision-debug/SKILL.md")
-_PRECISION_ROUTE = (";下一步:先 Read .claude/skills/ops-precision-standard/SKILL.md 对容差表,"
-                    "再按 .claude/skills/ascendc-precision-debug/SKILL.md 的指引修")
-_STATEFUL_ROUTE = (";下一步:先 Read .claude/skills/tilelang2ascend-translator/SKILL.md,"
-                   "删除跨调用缓存、常量输出或输入无关捷径")
-_BENCHMARK_ROUTE = (";下一步:先 Read .claude/skills/ops-profiling/SKILL.md;"
-                    "若 perf.log 是 kernel/ACL 崩溃,再按运行期错误路线处理")
+_AST_ROUTE = (";参考资料:Read .claude/skills/tilelang2ascend-translator/SKILL.md"
+              "（关键限制、接口接线与自定义算子调用；结合本轮退化检查详情）")
+_COMPILE_ROUTE = (";参考资料:Read .claude/skills/tilelang2ascend-translator/SKILL.md"
+                  "（接口接线与编译验证）;"
+                  "API签名/参数/dtype不明时 Read .claude/skills/ascendc-docs-search/SKILL.md"
+                  "（按报错符号查 $ASC_DEVKIT_DIR 文档及同名API变体）")
+_LOAD_ROUTE = (";参考资料:Read .claude/skills/tilelang2ascend-translator/SKILL.md"
+               "（步骤2：接口接线与模型加载）;"
+               "Read .claude/skills/ascendc-runtime-debug/references/kernel_binary_debug.md"
+               "（实际加载路径、构建产物与二进制一致性）")
+_CRASH_ROUTE = (";参考资料:Read .claude/skills/ascendc-crash-debug/SKILL.md"
+                "（崩溃/超时/内存错误路由）和 "
+                ".claude/skills/ascendc-crash-debug/references/crash_workflow.md"
+                "（plog、同步/Buffer、越界与调试方法）;"
+                "ACL错误码参考 .claude/skills/ascendc-runtime-debug/references/error_codes.md")
+_OUTPUT_ROUTE = (";参考资料:shape/dtype/返回结构问题 Read "
+                 ".claude/skills/tilelang2ascend-translator/SKILL.md（关键限制与接口接线）;"
+                 "NaN/Inf/全零输出 Read .claude/skills/ascendc-precision-debug/SKILL.md"
+                 "（快速诊断与症状-原因速查）")
+_PRECISION_ROUTE = (";参考资料:Read .claude/skills/ops-precision-standard/SKILL.md"
+                    "（按计算类型/dtype选择精度标准）;"
+                    "Read .claude/skills/ascendc-precision-debug/SKILL.md（症状与根因诊断）;"
+                    "中间值定位参考 .claude/skills/tilelang2ascend-precision-tuning/SKILL.md"
+                    "（短版DumpTensor流程：最小抽样、输入→中间→输出，含Vector/Cube分支）")
+_STATEFUL_ROUTE = (";参考资料:Read .claude/skills/tilelang2ascend-translator/SKILL.md"
+                   "（关键限制与reference语义）；结合本轮缓存/常量输出检测详情")
+_BENCHMARK_ROUTE = (";参考资料:Read .claude/skills/ops-profiling/SKILL.md"
+                    "（perf.log与逐case性能证据）；本轮测速未完成，先区分失败原因与性能瓶颈;"
+                    "若测速日志为kernel崩溃/超时，参考 "
+                    ".claude/skills/ascendc-crash-debug/references/crash_workflow.md;"
+                    "ACL错误码参考 .claude/skills/ascendc-runtime-debug/references/error_codes.md")
 
 INFRA = {"npu_runtime_unavailable", "input_load_failed", "judge_container_failed",
          "judge_metrics_unreadable", "judge_no_metrics", "task_missing",
@@ -280,7 +294,7 @@ if et in INFRA:
 elif et == "submission_missing":
     label = "A类-提交物/工程布局错误" + _SUBMISSION_ROUTE
 elif et == "ast_check_failed":
-    label = "A类-AST退化/实现不合规" + _COMPILE_ROUTE
+    label = "A类-AST退化/实现不合规" + _AST_ROUTE
 elif et == "ascendc_compile_failed":
     label = "A类-编译/链接错误" + _COMPILE_ROUTE
 elif et in ("op_not_registered", "ascendc_load_failed"):
@@ -305,6 +319,10 @@ else:
     label = "B类-INFRA-分类器未覆盖该error_type(停止并上报,不要猜测修复):" + et
 label = label.replace(".claude/", f"{sys.argv[3]}/.claude/")
 print(f"[ascendc-eval] 错误分类: {label}")
+if ".claude/skills/" in label:
+    print("[ascendc-eval] 资料读取:按本轮问题选读；已读内容可复用。直接 Read 上述绝对路径，"
+          "不要随当前目录改写路径；找不到时 Glob 对应目录确认文件名。"
+          "参考资料中的执行方式以当前任务CLAUDE.md和固定评测入口为准。")
 if first_exc:
     print(f"[ascendc-eval] 首个异常: {first_exc}")
 CLASSIFY
@@ -845,20 +863,6 @@ VER="$SK/$TRANS_SKILL/scripts/verification_ascendc.py"
 if ! VER_OUT=$(cd "$WORK" && export WORKDIR="$WORK" PYTHONPATH="$SK/$TRANS_SKILL/scripts:${PYTHONPATH:-}" \
       && run_npu_phase verify "$PY_BIN" "$VER" "$OP_DIR_NAME" --json-file "$OUT_DIR/verify_report.json" 2>&1); then
   printf "%s\n" "$VER_OUT" > "$OUT_DIR/verify.log"
-  # 在这里就判定,不交给 classify() 的文本推断 —— verify.log 里带 PATH 环境 dump
-  # (含 ccec_compiler),classify() 的 "ccec"/"compil" 分支在 对拍 分支之前命中,
-  # 会把对拍阶段的失败一律错标成 ascendc_compile_failed(0.25)。
-  #
-  # 判据是「对拍有没有给出结论」,看有没有 case[N]: 行 —— 上游无论用什么措辞报结论
-  # (数值差异/形状不符/NaN 不符/dtype 不符/...)都会打 case[N]: output[M]: 前缀。
-  # 不用「有没有 max_abs_diff」:形状或 NaN 掩码不一致时上游走前置检查早退,压根算不出
-  # 逐元素差,那批本是「对拍跑完了、结果不对」,却会被误判成「对拍没跑完(崩溃)」
-  # (实测 195351:9/38 中招 —— 6 个形状不符 + 3 个 NaN 不符)。
-  #
-  #   有 case[N] 行 → 对拍给出结论了
-  #        ├─ 有 max_abs_diff/MERE/matched_ratio → 数值差异   correctness_failed
-  #        └─ 没有(形状/NaN/dtype 前置检查不通过) → output_precheck_failed
-  #   无 case[N] 行 → 对拍未形成有效结论,再按加载/超时/启动/其他崩溃细分(A类)
   if grep -qE "case\[[0-9]+\]:" "$OUT_DIR/verify.log"; then
     if grep -qEi "(max_abs_diff|mere|matched_ratio)[[:space:]]*=" "$OUT_DIR/verify.log"; then
       _VER_TYPE="correctness_failed"
@@ -927,7 +931,7 @@ if [[ -z "$MSPROF_BIN" ]]; then
   echo "[ascendc-eval] msprof NOT FOUND"; fail_hint; exit 1
 fi
 export PATH="$(dirname "$MSPROF_BIN"):$PATH"
-MSPROF_WARMUP="${MSPROF_WARMUP:-3}"
+MSPROF_WARMUP="${MSPROF_WARMUP:-30}"
 PERF_JSON="$TASK_DIR/performance.json"
 rm -f "$PERF_JSON"
 ( export PYTHONPATH="$SK/$PERF_SKILL/scripts:${PYTHONPATH:-}" \
