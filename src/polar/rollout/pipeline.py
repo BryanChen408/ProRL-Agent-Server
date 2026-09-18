@@ -350,7 +350,7 @@ class Pipeline:
         while True:
             if execution_timeout_started:
                 assert callback_deadline is not None
-                remaining = callback_deadline - time.monotonic()
+                remaining = self._callback_deadline_monotonic(session) - time.monotonic()
                 if remaining <= 0:
                     break
                 wait_timeout = min(result_poll_interval, remaining)
@@ -412,6 +412,10 @@ class Pipeline:
         )
         response.raise_for_status()
         payload = response.json()
+        paused = float(payload.get("planned_pause_seconds", 0.0))
+        if paused > session.planned_pause_seconds:
+            session.deadline_monotonic += paused - session.planned_pause_seconds
+            session.planned_pause_seconds = paused
         status = payload.get("status")
         result_payload = payload.get("result")
         status_value = str(status) if status is not None else None

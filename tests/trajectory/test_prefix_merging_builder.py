@@ -601,3 +601,28 @@ def test_reasoning_trains_by_default() -> None:
     trajectory = _build(records)
     trace = trajectory.traces[0]
     assert trace.loss_mask == [1, 1, 1, 1], "默认下 CoT 应进训练(全 1)"
+
+
+def test_verified_partial_session_keeps_completed_turns_from_both_epochs_trainable():
+    first = _record("first", [1, 2], [10, EOT], metadata={"policy_version": 0})
+    second = _record("second", [1, 2, 10, EOT, 50], [20, 21, EOT], metadata={"policy_version": 1})
+    for record, version in ((first, 0), (second, 1)):
+        choice = record.response["choices"][0]
+        choice["token_ids"] = [p["token_id"] for p in choice["logprobs"]["content"]]
+        record.metadata["partial_rollout"] = {
+            "verified": True, "mode": "session_restart", "policy_version": version,
+        }
+    trajectory = _build([first, second])
+    assert trajectory.status == "COMPLETED"
+    assert trajectory.metadata["oldest_policy_version"] == 0
+    assert trajectory.traces[0].loss_mask == [1, 1, 0, 1, 1, 1]
+    assert trajectory.traces[0].response_logprobs == [-.01, -.02, 0., -.01, -.02, -.03]
+    # Retained actions become invalid after a second policy update.
+    second.metadata["partial_rollout"]["policy_version"] = 2
+    assert _build([first, second]).status == "ERROR"
+    second.metadata["partial_rollout"]["policy_version"] = 1
+    # Missing actual policy provenance cannot be replaced by a boolean flag.
+    second.metadata["partial_rollout"].pop("policy_version")
+    invalid = _build([first, second])
+    assert invalid.status == "ERROR"
+    assert "invalid partial-rollout" in invalid.error

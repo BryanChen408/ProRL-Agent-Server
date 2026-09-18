@@ -64,6 +64,7 @@ class PolicyTransitionRecord(BaseModel):
     gateway_nodes: dict[str, dict[str, Any]] = Field(default_factory=dict)
     cancellation: dict[str, Any] = Field(default_factory=dict)
     engine_abort_confirmed: bool = False
+    partial_rollout: bool = False
     last_error: str | None = None
 
 
@@ -97,6 +98,7 @@ class PolicyTransitionStore:
         to_epoch: int,
         from_engine_versions: dict[str, str] | None = None,
         allow_epoch_reset: bool = False,
+        partial_rollout: bool = False,
         kind: PolicyTransitionKind = PolicyTransitionKind.UPDATE,
     ) -> PolicyTransitionRecord:
         transition_id = str(transition_id).strip()
@@ -115,6 +117,8 @@ class PolicyTransitionStore:
         with self._lock:
             current = self._snapshot.current
             if current is not None and current.transition_id == transition_id:
+                if current.partial_rollout != partial_rollout:
+                    raise PolicyTransitionError("transition_id reused with different partial rollout mode")
                 if current.policy_namespace != policy_namespace or current.kind != kind:
                     raise PolicyTransitionError(
                         "transition_id was reused with a different namespace or kind"
@@ -164,6 +168,7 @@ class PolicyTransitionStore:
                 to_epoch=to_epoch,
                 phase=PolicyTransitionPhase.QUIESCING,
                 from_engine_versions=from_engine_versions or {},
+                partial_rollout=partial_rollout,
             )
             self._snapshot.active_epoch = from_epoch
             self._snapshot.active_namespace = policy_namespace

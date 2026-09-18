@@ -251,6 +251,16 @@ class SessionStore:
                 record.metadata["policy_version"] = self._current_policy_version
                 if state.gen_version is None:
                     state.gen_version = self._current_policy_version
+            partial = response.get("_polar_partial")
+            if partial is not None:
+                record.metadata["partial_rollout"] = partial
+                version = partial.get("policy_version")
+                if isinstance(version, int) and not isinstance(version, bool) and version >= 0:
+                    # Storage may run after the serving epoch advances. Record the
+                    # actual successful attempt's policy, never the live save epoch.
+                    record.metadata["policy_version"] = version
+                    record.metadata["oldest_policy_version"] = version
+                    state.gen_version = min(state.gen_version, version) if state.gen_version is not None else version
             state.completions.append(record)
             state.completion_count = len(state.completions)
             metric_event = build_completion_metric_event(

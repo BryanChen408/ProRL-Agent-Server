@@ -797,12 +797,18 @@ class GatewayNodeManager:
             merged_env = {**env, **(step.env or {})}
             t_step_start = asyncio.get_event_loop().time()
             t_step_start_ns = time.time_ns()
-            result = await runtime.exec(
+            partial_enabled = getattr(self, "partial_rollout", None) is not None
+            if partial_enabled:
+                # Client reconnects coalesce to the same logical request; allow long
+                # planned train windows without exhausting the CLI retry budget.
+                merged_env["API_TIMEOUT_MS"] = str(max(int(merged_env.get("API_TIMEOUT_MS", 0)), 86400000))
+            execution = runtime.exec(
                 step.command,
                 cwd=step.cwd,
                 env=merged_env,
-                timeout_sec=self._remaining_budget(managed),
+                timeout_sec=None if partial_enabled else self._remaining_budget(managed),
             )
+            result = await self._await_with_budget(execution, managed) if partial_enabled else await execution
             step_finished_ns = time.time_ns()
             step_duration_ms = (asyncio.get_event_loop().time() - t_step_start) * 1000.0
             managed.timer.record_tool_exec(
@@ -1875,7 +1881,9 @@ class GatewayNodeManager:
         deadline = managed.execution_deadline
         if deadline is None:
             raise RuntimeError("session execution deadline was not initialized")
-        remaining = deadline - asyncio.get_running_loop().time()
+        partial = getattr(self, "partial_rollout", None)
+        paused = partial.pause_seconds(managed.request.session_id) if partial is not None else 0.0
+        remaining = deadline + paused - asyncio.get_running_loop().time()
         if remaining <= 0:
             raise GatewayExecutionTimeout("session execution timeout")
         return remaining
@@ -1886,6 +1894,16 @@ class GatewayNodeManager:
         managed: ManagedSession,
     ):
         try:
+            if getattr(self, "partial_rollout", None) is not None:
+                task = asyncio.ensure_future(awaitable)
+                try:
+                    while not task.done():
+                        await asyncio.wait({task}, timeout=min(1.0, self._remaining_budget(managed)))
+                    return task.result()
+                finally:
+                    if not task.done():
+                        task.cancel()
+                        await asyncio.gather(task, return_exceptions=True)
             return await asyncio.wait_for(
                 awaitable,
                 timeout=self._remaining_budget(managed),

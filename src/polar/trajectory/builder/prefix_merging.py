@@ -404,9 +404,45 @@ def _session_upstream_failures(metadata: dict[str, Any]) -> dict[str, int]:
     return out
 
 
+def _partial_policy_versions(completion: CompletionRecord) -> set[int] | None:
+    """Verify one actual serving policy per completed session-restart chat call."""
+    import math
+
+    proof = (completion.metadata or {}).get("partial_rollout")
+    if (not isinstance(proof, dict) or proof.get("verified") is not True
+            or proof.get("mode") != "session_restart"):
+        return None
+    version = proof.get("policy_version")
+    if not isinstance(version, int) or isinstance(version, bool) or version < 0:
+        return None
+    choices = completion.response.get("choices") or []
+    if len(choices) != 1:
+        return None
+    choice = choices[0]
+    if choice.get("finish_reason") not in {"stop", "tool_calls", "length"}:
+        return None
+    ids = choice.get("token_ids")
+    probs = (choice.get("logprobs") or {}).get("content")
+    if not isinstance(ids, list) or not isinstance(probs, list) or len(ids) != len(probs):
+        return None
+    try:
+        if any(not math.isfinite(float(p["logprob"])) or float(p["logprob"]) <= -9999
+               or float(p["logprob"]) > 0 for p in probs):
+            return None
+        return {version}
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
 def _session_policy_versions(completions: list[CompletionRecord]) -> set[int]:
-    """Distinct policy_versions across a session's raw completions (>1 == mixed-weight)."""
-    return {v for c in completions if (v := _completion_policy_version(c)) is not None}
+    versions = set()
+    for completion in completions:
+        partial = _partial_policy_versions(completion)
+        if partial is not None:
+            versions.update(partial)
+        elif (version := _completion_policy_version(completion)) is not None:
+            versions.add(version)
+    return versions
 
 
 @dataclass(frozen=True, slots=True)
@@ -600,11 +636,18 @@ class PrefixMergingBuilder(BaseTrajectoryBuilder):
         # raw completions were generated under >1 policy_version crossed a weight update
         # mid-interaction (mixed-weight).  Precise -- only true spans, no false kills.
         session_versions = _session_policy_versions(session.completions)
-        session_spanned = len(session_versions) > 1
+        partial_verified = all(_partial_policy_versions(c) is not None for c in session.completions)
+        session_spanned = len(session_versions) > 1 and not (
+            partial_verified and max(session_versions) - min(session_versions) <= 1
+        )
+        invalid_partial = any(
+            (c.metadata or {}).get("partial_rollout") is not None
+            and _partial_policy_versions(c) is None for c in session.completions
+        )
         upstream_failures = _session_upstream_failures(dict(session.metadata))
-        # Only POLICY-IDENTITY failures are fatal here. An aborted or version-spanning
-        # session has no single behaviour policy, so its importance ratio has no
-        # well-defined denominator and no amount of reward validity rescues it.
+        # Planned pauses are hidden by the gateway. Mixed versions are trainable
+        # only when every token has its real behaviour logprob and verified span.
+        # Unplanned aborts / unverified mixed policies remain infrastructure errors.
         #
         # An upstream transport blip is a different question, and folding it in here
         # answered that question wrongly. Measured on run 092443 (198 sessions, 252
@@ -630,8 +673,10 @@ class PrefixMergingBuilder(BaseTrajectoryBuilder):
         upstream_truncated = bool(upstream_failures) and _upstream_failure_truncated_session(
             dict(session.metadata), len(session.completions)
         )
-        _non_trainable = session_had_abort or session_spanned or upstream_truncated
-        if session_had_abort:
+        _non_trainable = session_had_abort or session_spanned or upstream_truncated or invalid_partial
+        if invalid_partial:
+            _span_error = "invalid partial-rollout token/logprob provenance"
+        elif session_had_abort:
             _span_error: str | None = "aborted generation (weight-update cutoff)"
         elif session_spanned:
             _span_error = f"policy_version span (mixed-weight): {sorted(session_versions)}"
@@ -664,6 +709,8 @@ class PrefixMergingBuilder(BaseTrajectoryBuilder):
                 "completion_filter": filter_result.metadata,
                 "upstream_failures": upstream_failures or None,
                 "truncation_events": truncation_events,
+                "oldest_policy_version": min(session_versions) if session_versions else None,
+                "partial_rollout_verified": partial_verified,
                 **_top_level_scheduler_metadata(session.metadata),
             },
             traces=final_traces,

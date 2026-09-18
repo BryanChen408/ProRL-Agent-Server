@@ -267,6 +267,7 @@ class TaskCancelRequest(BaseModel):
 
 
 class PolicyTransitionBeginRequest(BaseModel):
+    partial_rollout: bool = False
     transition_id: str = Field(min_length=1, max_length=256)
     policy_namespace: str = Field(default="legacy", min_length=1, max_length=128)
     from_epoch: int = Field(ge=0)
@@ -384,6 +385,7 @@ class SessionContext:
     task_id: str
     request: TaskRequest
     deadline_monotonic: float = field(default_factory=time.monotonic)
+    planned_pause_seconds: float = 0.0
     node_id: str | None = None
     gateway_url: str | None = None
     timer: "StageTimer" = field(default_factory=_new_stage_timer)

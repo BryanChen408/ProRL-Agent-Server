@@ -41,7 +41,8 @@ class _GenerationEntry:
 class InflightGenerationTracker:
     """Coalesce duplicate active upstream generation requests per session."""
 
-    def __init__(self) -> None:
+    def __init__(self, *, retain_completed: bool = False) -> None:
+        self._retain_completed = retain_completed
         self._lock = asyncio.Lock()
         self._entries: dict[tuple[str, str], _GenerationEntry] = {}
         # Rollout session IDs are single-use.  Remember a closed ID even when there
@@ -69,7 +70,7 @@ class InflightGenerationTracker:
                     f" ({reason or 'closed'})"
                 )
             entry = self._entries.get(key)
-            if entry is None or (entry.task.done() and entry.waiters == 0):
+            if entry is None or (entry.task.done() and entry.waiters == 0 and not self._keep_completed(entry)):
                 entry = self._create_entry(session_id, fingerprint, key, factory)
                 self._entries[key] = entry
                 coalesced = False
@@ -123,6 +124,8 @@ class InflightGenerationTracker:
                     self._closed_generation_count += 1
                 if not entry.task.done():
                     entry.task.cancel()
+                elif entry.waiters == 0:
+                    self._entries.pop(_key, None)
             return len(entries)
 
     def status(self) -> dict[str, Any]:
@@ -171,6 +174,10 @@ class InflightGenerationTracker:
         )
         return entry
 
+    def _keep_completed(self, entry):
+        return (self._retain_completed and not entry.closed and entry.task.done()
+                and not entry.task.cancelled() and entry.task.exception() is None)
+
     def _release_waiter(
         self,
         key: tuple[str, str],
@@ -181,7 +188,7 @@ class InflightGenerationTracker:
         # this tiny mutation synchronously is therefore atomic with respect to them and,
         # importantly, cannot be interrupted by a repeated Task.cancel().
         entry.waiters = max(0, entry.waiters - 1)
-        if entry.waiters == 0 and entry.task.done() and self._entries.get(key) is entry:
+        if entry.waiters == 0 and entry.task.done() and self._entries.get(key) is entry and not self._keep_completed(entry):
             self._entries.pop(key, None)
 
     async def _cleanup_done_entry(
@@ -190,7 +197,7 @@ class InflightGenerationTracker:
         entry: _GenerationEntry,
     ) -> None:
         async with self._lock:
-            if entry.waiters == 0 and self._entries.get(key) is entry:
+            if entry.waiters == 0 and self._entries.get(key) is entry and not self._keep_completed(entry):
                 self._entries.pop(key, None)
 
 

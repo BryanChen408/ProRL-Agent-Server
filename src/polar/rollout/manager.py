@@ -49,6 +49,8 @@ class _TaskRecord:
     cancel_reason: str | None = None
     policy_namespace: str | None = None
     policy_version: int | None = None
+    partial_rollout: bool = False
+    group_policy_version: int | None = None
 
 
 def _harness_from_request(request: TaskRequest) -> str | None:
@@ -197,6 +199,8 @@ class RolloutManager:
                 model=_model_from_request(request),
                 policy_namespace=request_policy_namespace,
                 policy_version=request_policy_version,
+                partial_rollout=request.metadata.get("partial_rollout") is True,
+                group_policy_version=request.metadata.get("group_policy_version", request_policy_version),
             )
         self._emit(
             "task.created",
@@ -296,6 +300,22 @@ class RolloutManager:
                     or record.policy_version <= int(from_epoch)
                 )
             ]
+
+    def expired_partial_tasks(self, task_ids: list[str], to_epoch: int) -> list[str]:
+        """Expire whole scheduler groups conservatively by their oldest start epoch."""
+        with self._lock:
+            expired = []
+            for task_id in task_ids:
+                record = self._tasks[task_id]
+                if not record.partial_rollout or record.policy_namespace != self._active_policy_namespace:
+                    expired.append(task_id)
+                    continue
+                versions = [record.policy_version, record.group_policy_version]
+                versions.extend(session.request.metadata.get("group_policy_version", record.policy_version)
+                                for session in record.sessions.values())
+                if any(v is None or int(to_epoch) - int(v) > 1 for v in versions):
+                    expired.append(task_id)
+            return expired
 
     def reset_policy_admission(
         self,

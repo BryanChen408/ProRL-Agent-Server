@@ -225,6 +225,7 @@ async def rollout_status():
 def _transition_response(state: RolloutState, record: PolicyTransitionRecord) -> dict[str, object]:
     return {
         **record.model_dump(mode="json"),
+        "partial_rollout_protocol": 2,
         "active_epoch": state.policy_transitions.snapshot().active_epoch,
         "active_namespace": state.policy_transitions.snapshot().active_namespace,
         "admission_closed": record.phase in {
@@ -478,6 +479,8 @@ async def _drive_quiescing(
             policy_namespace=record.policy_namespace,
             transition_id=record.transition_id,
         )
+    if record.partial_rollout and not reset_epoch:
+        task_ids = state.manager.expired_partial_tasks(task_ids, record.to_epoch)
     cancellation = await state.manager.cancel_tasks(task_ids, reason="policy_cutoff")
     record = state.policy_transitions.update(
         record.transition_id,
@@ -507,6 +510,10 @@ async def _drive_quiescing(
             record.transition_id,
             last_error="not every gateway acknowledged closed admission",
         )
+    if record.partial_rollout and not _all_gateways(
+        nodes, lambda payload: payload.get("partial_rollout_protocol") == 2,
+    ):
+        raise PolicyTransitionError("session partial rollout requires protocol 2 on every Polar gateway")
     # Do not wait for drain here. VIME must regain control so it can abort every
     # serving engine; only the explicit confirm-drained phase below may wait.
     return state.policy_transitions.update(
@@ -545,7 +552,14 @@ async def _drive_confirm_drained(
             record.transition_id,
             gateway_nodes={str(item["node_id"]): item for item in observed},
         )
-        if all_paused and (record.engine_abort_confirmed or naturally_drained):
+        # Session restart closes HTTP locally. That proves the gateway is clear,
+        # not that every remote engine has stopped: require BOTH acknowledgements.
+        drain_proven = (
+            record.engine_abort_confirmed and naturally_drained
+            if record.partial_rollout
+            else record.engine_abort_confirmed or naturally_drained
+        )
+        if all_paused and drain_proven:
             return state.policy_transitions.update(
                 record.transition_id,
                 phase=PolicyTransitionPhase.READY_FOR_TRAINING,
@@ -556,6 +570,9 @@ async def _drive_confirm_drained(
                 record.transition_id,
                 phase=PolicyTransitionPhase.ADMISSION_CLOSED,
                 last_error=(
+                    "session partial rollout requires paused gateways, local request "
+                    "drain and all-engine abort acknowledgement"
+                    if record.partial_rollout else
                     "gateway admission is not durably paused, or neither an all-engine "
                     "abort proof nor a natural gateway drain has been observed"
                 ),
@@ -805,7 +822,12 @@ async def _reconcile_transition(
                 and int(payload.get("inflight", 0) or 0) == 0
             ),
         )
-        if not all_paused or not (record.engine_abort_confirmed or naturally_drained):
+        drain_proven = (
+            record.engine_abort_confirmed and naturally_drained
+            if record.partial_rollout
+            else record.engine_abort_confirmed or naturally_drained
+        )
+        if not all_paused or not drain_proven:
             record = state.policy_transitions.update(
                 record.transition_id,
                 phase=PolicyTransitionPhase.ADMISSION_CLOSED,
@@ -916,6 +938,7 @@ async def begin_policy_transition(request: PolicyTransitionBeginRequest):
                 from_epoch=request.from_epoch,
                 to_epoch=request.to_epoch,
                 from_engine_versions=_validate_engine_versions(request.engine_versions),
+                partial_rollout=request.partial_rollout,
                 kind=PolicyTransitionKind.UPDATE,
             )
             record = await _reconcile_transition(

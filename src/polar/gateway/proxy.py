@@ -111,6 +111,15 @@ class InferenceClient:
     ):
         self.base_url = base_url.rstrip("/")
         self.engine = engine
+        self.partial = None
+        if os.environ.get("POLAR_PARTIAL_ROLLOUT", "0") == "1":
+            if engine.name != "vllm":
+                raise ValueError("POLAR_PARTIAL_ROLLOUT requires vLLM")
+            from polar.gateway.partial_rollout import PartialRollout
+            checkpoint_dir = os.environ.get("POLAR_PARTIAL_CHECKPOINT_DIR")
+            if not checkpoint_dir:
+                raise ValueError("POLAR_PARTIAL_CHECKPOINT_DIR is required for partial rollout")
+            self.partial = PartialRollout(self, checkpoint_dir)
         self._liveness_timeout_seconds = (
             self._coerce_liveness_timeout_seconds(liveness_timeout_seconds)
             if liveness_timeout_seconds is not None
@@ -240,6 +249,12 @@ class InferenceClient:
         import time as _time
         from copy import deepcopy
 
+        if self.partial is not None:
+            try:
+                return await self.partial.run(request, trace_headers, generation_guard)
+            except httpx.RequestError as exc:
+                raise self._translate_transport_error(exc) from exc
+
         # ── B: acquire slot ──
         t_acquire_start = _time.monotonic()
         t_acquire_start_ns = _time.time_ns()
@@ -367,6 +382,8 @@ class InferenceClient:
         """
         async with self._generation_condition:
             self._generation_paused = True
+            if self.partial is not None:
+                self.partial.interrupt_active()
             self._generation_condition.notify_all()
 
         timed_out = False
@@ -392,10 +409,14 @@ class InferenceClient:
         async with self._generation_condition:
             self._generation_paused = False
             self._generation_condition.notify_all()
+            if self.partial is not None:
+                await self._generation_condition.wait_for(lambda: not self.partial.priority)
             return self.generation_status()
 
     def generation_status(self) -> dict[str, Any]:
         return {
+            "partial_rollout_protocol": 2 if self.partial is not None else 0,
+            "resume_pending": len(self.partial.priority) if self.partial is not None else 0,
             "paused": self._generation_paused,
             "drained": self._inflight_generations == 0,
             "inflight": self._inflight_generations,

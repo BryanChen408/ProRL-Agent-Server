@@ -117,7 +117,9 @@ def _build_state(topology: TopologyConfig, node_id: str | None) -> GatewayState:
             policy_namespace=control_snapshot.policy_namespace,
             enforce_epoch=control_snapshot.epoch_enforced,
         )
-    inflight = InflightGenerationTracker()
+    if inference.partial is not None:
+        inference.partial.policy_version = storage.get_policy_version
+    inflight = InflightGenerationTracker(retain_completed=inference.partial is not None)
     transform_manager = TransformManager()
     session_registry = SessionRegistry()
     builder_registry = default_builder_registry()
@@ -170,6 +172,7 @@ def _build_state(topology: TopologyConfig, node_id: str | None) -> GatewayState:
         ),
         observability_service_name=topology.gateway.observability.service_name,
     )
+    node_manager.partial_rollout = inference.partial
     return GatewayState(
         topology=topology,
         node=node,
@@ -520,6 +523,13 @@ def _request_policy_namespace(metadata: dict[str, Any] | None) -> str | None:
     return namespace or None
 
 
+def _partial_epoch_allowed(state, metadata, epoch):
+    partial = getattr(state.inference, "partial", None)
+    current = state.storage.get_policy_version()
+    return (partial is not None and (metadata or {}).get("partial_rollout") is True
+            and epoch is not None and current is not None and 0 <= current - epoch <= 1)
+
+
 def _policy_epoch_rejection(
     state: GatewayState,
     metadata: dict[str, Any] | None,
@@ -534,7 +544,7 @@ def _policy_epoch_rejection(
         expected_namespace is None
         or expected_namespace != current_namespace
         or expected_epoch is None
-        or expected_epoch != current_epoch
+        or (expected_epoch != current_epoch and not _partial_epoch_allowed(state, metadata, expected_epoch))
     ):
         return expected_namespace, expected_epoch, current_namespace, current_epoch
     return None
@@ -554,7 +564,8 @@ def _generation_epoch_guard(state: GatewayState, session_info: Any | None):
                 and session_namespace == state.storage.get_policy_namespace()
                 and
                 session_epoch is not None
-                and session_epoch == state.storage.get_policy_version()
+                and (session_epoch == state.storage.get_policy_version()
+                     or _partial_epoch_allowed(state, getattr(session_info, "metadata", None), session_epoch))
             )
         )
 
@@ -955,7 +966,11 @@ async def get_session(session_id: str):
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     if safe_session_id is None:
         raise HTTPException(status_code=400, detail="Session ID cannot be empty")
-    return _session_response(safe_session_id)
+    response = _session_response(safe_session_id)
+    partial = getattr(get_state().inference, "partial", None)
+    if partial is not None:
+        response.planned_pause_seconds = partial.pause_seconds(safe_session_id)
+    return response
 
 
 @app.delete("/sessions/{session_id}", response_model=SessionDeleteResponse)
@@ -1228,7 +1243,10 @@ async def _handle_non_streaming(
     state = get_state()
     if state.storage.is_session_closed(session_id):
         return _closed_session_response(api_type, session_id)
-    if state.storage.session_would_span(session_id):
+    if state.storage.session_would_span(session_id) and not _partial_epoch_allowed(
+        state, getattr(session_info, "metadata", None),
+        _request_policy_epoch(getattr(session_info, "metadata", None)),
+    ):
         return _version_span_abort(
             api_type, transformer, openai_request, original_request, session_id,
             original_model=original_model, session_info=session_info,
@@ -1335,7 +1353,36 @@ async def _handle_non_streaming(
     return JSONResponse(transformed)
 
 
-async def _handle_streaming(
+async def _handle_streaming(*args, **kwargs):
+    if getattr(get_state().inference, "partial", None) is None:
+        return await _handle_streaming_result(*args, **kwargs)
+
+    async def keepalive():
+        # Send headers immediately and keep the agent's idle/read timer alive during
+        # a planned training pause. Disconnect cancels only this HTTP waiter; the
+        # shielded logical call stays in InflightGenerationTracker for a retry.
+        task = asyncio.create_task(_handle_streaming_result(*args, **kwargs))
+        try:
+            yield ": polar logical generation pending\n\n"
+            while not task.done():
+                await asyncio.wait({task}, timeout=15.0)
+                if not task.done():
+                    yield ": polar keepalive\n\n"
+            response = task.result()
+            if isinstance(response, StreamingResponse):
+                async for item in response.body_iterator:
+                    yield item
+            else:
+                yield "event: error\ndata: " + response.body.decode() + "\n\n"
+        finally:
+            if not task.done():
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+    return StreamingResponse(keepalive(), media_type="text/event-stream",
+                             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
+
+async def _handle_streaming_result(
     api_type: APIType,
     transformer: BaseTransformer,
     openai_request: dict[str, Any],
@@ -1348,7 +1395,10 @@ async def _handle_streaming(
     state = get_state()
     if state.storage.is_session_closed(session_id):
         return _closed_session_response(api_type, session_id)
-    if state.storage.session_would_span(session_id):
+    if state.storage.session_would_span(session_id) and not _partial_epoch_allowed(
+        state, getattr(session_info, "metadata", None),
+        _request_policy_epoch(getattr(session_info, "metadata", None)),
+    ):
         return _version_span_abort(
             api_type, transformer, openai_request, original_request, session_id,
             original_model=original_model, session_info=session_info,

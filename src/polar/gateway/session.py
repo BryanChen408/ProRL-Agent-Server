@@ -258,6 +258,7 @@ class SessionCreateResponse(BaseModel):
 
 
 class SessionStatusResponse(BaseModel):
+    planned_pause_seconds: float = 0.0
     session_id: str
     task_id: str | None = None
     created_at: datetime
