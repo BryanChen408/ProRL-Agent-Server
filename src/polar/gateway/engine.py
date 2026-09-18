@@ -24,6 +24,7 @@ natively via the ``return_token_ids`` request flag plus a light response rename.
 
 from __future__ import annotations
 
+import os
 from abc import ABC
 from typing import Any
 
@@ -82,6 +83,21 @@ class VLLMEngine(InferenceEngine):
         request = super().prepare_request(request)  # logprobs=True
         request["return_token_ids"] = True
         request.setdefault("top_logprobs", 0)
+        # Opt-in per-completion thinking cap; max_tokens still caps the whole reply.
+        budget = os.environ.get("POLAR_THINKING_TOKEN_BUDGET")
+        if budget is not None:
+            budget = int(budget)
+            if budget < 0:
+                raise ValueError("POLAR_THINKING_TOKEN_BUDGET must be a non-negative integer")
+            requested = request.get("thinking_token_budget")
+            if requested is not None and (type(requested) is not int or requested < 0):
+                raise ValueError("thinking_token_budget must be a non-negative integer")
+            request["thinking_token_budget"] = (
+                min(budget, requested) if requested is not None else budget
+            )
+        if request.get("thinking_token_budget") is not None:
+            # Keep the closing delimiter identifiable for the training loss mask.
+            request["return_tokens_as_token_ids"] = False
         # vLLM reads input reasoning from `reasoning`, not Polar's canonical
         # `reasoning_content`; rename it so prior turns' interleaved thinking
         # survives templating (else they render an empty `<think></think>`).

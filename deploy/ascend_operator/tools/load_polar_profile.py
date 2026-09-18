@@ -190,6 +190,11 @@ def main() -> int:
     operator = _mapping(profile.get("operator"))
     runtime = _mapping(operator.get("runtime"))
     agent = _mapping(operator.get("agent"))
+    thinking_budget = agent.get("thinking_token_budget")
+    if thinking_budget is not None and (
+        type(thinking_budget) is not int or thinking_budget < 0
+    ):
+        parser.error("operator.agent.thinking_token_budget must be a non-negative integer or null")
     evaluator = _mapping(operator.get("evaluator"))
     workflow = str(operator_runtime.get("workflow") or "legacy").strip().lower()
     if workflow not in {"legacy", "cannbot", "task_request"}:
@@ -445,6 +450,8 @@ def main() -> int:
         "POLAR_ANTHROPIC_DEFAULT_MAX_TOKENS": max_tokens,
         "POLAR_INFERENCE_REQUEST_TIMEOUT_SECONDS": str(int(timeout_ms) // 1000),
     }
+    if thinking_budget is not None:
+        env["POLAR_THINKING_TOKEN_BUDGET"] = str(thinking_budget)
     for key, value in env.items():
         print(f"export {key}={shlex.quote(str(value))}")
     return 0

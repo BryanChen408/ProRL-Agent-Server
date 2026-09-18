@@ -1,0 +1,13 @@
+diff --git a/vllm_ascend/worker/model_runner_v1.py b/vllm_ascend/worker/model_runner_v1.py
+index bb090282..2da81d5c 100644
+--- a/vllm_ascend/worker/model_runner_v1.py
++++ b/vllm_ascend/worker/model_runner_v1.py
+@@ -3418,6 +3418,8 @@ class NPUModelRunner(GPUModelRunner):
+             cudagraph_stats=cudagraph_stats,
+             routed_experts=None,
+         )
++        # Snapshot CPU attribution before an async step can move/reuse batch rows.
++        model_runner_output.collect_thinking_budget_forcing(self.input_batch.logitsprocs)
+         if self.ascend_config.profiling_chunk_config.need_timing and hasattr(self, '_execution_start_time'):
+             self._sync_device()
+             model_runner_output.execution_time_ms = (time.perf_counter() - self._execution_start_time) * 1000.0

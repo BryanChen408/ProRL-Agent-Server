@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import os
+import json
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -45,6 +47,7 @@ def test_real_profiles_separate_attempt_credit_from_call_limits(tmp_path, name):
     assert op["evaluator"]["config"]["judge_timeout"] == 5400
     assert topology["gateway"]["nodes"][0]["inference"]["base_url"] == profile["service"]["sglang_router_url"]
     if name == "t3a":
+        assert "POLAR_THINKING_TOKEN_BUDGET" not in env
         assert "operator_completion_guard" not in op["agent"]["settings"]
         assert env["POLAR_T3A_ATTEMPT_SPANS"] == "1"
         assert env["POLAR_PIPELINE_BUDGET_ENABLED"] == "0"
@@ -54,6 +57,7 @@ def test_real_profiles_separate_attempt_credit_from_call_limits(tmp_path, name):
         assert "max_turns" not in op["agent"]["settings"]
         assert "--max-turns" not in command
     else:
+        assert env["POLAR_THINKING_TOKEN_BUDGET"] == "32768"
         assert op["agent"]["settings"]["operator_completion_guard"] == {
             "generation_max": profile["operator_runtime"]["budget"]["generation_max"],
             "optimization_max": profile["operator_runtime"]["budget"]["optimization_max"],
@@ -67,6 +71,73 @@ def test_real_profiles_separate_attempt_credit_from_call_limits(tmp_path, name):
         max_turns = profile["operator"]["agent"]["max_turns"]
         assert op["agent"]["settings"]["max_turns"] == max_turns
         assert f"--max-turns {max_turns}" in command
+
+
+@pytest.mark.parametrize("budget", [None, 0, 32768, -1, 1.5, True, "32768"])
+def test_profile_thinking_budget_exports_only_valid_explicit_values(tmp_path, budget):
+    profile = tmp_path / "profile.yaml"
+    profile.write_text(yaml.safe_dump({
+        "paths": {"output_dir": str(tmp_path / "out")},
+        "operator": {"agent": {"max_output_tokens": 49152, "thinking_token_budget": budget}},
+    }))
+    proc = subprocess.run(
+        [sys.executable, str(SCRIPT), "--profile", str(profile), "--repo-root", str(ROOT)],
+        env={**os.environ, "POLAR_RUN_ID": "test", "POLAR_THINKING_TOKEN_BUDGET": "40960"},
+        capture_output=True, text=True,
+    )
+    if budget is not None and (type(budget) is not int or budget < 0):
+        assert proc.returncode != 0
+        assert "thinking_token_budget must be a non-negative integer or null" in proc.stderr
+        return
+    assert proc.returncode == 0, proc.stderr
+    env = _load_env(proc.stdout)
+    assert env["POLAR_ANTHROPIC_DEFAULT_MAX_TOKENS"] == "49152"
+    if budget is None:
+        assert "POLAR_THINKING_TOKEN_BUDGET" not in env  # Preserve inherited env-only configuration.
+    else:
+        assert env["POLAR_THINKING_TOKEN_BUDGET"] == str(budget)  # Explicit profile wins.
+
+
+def test_t2a_profile_budget_reaches_gateway_wire_request(tmp_path):
+    profile = yaml.safe_load((ROOT / "deploy/ascend_operator/profile.t2a.yaml").read_text())
+    profile["paths"]["output_dir"] = str(tmp_path / "out")
+    path = tmp_path / "profile.yaml"
+    path.write_text(yaml.safe_dump(profile))
+    inherited = {**os.environ, "POLAR_RUN_ID": "test", "POLAR_THINKING_TOKEN_BUDGET": "40960"}
+    exports = subprocess.run(
+        [sys.executable, str(SCRIPT), "--profile", str(path), "--repo-root", str(ROOT)],
+        env=inherited, capture_output=True, text=True, check=True,
+    ).stdout
+    # Execute the actual shell exports, then start a child gateway client as the
+    # launcher does. HTTP is intercepted; no running service is touched.
+    code = '''
+import asyncio, json, os, httpx, yaml
+from polar.gateway.engine import get_engine
+from polar.gateway.proxy import InferenceClient
+with open(os.environ["POLAR_TOPOLOGY"]) as f:
+    inference = yaml.safe_load(f)["gateway"]["nodes"][0]["inference"]
+wire = {}
+def handler(request):
+    wire.update(json.loads(request.content))
+    return httpx.Response(200, json={"choices": [{"message": {"content": "ok"}}]})
+async def run():
+    client = InferenceClient(inference["base_url"], get_engine(inference["engine"]))
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(handler), base_url=inference["base_url"]
+    ) as http:
+        client._client = http
+        response = await client.completion({"messages": [], "max_tokens": 49152})
+    print(json.dumps({"wire": wire, "captured_budget": response["_polar_thinking_token_budget"]}))
+asyncio.run(run())
+'''
+    proc = subprocess.run(
+        ["bash", "-c", exports + '\nexec "$1" -c "$2"', "budget-test", sys.executable, code],
+        env=inherited, cwd=ROOT, capture_output=True, text=True, check=True,
+    )
+    result = json.loads(proc.stdout)
+    assert result["wire"]["thinking_token_budget"] == 32768
+    assert result["wire"]["max_tokens"] == 49152
+    assert result["captured_budget"] == 32768
 
 
 def test_time_only_start_stops_old_watcher_without_starting_another(tmp_path):

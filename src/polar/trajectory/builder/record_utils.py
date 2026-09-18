@@ -183,6 +183,35 @@ def build_trace_from_completion(completion: CompletionRecord) -> Trace:
     if reasoning_mask:
         md = {**(md if isinstance(md, dict) else {}), "reasoning_loss_mask": reasoning_mask}
 
+    budget = response.get("_polar_thinking_token_budget", request.get("thinking_token_budget"))
+    forced_indices = first_choice.get("thinking_budget_forced_token_indices")
+    if budget is not None or forced_indices is not None:
+        content = _logprob_content(first_choice) or []
+        end_indices = [
+            idx for idx, item in enumerate(content[: len(loss_mask)])
+            if isinstance(item, dict) and item.get("token") == _THINK_END_TOKEN
+        ]
+        if forced_indices is None:
+            # Legacy engines cannot distinguish natural and forced delimiters.
+            masked_indices = end_indices
+        else:
+            if (
+                not isinstance(forced_indices, list)
+                or any(type(i) is not int or i not in end_indices for i in forced_indices)
+                or forced_indices != sorted(set(forced_indices))
+            ):
+                raise ValueError("Invalid thinking-budget forced token attribution")
+            masked_indices = forced_indices
+        for idx in masked_indices:
+            loss_mask[idx] = 0
+        budget_mask = {"budget": budget, "end_token_indices": masked_indices}
+        if forced_indices is not None:
+            budget_mask["source"] = "engine"
+        md = {
+            **(md if isinstance(md, dict) else {}),
+            "thinking_budget_loss_mask": budget_mask,
+        }
+
     return Trace(
         prompt_ids=list(prompt_ids) if isinstance(prompt_ids, list) else [],
         response_ids=response_ids,

@@ -119,6 +119,8 @@ operator:
     #   triton 侧无此字段 = 保持 /opt/canonical/skills(它的 prepare 不拷 skills,必须靠用户级)。
     skills_path: ""
     max_output_tokens: 49152
+    # 由 loader 导出到 gateway；推理引擎需加载 Polar thinking-budget 插件。
+    thinking_token_budget: 32768
     inference_timeout_ms: 14400000
     # t2a 只把 skill 当本地知识文件使用，禁止 Skill 工具自动加载/反复调用；其他 profile 不变。
     allowed_tools: "Bash Read Edit Write Grep Glob"
@@ -139,11 +141,14 @@ operator:
       timeout 参数必须显式填 2700000(45 分钟)——禁止省略 timeout,也不要填更小的值
       (小于实际耗时会被自动转后台);if it still gets auto-backgrounded, read the output file it
       prints to fetch the verdict and error output.
-      输出纪律(硬规则,违反会直接判死本会话):思考占输出预算,写太长会顶穿预算、本轮 content
-      为空,连续几轮会话就被终止。允许按 CLAUDE.md 在主轨迹中完成简短设计核对（每项一两句），
+      每次模型回复的总输出预算上限为 49152 tokens，包含思考、正文和工具调用参数，其中思考上限为 32768 tokens。
+      这是单次回复的上限，不是应当用满的目标，也不是整个 session 的剩余预算。
+      尽早结束已完成的分析，为必要的正文或工具调用留出空间。
+      达到思考上限仅结束本次思考，仍可继续输出正文或工具调用，不表示任务完成；任务完成仍以 task_complete 为准。
+      输出纪律：按 CLAUDE.md 在主轨迹中完成简短设计核对（每项一两句），
       API 不确定时先 Read 对应文档与示例，再写代码；不要抄录整份文档、长篇方案或文件草稿。
       写代码分小块（每个 Write/Edit 一段或一个函数），完成首版实现后再评测；修复时只更新
-      受影响的设计项，结合真实报错与文档改动。如果收到「Output token limit hit」提示，保留
+      受影响的设计项，结合真实报错与文档改动。如果收到「Output token limit hit」提示，表示本次输出发生截断，应保留
       已确认的结论，用更小的块继续输出，不要从头规划，也不要跳过必要的设计与查证。
   evaluator:
     # ← delta 3+4:AscendC 判分入口 + tarball 提交(golden model.py 在 tarball 内,无需 --task)

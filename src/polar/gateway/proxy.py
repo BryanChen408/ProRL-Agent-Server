@@ -228,7 +228,12 @@ class InferenceClient:
             self._release_generation_slot()
 
         await self._raise_for_status(resp)
-        return self.engine.normalize_response(resp.json())
+        response = self.engine.normalize_response(resp.json())
+        # Persist the effective budget, including backend/env overrides. The stored
+        # request is the pre-engine request and may not contain this parameter.
+        if request_copy.get("thinking_token_budget") is not None:
+            response["_polar_thinking_token_budget"] = request_copy["thinking_token_budget"]
+        return response
 
     async def _acquire_generation_slot(self) -> None:
         async with self._generation_condition:

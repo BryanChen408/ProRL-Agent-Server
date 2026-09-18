@@ -85,6 +85,32 @@ def test_linear_main_agent_tool_chain_merges_with_interstitial_masked() -> None:
     assert trajectory.metadata["reconstruction_stats"]["completions_dropped"] == 0
 
 
+def test_budget_delimiter_mask_preserves_next_turn_prefix_and_logprobs(monkeypatch):
+    monkeypatch.setenv("POLAR_MASK_REASONING", "0")
+    first = _record("00-main1", [1, 2], [10, 11, EOT], finish_reason="tool_calls")
+    first.response["_polar_thinking_token_budget"] = 1
+    first.response["choices"][0]["logprobs"]["content"][1]["token"] = "</think>"
+    second = _record("01-main2", [1, 2, 10, 11, EOT, 50, 51], [20, EOT])
+    trajectory = _build([first, second])
+    assert len(trajectory.traces) == 1
+    trace = trajectory.traces[0]
+    assert trace.prompt_ids == [1, 2]
+    assert trace.response_ids == [10, 11, EOT, 50, 51, 20, EOT]
+    assert trace.loss_mask == [1, 0, 1, 0, 0, 1, 1]
+    assert trace.response_logprobs == [-0.01, -0.02, -0.03, 0.0, 0.0, -0.01, -0.02]
+
+    # Natural closure in the first reply remains trainable; force only the
+    # second reply's delimiter, whose response-local index must survive merging.
+    first.response["choices"][0]["thinking_budget_forced_token_indices"] = []
+    second.response["_polar_thinking_token_budget"] = 1
+    second.response["choices"][0]["thinking_budget_forced_token_indices"] = [0]
+    second.response["choices"][0]["logprobs"]["content"][0]["token"] = "</think>"
+    precise = _build([first, second]).traces[0]
+    assert precise.response_ids == trace.response_ids
+    assert precise.response_logprobs == trace.response_logprobs
+    assert precise.loss_mask == [1, 1, 1, 0, 0, 0, 1]
+
+
 def test_prefix_merge_filters_side_truncated_and_empty_completions_before_grouping() -> None:
     records = [
         _record("00-main1", [1, 2], [10, EOT]),

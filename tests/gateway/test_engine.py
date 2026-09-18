@@ -36,6 +36,28 @@ def test_vllm_prepare_request_keeps_explicit_top_logprobs() -> None:
     assert out["top_logprobs"] == 5
 
 
+def test_thinking_budget_is_opt_in_and_does_not_change_output_or_tools(monkeypatch):
+    request = {"max_tokens": 49152, "messages": [], "tools": [{"type": "function"}]}
+    monkeypatch.delenv("POLAR_THINKING_TOKEN_BUDGET", raising=False)
+    assert "thinking_token_budget" not in VLLMEngine().prepare_request(dict(request))
+    monkeypatch.setenv("POLAR_THINKING_TOKEN_BUDGET", "40960")
+    out = VLLMEngine().prepare_request(dict(request))
+    assert out["thinking_token_budget"] == 40960
+    assert out["max_tokens"] == 49152 and out["tools"] == request["tools"]
+    assert out["return_tokens_as_token_ids"] is False
+    assert "thinking_token_budget" not in SGLangEngine().prepare_request(dict(request))
+    assert VLLMEngine().prepare_request({"thinking_token_budget": 32})["thinking_token_budget"] == 32
+    monkeypatch.setenv("POLAR_THINKING_TOKEN_BUDGET", "0")
+    assert VLLMEngine().prepare_request({})["thinking_token_budget"] == 0
+
+
+@pytest.mark.parametrize("budget", ["-1", "abc", "1.5", ""])
+def test_thinking_budget_rejects_invalid_env(monkeypatch, budget):
+    monkeypatch.setenv("POLAR_THINKING_TOKEN_BUDGET", budget)
+    with pytest.raises(ValueError):
+        VLLMEngine().prepare_request({})
+
+
 def test_vllm_prepare_request_forces_logprobs_when_absent() -> None:
     out = VLLMEngine().prepare_request({"messages": []})
     assert out["logprobs"] is True
