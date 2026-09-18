@@ -51,12 +51,10 @@
 所有 rollout/gateway 进程使用更新后的 Polar，trainer 使用更新后的 Vime。
 vLLM 和 DP/PD proxy 沿用原有代码及启动配置。本次没有启动或重启运行中的服务。
 
-每个 Gateway 设置（checkpoint 目录按 run/node 隔离）：
+Gateway 和 rollout server 使用原有启动命令，无需额外设置 partial 环境变量：
 
 ```bash
 export PYTHONPATH=/home/l00830933/ProRL-Agent-Server/src:${PYTHONPATH:-}
-export POLAR_PARTIAL_ROLLOUT=1
-export POLAR_PARTIAL_CHECKPOINT_DIR=/home/l00830933/ProRL-Agent-Server/output/partial_rollout/run-name/node-name
 polar serve_gateway -c "$POLAR_TOPOLOGY" --node-id "$POLAR_NODE_ID"
 ```
 
@@ -85,6 +83,23 @@ POLAR_MAX_ACTIVE_SESSIONS=64 POLAR_MAX_OWNED_GROUPS=24
 底层为 `--polar-partial-rollout --rollout-max-off-policy-steps 1 --get-mismatch-metrics`
 以及 `--use-tis`。`--use-rollout-logprobs` 保持 false，禁用按版本 mask。
 不依赖 Vime 原生单样本 `--partial-rollout` buffer。
+
+Vime 在首次权重同步前，通过 bootstrap 显式发送 `partial_rollout` 和协议版本
+（partial 为 2，普通模式为 0）。Polar 先关闭准入并暂停所有 Gateway，再配置运行模式；
+只有 topology 中所有节点确认实际模式和 namespace 后才返回 bootstrap 成功。
+旧版 Polar 没有这项协商能力时，新版 Vime 会明确报错，需要同步升级协调器和 Gateway。
+
+Checkpoint 默认位于 `<rollout.save_dir>/partial_rollout/<namespace>/<node>`，路径分量使用
+安全名称和身份哈希以避免碰撞。可选 `POLAR_PARTIAL_CHECKPOINT_DIR` 覆盖根目录，
+自动配置仍会追加 namespace/node；若未配置 save_dir，必须提供这个根目录。
+路径不可写、引擎不是 vLLM、节点不可达或仍有旧 session 时，准入保持关闭。
+`POLAR_PARTIAL_ROLLOUT=1` 加 checkpoint 目录的旧式手动配置仍兼容旧客户端。
+
+模式固定在一次 policy namespace 内，重复 bootstrap 幂等；不同 trainer 不可接管正在
+serving 的运行。先完成现有 `/rollout/admin/policy/quiesce` 流程，再启动新 namespace，
+即可从 partial 切换回普通模式（Vime 正常 dispose 会执行 quiesce）。模式和 checkpoint
+路径随控制状态持久化，Gateway 重启后恢复配置；这不代表恢复崩溃前的 agent session。
+新注册或重启节点只有确认当前运行配置和 policy epoch 后才可重新参与调度。
 
 **只有 Polar 协调器和 Gateway 需要声明 `partial_rollout_protocol=2`**，用于区分 session
 重发与此前的 token 续写协议，避免混用旧进程。vLLM 不需要协议标记、render 或 assemble 接口。

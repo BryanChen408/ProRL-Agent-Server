@@ -20,6 +20,9 @@ class GatewayControlSnapshot(BaseModel):
     policy_epoch: int | None = Field(default=None, ge=0)
     epoch_enforced: bool = False
     transition_id: str | None = None
+    rollout_namespace: str | None = None
+    partial_rollout: bool | None = None
+    partial_checkpoint_dir: str | None = None
     updated_at: float = Field(default_factory=time.time)
 
 
@@ -45,6 +48,9 @@ class GatewayControlStore:
         set_policy_epoch: bool = False,
         epoch_enforced: bool | None = None,
         transition_id: str | None = None,
+        rollout_namespace: str | None = None,
+        partial_rollout: bool | None = None,
+        partial_checkpoint_dir: str | None = None,
     ) -> GatewayControlSnapshot:
         with self._lock:
             updates: dict[str, object] = {"updated_at": time.time()}
@@ -58,8 +64,19 @@ class GatewayControlStore:
                 updates["epoch_enforced"] = bool(epoch_enforced)
             if transition_id is not None:
                 updates["transition_id"] = str(transition_id)
+            if partial_rollout is not None:
+                updates.update(
+                    rollout_namespace=rollout_namespace,
+                    partial_rollout=partial_rollout,
+                    partial_checkpoint_dir=partial_checkpoint_dir,
+                )
+            previous = self._snapshot
             self._snapshot = self._snapshot.model_copy(update=updates)
-            self._persist_locked()
+            try:
+                self._persist_locked()
+            except Exception:
+                self._snapshot = previous
+                raise
             return self._snapshot.model_copy(deep=True)
 
     def _load(self) -> GatewayControlSnapshot:

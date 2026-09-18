@@ -108,15 +108,18 @@ class InferenceClient:
         *,
         liveness_timeout_seconds: float | None = None,
         initially_paused: bool = False,
+        partial_rollout: bool | None = None,
+        partial_checkpoint_dir: str | None = None,
     ):
         self.base_url = base_url.rstrip("/")
         self.engine = engine
         self.partial = None
-        if os.environ.get("POLAR_PARTIAL_ROLLOUT", "0") == "1":
+        enable_partial = partial_rollout if partial_rollout is not None else os.environ.get("POLAR_PARTIAL_ROLLOUT", "0") == "1"
+        if enable_partial:
             if engine.name != "vllm":
                 raise ValueError("POLAR_PARTIAL_ROLLOUT requires vLLM")
             from polar.gateway.partial_rollout import PartialRollout
-            checkpoint_dir = os.environ.get("POLAR_PARTIAL_CHECKPOINT_DIR")
+            checkpoint_dir = partial_checkpoint_dir or os.environ.get("POLAR_PARTIAL_CHECKPOINT_DIR")
             if not checkpoint_dir:
                 raise ValueError("POLAR_PARTIAL_CHECKPOINT_DIR is required for partial rollout")
             self.partial = PartialRollout(self, checkpoint_dir)
@@ -415,6 +418,9 @@ class InferenceClient:
 
     def generation_status(self) -> dict[str, Any]:
         return {
+            "supported_partial_rollout_protocols": [2] if self.engine.name == "vllm" else [],
+            "partial_rollout": self.partial is not None,
+            "rollout_namespace": getattr(self, "rollout_namespace", None),
             "partial_rollout_protocol": 2 if self.partial is not None else 0,
             "resume_pending": len(self.partial.priority) if self.partial is not None else 0,
             "paused": self._generation_paused,

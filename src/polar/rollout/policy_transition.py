@@ -65,6 +65,7 @@ class PolicyTransitionRecord(BaseModel):
     cancellation: dict[str, Any] = Field(default_factory=dict)
     engine_abort_confirmed: bool = False
     partial_rollout: bool = False
+    rollout_mode_negotiated: bool = False
     last_error: str | None = None
 
 
@@ -74,6 +75,7 @@ class PolicyTransitionSnapshot(BaseModel):
     schema_version: int = 1
     active_namespace: str | None = Field(default=None, min_length=1, max_length=128)
     active_epoch: int | None = Field(default=None, ge=0)
+    active_partial_rollout: bool | None = None
     current: PolicyTransitionRecord | None = None
 
 
@@ -99,6 +101,7 @@ class PolicyTransitionStore:
         from_engine_versions: dict[str, str] | None = None,
         allow_epoch_reset: bool = False,
         partial_rollout: bool = False,
+        rollout_mode_negotiated: bool = False,
         kind: PolicyTransitionKind = PolicyTransitionKind.UPDATE,
     ) -> PolicyTransitionRecord:
         transition_id = str(transition_id).strip()
@@ -116,7 +119,21 @@ class PolicyTransitionStore:
 
         with self._lock:
             current = self._snapshot.current
+            active_mode = self._snapshot.active_partial_rollout
+            same_namespace = self._snapshot.active_namespace == policy_namespace
+            if active_mode is not None:
+                if same_namespace and active_mode != partial_rollout:
+                    raise PolicyTransitionError("rollout mode is immutable within a policy namespace")
+                if not same_namespace and current is not None and current.phase != PolicyTransitionPhase.QUIESCED:
+                    raise PolicyTransitionError("quiesce the current run before bootstrapping a different namespace")
+                if not same_namespace and kind != PolicyTransitionKind.BOOTSTRAP:
+                    raise PolicyTransitionError("a new negotiated run requires explicit bootstrap")
+                if kind == PolicyTransitionKind.BOOTSTRAP and not rollout_mode_negotiated:
+                    raise PolicyTransitionError("explicit rollout mode is required after negotiation")
+            negotiated = rollout_mode_negotiated or (same_namespace and active_mode is not None)
             if current is not None and current.transition_id == transition_id:
+                if current.rollout_mode_negotiated != negotiated:
+                    raise PolicyTransitionError("transition_id reused with different mode negotiation")
                 if current.partial_rollout != partial_rollout:
                     raise PolicyTransitionError("transition_id reused with different partial rollout mode")
                 if current.policy_namespace != policy_namespace or current.kind != kind:
@@ -169,7 +186,9 @@ class PolicyTransitionStore:
                 phase=PolicyTransitionPhase.QUIESCING,
                 from_engine_versions=from_engine_versions or {},
                 partial_rollout=partial_rollout,
+                rollout_mode_negotiated=negotiated,
             )
+            self._snapshot.active_partial_rollout = partial_rollout if negotiated else None
             self._snapshot.active_epoch = from_epoch
             self._snapshot.active_namespace = policy_namespace
             self._snapshot.current = record

@@ -281,6 +281,9 @@ class PolicyBootstrapBeginRequest(BaseModel):
     transition_id: str = Field(min_length=1, max_length=256)
     policy_namespace: str = Field(min_length=1, max_length=128)
     epoch: int = Field(ge=0)
+    # None preserves the manual configuration contract for older trainers.
+    partial_rollout: bool | None = None
+    partial_rollout_protocol: int | None = None
 
 
 class PolicyTransitionDrainRequest(BaseModel):

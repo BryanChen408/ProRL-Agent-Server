@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 import json
@@ -11,6 +12,7 @@ import os
 from datetime import datetime, timezone
 from pathlib import Path
 import re
+import tempfile
 from typing import Any
 
 from fastapi import FastAPI, HTTPException, Query, Request
@@ -103,7 +105,10 @@ def _build_state(topology: TopologyConfig, node_id: str | None) -> GatewayState:
         node.inference_base_url,
         get_engine(node.engine),
         initially_paused=control_snapshot.paused,
+        partial_rollout=control_snapshot.partial_rollout,
+        partial_checkpoint_dir=control_snapshot.partial_checkpoint_dir,
     )
+    inference.rollout_namespace = control_snapshot.rollout_namespace
     completion_writer = CompletionWriter(
         save_dir=save_dir if save_dir else None,
         max_field_bytes=persistence_config.max_field_bytes,
@@ -644,6 +649,77 @@ async def inference_inflight_status():
     return get_state().inflight.status()
 
 
+def _partial_checkpoint_path(state: GatewayState, namespace: str) -> Path:
+    root = os.environ.get("POLAR_PARTIAL_CHECKPOINT_DIR")
+    if not root:
+        if not state.topology.rollout.save_dir:
+            raise ValueError("partial rollout requires rollout.save_dir or POLAR_PARTIAL_CHECKPOINT_DIR")
+        root = str(Path(state.topology.rollout.save_dir) / "partial_rollout")
+
+    def component(value: str) -> str:
+        slug = re.sub(r"[^A-Za-z0-9_.-]+", "-", value).strip(".-")[:64] or "run"
+        return f"{slug}-{hashlib.sha256(value.encode()).hexdigest()[:12]}"
+
+    return Path(root) / component(namespace) / component(state.node.id)
+
+
+@app.post("/admin/inference/rollout-mode")
+async def configure_rollout_mode(
+    transition_id: str,
+    policy_namespace: str,
+    partial_rollout: bool,
+    partial_rollout_protocol: int,
+):
+    """Configure a run while admission is closed; retries preserve live sessions."""
+    state = get_state()
+    control = state.control.snapshot()
+    status = state.inference.generation_status()
+    if not policy_namespace.strip() or len(policy_namespace) > 128:
+        raise HTTPException(422, "invalid policy namespace")
+    if not control.paused or not status["paused"] or control.transition_id != transition_id:
+        raise HTTPException(409, "rollout configuration requires the owning paused transition")
+    if partial_rollout_protocol != (2 if partial_rollout else 0):
+        raise HTTPException(409, "unsupported rollout protocol")
+    if partial_rollout and state.inference.engine.name != "vllm":
+        raise HTTPException(409, "session partial rollout requires vLLM")
+    if control.rollout_namespace == policy_namespace:
+        if control.partial_rollout != partial_rollout:
+            raise HTTPException(409, "rollout mode is immutable within a policy namespace")
+        if (state.inference.partial is not None) != partial_rollout:
+            raise HTTPException(409, "runtime rollout mode differs from durable control state")
+    else:
+        if state.session_registry.active_sessions() or not status["drained"]:
+            raise HTTPException(409, "cannot configure a new run while sessions are active")
+        from polar.gateway.partial_rollout import PartialRollout
+
+        try:
+            partial = None
+            checkpoint_dir = None
+            if partial_rollout:
+                checkpoint_dir = _partial_checkpoint_path(state, policy_namespace)
+                checkpoint_dir.mkdir(parents=True, exist_ok=True)
+                # Detect an unusable path before acknowledging training readiness.
+                with tempfile.TemporaryFile(dir=checkpoint_dir) as handle:
+                    handle.write(b"checkpoint probe")
+                    handle.flush()
+                    os.fsync(handle.fileno())
+                partial = PartialRollout(state.inference, checkpoint_dir)
+                partial.policy_version = state.storage.get_policy_version
+            state.inflight.configure_retention(partial_rollout)
+            state.control.update(
+                rollout_namespace=policy_namespace,
+                partial_rollout=partial_rollout,
+                partial_checkpoint_dir=str(checkpoint_dir) if checkpoint_dir else None,
+            )
+            # No await between validation, persistence and binding the runtime.
+            state.inference.partial = partial
+            state.inference.rollout_namespace = policy_namespace
+            state.node_manager.partial_rollout = partial
+        except (ValueError, OSError) as exc:
+            raise HTTPException(409, str(exc)) from exc
+    return {**state.inference.generation_status(), "transition_id": control.transition_id}
+
+
 @app.post("/admin/inference/pause")
 async def pause_inference_generation(
     timeout_seconds: float = 300.0,
@@ -903,6 +979,13 @@ async def create_session(request: Request):
         raise HTTPException(status_code=400, detail="Invalid JSON body") from exc
     if "agent" in body and "session_id" in body:
         dispatch_request = SessionDispatchRequest.model_validate(body)
+        requested_partial = dispatch_request.metadata.get("partial_rollout") is True
+        configured = state.control.snapshot()
+        if requested_partial or configured.partial_rollout is not None:
+            if (requested_partial != (state.inference.partial is not None)
+                    or (configured.partial_rollout is not None
+                        and configured.rollout_namespace != dispatch_request.metadata.get("policy_namespace"))):
+                raise HTTPException(409, "session rollout mode/namespace has not been configured on this gateway")
         epoch_rejection = _policy_epoch_rejection(state, dispatch_request.metadata)
         if epoch_rejection is not None:
             expected_namespace, expected, current_namespace, current = epoch_rejection

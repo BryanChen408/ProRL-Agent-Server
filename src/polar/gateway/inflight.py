@@ -54,6 +54,13 @@ class InflightGenerationTracker:
         self._coalesced_request_count = 0
         self._closed_generation_count = 0
 
+    def configure_retention(self, enabled: bool) -> None:
+        """Change mode only between runs, preserving closed session tombstones."""
+        if any(not entry.task.done() or entry.waiters for entry in self._entries.values()):
+            raise ValueError("cannot configure rollout mode with outstanding generations")
+        self._retain_completed = enabled
+        self._entries.clear()
+
     async def run(
         self,
         session_id: str,

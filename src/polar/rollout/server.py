@@ -248,11 +248,19 @@ def _gateway_state_matches(
     transition_id: str,
     policy_namespace: str | None,
     epoch: int | None,
+    partial_rollout: bool | None = None,
 ) -> bool:
     if payload.get("transition_id") != transition_id:
         return False
     if action == "pause":
         return payload.get("paused") is True
+    if action == "configure_mode":
+        return (
+            payload.get("paused") is True
+            and payload.get("rollout_namespace") == policy_namespace
+            and payload.get("partial_rollout") is partial_rollout
+            and payload.get("partial_rollout_protocol") == (2 if partial_rollout else 0)
+        )
     if action == "set_epoch":
         return (
             payload.get("policy_namespace") == policy_namespace
@@ -276,6 +284,7 @@ async def _apply_gateway_control(
     policy_namespace: str | None = None,
     epoch: int | None = None,
     allow_paused_transition_takeover: bool = False,
+    partial_rollout: bool | None = None,
 ) -> list[dict[str, object]]:
     """Apply desired state and reconcile an ambiguous/lost acknowledgement."""
     state = get_state()
@@ -288,6 +297,14 @@ async def _apply_gateway_control(
             "wait_for_drain": False,
             "transition_id": transition_id,
             "allow_paused_transition_takeover": allow_paused_transition_takeover,
+        }
+    elif action == "configure_mode":
+        path = "/admin/inference/rollout-mode"
+        params = {
+            "transition_id": transition_id,
+            "policy_namespace": policy_namespace,
+            "partial_rollout": partial_rollout,
+            "partial_rollout_protocol": 2 if partial_rollout else 0,
         }
     elif action == "set_epoch":
         path = "/admin/policy_version"
@@ -339,6 +356,7 @@ async def _apply_gateway_control(
                             transition_id=transition_id,
                             policy_namespace=policy_namespace,
                             epoch=epoch,
+                            partial_rollout=partial_rollout,
                         ):
                             return {
                                 "node_id": node.id,
@@ -366,6 +384,7 @@ async def _apply_gateway_control(
                     transition_id=transition_id,
                     policy_namespace=policy_namespace,
                     epoch=epoch,
+                    partial_rollout=partial_rollout,
                 ):
                     return {
                         "node_id": node.id,
@@ -461,6 +480,28 @@ def _validate_engine_versions(
     return normalized
 
 
+async def _configure_gateway_modes(state: RolloutState, record: PolicyTransitionRecord) -> PolicyTransitionRecord:
+    if not record.rollout_mode_negotiated:
+        return record
+    nodes = await _apply_gateway_control(
+        action="configure_mode",
+        transition_id=record.transition_id,
+        policy_namespace=record.policy_namespace,
+        partial_rollout=record.partial_rollout,
+    )
+    ready = _all_gateways(nodes, lambda payload: _gateway_state_matches(
+        payload, action="configure_mode", transition_id=record.transition_id,
+        policy_namespace=record.policy_namespace, epoch=None,
+        partial_rollout=record.partial_rollout,
+    ))
+    return state.policy_transitions.update(
+        record.transition_id,
+        gateway_nodes={str(item["node_id"]): item for item in nodes},
+        clear_error=ready,
+        last_error=None if ready else "not every gateway acknowledged the requested rollout mode",
+    )
+
+
 async def _drive_quiescing(
     state: RolloutState,
     record: PolicyTransitionRecord,
@@ -510,6 +551,10 @@ async def _drive_quiescing(
             record.transition_id,
             last_error="not every gateway acknowledged closed admission",
         )
+    record = await _configure_gateway_modes(state, record)
+    if record.last_error:
+        return record
+    nodes = list(record.gateway_nodes.values())
     if record.partial_rollout and not _all_gateways(
         nodes, lambda payload: payload.get("partial_rollout_protocol") == 2,
     ):
@@ -615,6 +660,9 @@ async def _drive_commit(
         phase=PolicyTransitionPhase.COMMITTING,
         clear_error=True,
     )
+    record = await _configure_gateway_modes(state, record)
+    if record.last_error:
+        return record
     nodes = await _apply_gateway_control(
         action="set_epoch",
         transition_id=record.transition_id,
@@ -908,6 +956,13 @@ async def begin_policy_bootstrap(request: PolicyBootstrapBeginRequest):
     state = get_state()
     async with state.policy_transition_lock:
         try:
+            if request.partial_rollout is not None and request.partial_rollout_protocol != (2 if request.partial_rollout else 0):
+                raise PolicyTransitionError("bootstrap requires a matching explicit rollout protocol (partial=2, normal=0)")
+            if request.partial_rollout is not None:
+                configured = {node.id: node.public_url.rstrip("/") for node in state.topology.gateway.nodes}
+                if any(configured.get(node.node_id) != node.gateway_url.rstrip("/")
+                       for node in state.scheduler.list_nodes()):
+                    raise PolicyTransitionError("negotiated rollout requires all registered gateways in topology")
             record = state.policy_transitions.start(
                 transition_id=request.transition_id,
                 policy_namespace=request.policy_namespace,
@@ -916,6 +971,8 @@ async def begin_policy_bootstrap(request: PolicyBootstrapBeginRequest):
                 from_engine_versions={},
                 allow_epoch_reset=True,
                 kind=PolicyTransitionKind.BOOTSTRAP,
+                partial_rollout=bool(request.partial_rollout),
+                rollout_mode_negotiated=request.partial_rollout is not None,
             )
             if record.kind != PolicyTransitionKind.BOOTSTRAP:
                 raise PolicyTransitionError("bootstrap transition kind mismatch")
@@ -1271,9 +1328,38 @@ async def set_gateway_policy_version(version: int):
     }
 
 
+async def _validate_node_rollout_mode(node_id: str, gateway_url: str | None = None) -> None:
+    """A restarted/unconfigured node must not become schedulable via heartbeat."""
+    state = get_state()
+    snapshot = state.policy_transitions.snapshot()
+    if snapshot.active_partial_rollout is None:
+        return
+    node = next((node for node in state.topology.gateway.nodes if node.id == node_id), None)
+    if node is None or (gateway_url is not None and gateway_url.rstrip("/") != node.public_url.rstrip("/")):
+        state.scheduler.mark_unhealthy(node_id)
+        raise HTTPException(409, "negotiated rollout only admits gateways at their configured topology URL")
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            response = await client.get(f"{node.public_url}/admin/inference/status")
+            response.raise_for_status()
+            payload = response.json()
+        if (not isinstance(payload, dict)
+                or payload.get("rollout_namespace") != snapshot.active_namespace
+                or payload.get("partial_rollout") is not snapshot.active_partial_rollout
+                or payload.get("partial_rollout_protocol") != (2 if snapshot.active_partial_rollout else 0)
+                or payload.get("policy_namespace") != snapshot.active_namespace
+                or payload.get("policy_version") != snapshot.active_epoch
+                or payload.get("epoch_enforced") is not True):
+            raise ValueError("gateway has not acknowledged the active run configuration")
+    except (httpx.HTTPError, ValueError) as exc:
+        state.scheduler.mark_unhealthy(node_id)
+        raise HTTPException(409, str(exc)) from exc
+
+
 @app.post("/nodes/register", response_model=GatewayNodeInfo)
 async def register_node(request: NodeRegistrationRequest):
     try:
+        await _validate_node_rollout_mode(request.node_id, request.gateway_url)
         return get_state().scheduler.register_node(request)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
@@ -1282,6 +1368,7 @@ async def register_node(request: NodeRegistrationRequest):
 @app.post("/nodes/{node_id}/heartbeat", response_model=GatewayNodeInfo)
 async def node_heartbeat(node_id: str, request: NodeHeartbeatRequest):
     try:
+        await _validate_node_rollout_mode(node_id)
         return get_state().scheduler.heartbeat(node_id, metrics=request.metrics)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
