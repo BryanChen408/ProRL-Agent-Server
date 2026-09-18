@@ -85,7 +85,7 @@ operator:
       SOC_VERSION: "ascend910b1"
       ASCENDC_SOC_VERSION: "ascend910b1"
       ASC_DEVKIT_DIR: "/opt/asc-devkit"
-      CLAUDE_CODE_MAX_CONTEXT_TOKENS: "346112"
+      CLAUDE_CODE_MAX_CONTEXT_TOKENS: "323584"
 
   agent:
     # ← harness 侧 env:随 `claude` 那条 exec 下发,覆盖容器 env。BASH_*_TIMEOUT_MS 只有
@@ -104,7 +104,7 @@ operator:
     # ← delta 14:generation 8 次与 optimization 4 次独立计数，每次都可能需要
     #   「读日志→Read 对应 SKILL.md→改代码→重跑」；
     #   加 Phase 0-3 探索和长算子实现，保留 200 轮会话上限。
-    max_turns: 350
+    max_turns: 200
     # ← delta 8:规则 —— 只保留本项目(canonical/skills)提供的 skill,CLI 自带的一律关掉
     #   (每个 session 白占 4,327 字符 prompt,还可能被误调白烧 turn)。
     #   prepare 按 canonical/skills 的实际内容取补集,写 .claude/settings.json 的
