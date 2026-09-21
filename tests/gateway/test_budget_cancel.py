@@ -133,6 +133,63 @@ def test_budget_prefix_is_judged_and_accepted_without_hiding_other_failures(tmp_
         assert "completed_pipeline_prefix" not in result.trajectory.metadata
 
 
+@pytest.mark.parametrize("ending", ["max_turns", "api_error", "mixed_policy", "abort", "judge_error", "cancelled"])
+def test_max_turns_keeps_pre_pipeline_tokens_but_not_real_failures(tmp_path, ending):
+    records = [CompletionRecord(
+        completion_id=f"c{i}",
+        response={"choices": [{
+            "input_token_ids": [1, 2], "finish_reason": "abort" if ending == "abort" else "stop",
+            "message": {"role": "assistant", "content": "inspect source"},
+            "logprobs": {"content": [
+                {"token_id": 10, "logprob": -0.1}, {"token_id": 99, "logprob": -0.2},
+            ]},
+        }]}, metadata={"policy_version": i if ending == "mixed_policy" else 0},
+    ) for i in range(2)]
+    session = CompletionSession(session_id="s", completions=records)
+    manager = GatewayNodeManager.__new__(GatewayNodeManager)
+    manager.node_id = "test"
+    manager.storage = SimpleNamespace(load_completion_session=lambda sid: session.model_copy(deep=True))
+    manager.builders = default_builder_registry()
+    manager.session_registry = SessionRegistry()
+    manager.session_registry.register("s", task_id="t")
+    managed = _managed(tmp_path, reason=None)
+    managed.cancel_requested = ending == "cancelled"
+    managed.request.agent = AgentSpec(harness="claude_code", settings={"max_turns": 5})
+    managed.request.builder = StrategySpec(strategy="prefix_merging", config={"end_of_turn_token_id": 99})
+    managed.request.evaluator = EvaluatorSpec(strategy="operator_judge", postrun_timeout_seconds=30)
+    managed.agent_result = AgentRunResult(status="failed", return_code=1, error="step 0 exited with code 1")
+    log = tmp_path / "logs/agent/claude-code.txt"
+    log.parent.mkdir(parents=True)
+    log.write_text(json.dumps({"type": "result", "is_error": True,
+        "subtype": "error_during_execution" if ending == "api_error" else "error_max_turns",
+        "num_turns": 6, "errors": ["Reached maximum number of turns (5)"]}))
+
+    async def judge(request, trajectory, **kwargs):
+        if ending == "judge_error":
+            raise RuntimeError("judge unavailable")
+        # No pipeline or submission: a zero outcome must not erase valid tokens.
+        for trace in trajectory.traces:
+            trace.reward = 0.0
+        return trajectory
+
+    manager._run_eval = judge
+
+    async def run():
+        managed.execution_deadline = asyncio.get_running_loop().time() + 30
+        manager._start_postrun_deadline(managed)
+        return await manager._build_session_result(managed)
+
+    result = asyncio.run(run())
+    if ending == "max_turns":
+        assert result.status == "COMPLETED" and result.error is None
+        assert result.trajectory.metadata["termination_reason"] == "agent_max_turns_exceeded"
+        assert sum(sum(t.loss_mask) for t in result.trajectory.traces) > 0
+        assert all(t.reward == 0.0 for t in result.trajectory.traces)
+        assert result.trajectory.traces[0].response_logprobs == [-0.1, -0.2]
+    else:
+        assert result.status == "ERROR"
+
+
 def test_budget_cancel_builds_trainable_partial_result(tmp_path: Path) -> None:
     manager = GatewayNodeManager.__new__(GatewayNodeManager)
     manager.node_id = "node-test"

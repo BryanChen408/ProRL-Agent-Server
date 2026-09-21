@@ -915,7 +915,10 @@ class GatewayNodeManager:
         error = trajectory.error
         recovered_prefix = (
             trajectory.status == "COMPLETED"
-            and trajectory.metadata.get("completed_pipeline_prefix") is not None
+            and (
+                trajectory.metadata.get("completed_pipeline_prefix") is not None
+                or trajectory.metadata.get("termination_reason") == "agent_max_turns_exceeded"
+            )
         )
         if recovered_prefix:
             trajectory = trajectory.model_copy(update={
@@ -1040,6 +1043,7 @@ class GatewayNodeManager:
         agent_result: AgentRunResult | None = None,
     ) -> Trajectory:
         completion_session = self.storage.load_completion_session(request.session_id)
+        max_turns_exceeded = False
         if (session_dir is not None and request.evaluator is not None
                 and request.evaluator.strategy == "operator_judge"
                 and "ascendc_eval_pipeline.sh" in str(request.evaluator.config.get("judge_command", ""))):
@@ -1061,6 +1065,16 @@ class GatewayNodeManager:
             )
             if agent_result.status == "timeout":
                 completion_session.termination_reason = "agent_time_budget_exceeded"
+            elif (
+                agent_result.return_code == 1
+                and cli_result.get("is_error") is True
+                and cli_result.get("subtype") == "error_max_turns"
+            ):
+                # Turn exhaustion retains ordinary complete replies, including
+                # pre-pipeline work in short smoke runs. Do not use the
+                # context/time recovery path, which requires a scored pipeline.
+                max_turns_exceeded = True
+                completion_session.terminal_tool_results = tool_results
             elif (
                 cli_result.get("is_error") is True
                 and cli_result.get("api_error_status") == 400
@@ -1085,7 +1099,10 @@ class GatewayNodeManager:
             trajectory = asyncio.run(result)
         else:
             trajectory = result
-        return Trajectory.model_validate(trajectory)
+        trajectory = Trajectory.model_validate(trajectory)
+        if max_turns_exceeded:
+            trajectory.metadata["termination_reason"] = "agent_max_turns_exceeded"
+        return trajectory
 
     async def _run_eval(
         self,
