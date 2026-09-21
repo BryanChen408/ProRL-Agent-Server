@@ -193,12 +193,12 @@ def score(metrics: dict):
         if speedup is None or speedup < 0:
             return None, None, "invalid success speedup"
         square = speedup * speedup
-        reward = 0.80 + 0.20 * (square - 1.0) / (square + 1.0)
+        reward = 0.75 + 0.25 * (square - 1.0) / (square + 1.0)
         if not math.isfinite(reward):
             return None, None, "invalid success reward"
         return reward, 3, f"success speedup={speedup}"
     if bool(metrics.get("correctness_ok")):
-        return 0.5, 2, "correctness passed; benchmark failed"
+        return 0.4, 2, "correctness passed; benchmark failed"
     if not bool(metrics.get("ast_check_ok")):
         return 0.0, 0, error_type or "ast/submission failed"
     if error_type == "ascendc_compile_failed":
@@ -206,7 +206,7 @@ def score(metrics: dict):
     if error_type in RUN_FAILURES:
         return 0.2, 1, error_type
     if error_type in {"correctness_failed", "output_precheck_failed"}:
-        weight = finite(os.environ.get("POLAR_CASE_PASS_WEIGHT", "0.15") or "0.15", 0.15)
+        weight = finite(os.environ.get("POLAR_CASE_PASS_WEIGHT", "0.10") or "0.10", 0.10)
         if weight <= 0.0:
             return 0.35, 1, f"{error_type} cases=fixed"
         passed, total = metrics.get("cases_passed"), metrics.get("cases_total")
@@ -286,12 +286,12 @@ with lock_path.open("a+") as lock:
             old_tier = integer(previous.get("tier"), 0)
             if old_tier >= 3:
                 old_sp = finite(previous.get("speedup"))
-                previous_score = (0.80 + 0.20 * (old_sp * old_sp - 1.0) / (old_sp * old_sp + 1.0)
+                previous_score = (0.75 + 0.25 * (old_sp * old_sp - 1.0) / (old_sp * old_sp + 1.0)
                                   if old_sp is not None and old_sp >= 0 else 1.0)
             elif old_tier == 2:
-                previous_score = 0.5
+                previous_score = 0.4
             elif old_tier == 1:
-                previous_score = 0.449999
+                previous_score = 0.399999
             else:
                 previous_score = 0.0
 

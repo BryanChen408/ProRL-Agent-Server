@@ -60,7 +60,7 @@ def _reward_band(ev: dict[str, Any], status: str) -> str:
     ast_ok = bool(m.get("ast_check_ok", False))
     corr_ok = bool(m.get("correctness_ok", False))
     if corr_ok:
-        return "fail: correctness_ok(0.5)"
+        return "fail: correctness_ok(0.4)"
     if not ast_ok:
         if et == "submission_missing":
             return "fail: submission_missing(0.0)"
@@ -70,7 +70,7 @@ def _reward_band(ev: dict[str, Any], status: str) -> str:
     if et in ("op_not_registered", "ascendc_run_crashed"):
         return "fail: 崩溃/未注册(0.2)"
     if et in ("correctness_failed", "output_precheck_failed"):
-        return "fail: 精度/输出错(0.30≤基础分<0.45；缺统计0.35)"
+        return "fail: 精度/输出错(0.30≤基础分<0.40；缺统计0.35)"
     return "fail: 其他(0.25)"
 
 

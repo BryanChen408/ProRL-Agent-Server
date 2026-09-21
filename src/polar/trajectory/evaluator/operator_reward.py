@@ -75,25 +75,25 @@ def classify_infra_error_text(text: str | None) -> str | None:
 #   reward = 0.3 + α × (cases_passed / cases_total)
 # 分子分母来自 judge fresh 容器对数据集原版用例的实测(inject_baseline 覆盖工程副本,
 # agent 无法操纵);只对「对拍跑完」的两档生效 —— 崩溃/编译挂时对拍未完成,case 统计
-# 不可信,不给通过率分。档内渐近 0.45 不触碰:全过即离开本档(correctness_ok=true),
-# 0.5 留给「全对但 benchmark 挂」。统计缺失(旧格式/脚本被杀)回退 0.35 = 旧固定档。
+# 不可信,不给通过率分。档内渐近 0.4 不触碰:全过即离开本档(correctness_ok=true),
+# 0.4 恒留给「全对但 benchmark 挂」。统计缺失(旧格式/脚本被杀)回退 0.35 = 旧固定档。
 
-POLAR_CASE_PASS_WEIGHT_ENV = "POLAR_CASE_PASS_WEIGHT"   # α,默认 0.15;<=0 回退固定 0.35
+POLAR_CASE_PASS_WEIGHT_ENV = "POLAR_CASE_PASS_WEIGHT"   # α,默认 0.10;<=0 回退固定 0.35
 CASE_PASS_FALLBACK = 0.35
 
 
 def case_pass_weight(env: dict | None = None) -> float:
     source = os.environ if env is None else env
     try:
-        return float(source.get(POLAR_CASE_PASS_WEIGHT_ENV, "0.15") or "0.15")
+        return float(source.get(POLAR_CASE_PASS_WEIGHT_ENV, "0.10") or "0.10")
     except (TypeError, ValueError):
-        return 0.15
+        return 0.10
 
 
 def reward_from_metrics(metrics: dict, env: dict | None = None) -> float:
-    """Authoritative ladder: partial correctness <0.45, full correctness 0.5, success >=0.6.
+    """Authoritative ladder(2026-08 版:失败侧 [0, 0.4],correctness 失败档接入通过率).
 
-    not success:  correctness_ok -> 0.5
+    not success:  correctness_ok -> 0.4
                   ast_check_ok  -> 按 error_type 细分「编译→能跑→跑完」的进度:
                       ascendc_compile_failed                 -> 0.1  (AST 过、编译没过)
                       注册/加载/崩溃/超时/启动/状态化退化    -> 0.2  (编译过但没能有效跑完)
@@ -101,14 +101,15 @@ def reward_from_metrics(metrics: dict, env: dict | None = None) -> float:
                         -> 0.3 + α×用例通过率  (对拍跑完、结果不对;统计缺失回退 0.35)
                       其他(阶段挂但类型未知)                 -> 0.25 (兜底中间档)
                   else          -> 0.0  (AST 没过 / 没调真 op:没产出真算子,记 0)
-    success:      0.6 + 0.4*s^2/(s^2+1)   # 0.6(0x) .. 0.8(1x) .. ->1.0(soft, no cap)
+    success:      0.75 + 0.25*tanh(ln speedup)   # 0.5(<-0x) .. 0.75(1x hold) .. ->1.0(soft, no cap)
 
-    将成功档的 0.1 性能预算转给解题保底,性能分差缩小 20%。部分正确权重从 0.10 提到 0.15,
-    全对但 benchmark 挂从 0.4 提到 0.5,加大全对与部分正确的间隔。
+    档间距拉大的动机:失败侧从 [0.2,0.4] 扩到 [0,0.4],且 0.35 固定档改 10 刻度连续档
+    (10-case 集),消灭「挂 1 个 case 与全挂同分」的组内零方差 dead group。(0.4, 0.5)
+    空挡不动:任何「未全过」严格劣于「全过但 benchmark 挂」,正确性门控语义不变。
     """
     if not bool(metrics.get("success", False)):
         if bool(metrics.get("correctness_ok", False)):
-            return 0.5
+            return 0.4
         if not bool(metrics.get("ast_check_ok", False)):
             return 0.0
         et = str(metrics.get("error_type") or "")
@@ -134,7 +135,7 @@ def reward_from_metrics(metrics: dict, env: dict | None = None) -> float:
             if (isinstance(passed, int) and isinstance(total, int)
                     and not isinstance(passed, bool) and 0 <= passed <= total and total > 0):
                 # min(...,0.999) 只防脏数据(ratio==1 却判 correctness_failed 的不一致),
-                # 正常档内 ratio ≤ (N-1)/N 由分档互斥保证,保留到全对 0.5 档的间隔。
+                # 正常档内 ratio ≤ (N-1)/N 由分档互斥保证,不触碰 0.4 档。
                 return 0.3 + w * min(passed / total, 0.999)
             return CASE_PASS_FALLBACK
         return 0.25
@@ -142,9 +143,12 @@ def reward_from_metrics(metrics: dict, env: dict | None = None) -> float:
         speedup = float((metrics.get("perf_data") or {}).get("speedup_vs_torch", 1.0))
     except (TypeError, ValueError):
         speedup = float("nan")  # non-numeric -> judge_outcome's finiteness gate treats it as infra
-    # Soft-saturating speedup: 0.80 + 0.20*tanh(ln speedup).
-    # Same curve and calculation as before; correctness base 0.6, performance span 0.4.
-    return 0.80 + 0.20 * (speedup * speedup - 1.0) / (speedup * speedup + 1.0)
+    # Soft-saturating speedup: 0.75 + 0.25*tanh(ln speedup), written as the algebraic
+    # identity (s^2-1)/(s^2+1) (no math import, s=0 -> 0.5, no overflow on huge s).
+    # Continuous (no hard 2x cap) so equal-speedup success clones don't collapse to a
+    # single 1.0 -> zero-std GRPO dead group; bounded (->1.0) so tail speedups (e.g. a
+    # 700x measurement artifact) can't dominate the correctness ladder (0.3->0.75=+0.45).
+    return 0.75 + 0.25 * (speedup * speedup - 1.0) / (speedup * speedup + 1.0)
 
 
 def is_infra_failure(metrics: dict | None) -> bool:
@@ -571,7 +575,7 @@ def test_terminal_stage_status_table():
 
 
 def test_ladder_not_success():
-    assert reward_from_metrics({"success": False, "correctness_ok": True, "ast_check_ok": True}) == 0.5
+    assert reward_from_metrics({"success": False, "correctness_ok": True, "ast_check_ok": True}) == 0.4
     assert reward_from_metrics({"success": False, "correctness_ok": False, "ast_check_ok": False}) == 0.0
     # ast 过后的 error_type 细分(新阶梯:0.1/0.2/0.25 + 通过率档)
     assert reward_from_metrics({"success": False, "ast_check_ok": True, "error_type": "ascendc_compile_failed"}) == 0.1
@@ -581,33 +585,32 @@ def test_ladder_not_success():
     assert reward_from_metrics({"success": False, "ast_check_ok": True, "error_type": "ascendc_launch_failed"}) == 0.2
     assert reward_from_metrics({"success": False, "ast_check_ok": True, "error_type": "stateful_impl_detected"}) == 0.2
     assert reward_from_metrics({"success": False, "ast_check_ok": True, "error_type": None}) == 0.25  # 未知类型兜底中间档
-    # 对拍跑完但未全过:0.3 + 0.15×通过率;统计缺失/越界 → 回退 0.35(旧固定档)
+    # 对拍跑完但未全过:0.3 + 0.10×通过率;统计缺失/越界 → 回退 0.35(旧固定档)
     base = {"success": False, "ast_check_ok": True, "error_type": "correctness_failed"}
     assert reward_from_metrics(base) == 0.35
     assert reward_from_metrics({**base, "cases_passed": 0, "cases_total": 10}) == 0.3
-    assert abs(reward_from_metrics({**base, "cases_passed": 5, "cases_total": 10}) - 0.375) < 1e-9
-    assert abs(reward_from_metrics({**base, "cases_passed": 9, "cases_total": 10}) - 0.435) < 1e-9
+    assert abs(reward_from_metrics({**base, "cases_passed": 5, "cases_total": 10}) - 0.35) < 1e-9
+    assert abs(reward_from_metrics({**base, "cases_passed": 9, "cases_total": 10}) - 0.39) < 1e-9
     assert reward_from_metrics({**base, "cases_passed": None, "cases_total": 10}) == 0.35
     assert reward_from_metrics({**base, "cases_passed": 11, "cases_total": 10}) == 0.35  # 越界脏数据
     assert reward_from_metrics({**base, "cases_passed": 0, "cases_total": 0}) == 0.35    # 空 case 集
     # 形状/dtype/NaN 前置检查不通过与数值差异同档同公式(通过率天然区分全错与差点全对)
     pre = {"success": False, "ast_check_ok": True, "error_type": "output_precheck_failed"}
-    assert pre and abs(reward_from_metrics({**pre, "cases_passed": 8, "cases_total": 9}) - (0.3 + 0.15 * 8 / 9)) < 1e-9
-    # ratio==1 的不一致脏数据(clamp 到 0.999):严格低于 0.45,保留全对奖励间隔,不破「未全过 < 全过」的序
-    assert reward_from_metrics({**base, "cases_passed": 10, "cases_total": 10}) < 0.45
+    assert pre and abs(reward_from_metrics({**pre, "cases_passed": 8, "cases_total": 9}) - (0.3 + 0.1 * 8 / 9)) < 1e-9
+    # ratio==1 的不一致脏数据(clamp 到 0.999):严格低于 0.4 档,不破「未全过 < 全过」的序
+    assert reward_from_metrics({**base, "cases_passed": 10, "cases_total": 10}) < 0.4
     # 旋钮关闭(灰度回滚)→ 固定 0.35
     assert reward_from_metrics({**base, "cases_passed": 9, "cases_total": 10},
                                env={POLAR_CASE_PASS_WEIGHT_ENV: "0"}) == 0.35
-    assert case_pass_weight({POLAR_CASE_PASS_WEIGHT_ENV: "garbage"}) == 0.15  # 垃圾值回落默认
+    assert case_pass_weight({POLAR_CASE_PASS_WEIGHT_ENV: "garbage"}) == 0.10  # 垃圾值回落默认
 
 
 def test_ladder_success_speedup():
-    assert abs(reward_from_metrics({"success": True, "perf_data": {"speedup_vs_torch": 0.0}}) - 0.6) < 1e-9
-    assert reward_from_metrics({"success": True, "perf_data": {"speedup_vs_torch": 1.0}}) == 0.8
-    assert round(reward_from_metrics({"success": True, "perf_data": {"speedup_vs_torch": 2.0}}), 4) == 0.92  # 2x no longer hard-capped
-    assert round(reward_from_metrics({"success": True, "perf_data": {"speedup_vs_torch": 9.0}}), 4) == 0.9951  # soft-saturating toward 1.0
-    assert reward_from_metrics({"success": True, "perf_data": None}) == 0.8  # default speedup 1.0
-
+    assert reward_from_metrics({"success": True, "perf_data": {"speedup_vs_torch": 0.0}}) == 0.5
+    assert reward_from_metrics({"success": True, "perf_data": {"speedup_vs_torch": 1.0}}) == 0.75
+    assert round(reward_from_metrics({"success": True, "perf_data": {"speedup_vs_torch": 2.0}}), 4) == 0.9  # 2x no longer hard-capped
+    assert round(reward_from_metrics({"success": True, "perf_data": {"speedup_vs_torch": 9.0}}), 4) == 0.9939  # soft-saturating toward 1.0
+    assert reward_from_metrics({"success": True, "perf_data": None}) == 0.75  # default speedup 1.0
 
 
 def test_is_infra_failure():
@@ -646,12 +649,12 @@ def test_judge_outcome_operator_failure_scored():
     o = judge_outcome({"success": False, "ast_check_ok": False, "error_type": "correctness_failed"})
     assert o["status"] == "COMPLETED" and o["retry"] is False and o["reward"] == 0.0
     o2 = judge_outcome({"success": False, "correctness_ok": True, "error_type": "benchmark_failed"})
-    assert o2["reward"] == 0.5 and o2["status"] == "COMPLETED"
+    assert o2["reward"] == 0.4 and o2["status"] == "COMPLETED"
 
 
 def test_judge_outcome_success():
     o = judge_outcome({"success": True, "perf_data": {"speedup_vs_torch": 2.0}, "error_type": None})
-    assert o["status"] == "COMPLETED" and round(o["reward"], 4) == 0.92 and o["retry"] is False
+    assert o["status"] == "COMPLETED" and round(o["reward"], 4) == 0.9 and o["retry"] is False
 
 
 def test_malformed_speedup_is_infra_not_nan_reward():

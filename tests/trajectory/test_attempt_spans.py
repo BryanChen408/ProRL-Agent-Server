@@ -2,7 +2,7 @@
 
 差异适配:pipeline 名 ascendc_eval_pipeline.sh、verdict 前缀 [ascendc-eval]、
 ladder 用本仓新阶梯(0-1 soft-saturating):correctness_failed 无 case 统计 → 回退 0.35;
-success + speedup=2.0 → 0.80+0.20*(4-1)/(4+1) = 0.92。
+success + speedup=2.0 → 0.75+0.25*(4-1)/(4+1) = 0.9。
 原版 trapped-recovery 跨链用例改写为通用前缀断链(本仓无 trapped_recovery)。
 
 运行:PYTHONPATH=src pytest tests/trajectory/test_attempt_spans.py
@@ -37,7 +37,7 @@ _SORT_MULTILINE_CMD = (
 )
 _VERDICT_OK = (
     "[ascendc-eval] done — success=true correctness_ok=true speedup_vs_torch=2.0"
-)  # 本仓 ladder: 0.92
+)  # 本仓 ladder: 0.9
 _VERDICT_FAIL = (
     "[ascendc-eval] verdict — success=False ast_check_ok=True correctness_ok=False "
     "error_type=correctness_failed speedup_vs_torch=None"
@@ -194,8 +194,8 @@ def test_budget_and_post_best_masks_compose(monkeypatch, credit, reason, command
     if credit == "1":
         spans = trace.metadata["attempt_spans"]
         assert [span[:3] for span in spans] == [[0, 6, 0], [6, 12, 1], [12, 14, 2]]
-        assert spans[0][3] == (0.35 if last_is_best else 0.92)
-        assert spans[1][3] == (0.92 if last_is_best else 0.35)
+        assert spans[0][3] == (0.35 if last_is_best else 0.9)
+        assert spans[1][3] == (0.9 if last_is_best else 0.35)
         assert spans[2][3] is None  # Pending attempt is not a fabricated zero-score verdict.
     monkeypatch.setenv("POLAR_POST_BEST_MASK", "0")
     original = _build(records).traces[0]
@@ -494,7 +494,7 @@ class TestBuildSpans:
         assert spans == [
             [0, 10, -1, None],
             [10, 40, 0, 0.35],
-            [40, 80, 1, 0.92],
+            [40, 80, 1, 0.9],
         ]
 
     def test_missing_verdict_keeps_position_with_none_score(self):
@@ -514,7 +514,7 @@ class TestBuildSpans:
         spans = attempt_spans.build_spans(
             [(0, 0, "c1")], {"c1": _VERDICT_OK}, leading_idx=-1, chain_resp_end=30,
         )
-        assert spans == [[0, 30, 0, 0.92]]
+        assert spans == [[0, 30, 0, 0.9]]
 
     def test_degenerate_zero_length_event_dropped(self):
         spans = attempt_spans.build_spans(
@@ -545,7 +545,7 @@ class TestBuilderIntegration:
             assert len(traj.traces) == 2
             trace0, trace1 = traj.traces
             assert trace0.metadata["attempt_spans"] == [[0, 2, -1, None]]
-            assert trace1.metadata["attempt_spans"] == [[0, 5, 0, 0.92]]
+            assert trace1.metadata["attempt_spans"] == [[0, 5, 0, 0.9]]
             assert trace1.response_ids == [10, EOT, 50, 20, EOT]
             # post-best 常开,但事件 0 是本链最后一次 attempt -> 它的段一直延伸到链尾,
             # 02-work2 属于该段(段模型:两次 attempt 之间的工作轮归入前一次),照常训练。
@@ -566,7 +566,7 @@ class TestBuilderIntegration:
             traj = _build(records)
             assert len(traj.traces) == 2
             chain0_trace, chain1_trace = traj.traces
-            assert chain0_trace.metadata["attempt_spans"] == [[0, 2, 0, 0.92]]
+            assert chain0_trace.metadata["attempt_spans"] == [[0, 2, 0, 0.9]]
             # chain1 无自己的事件 → 延续事件 0 的段
             assert chain1_trace.metadata["attempt_spans"] == [[0, 2, 0, None]]
 
@@ -591,8 +591,8 @@ class TestBuilderIntegration:
             assert len(traj.traces) == 1
             spans = traj.traces[0].metadata["attempt_spans"]
             # response = [10,EOT, 50, 20,EOT, 51, 30,EOT] -> 8 tokens
-            # 事件 0 = call_1(发起轮起点 0,verdict 缺失);事件 1 = call_2(起点 3,0.92)
-            assert spans == [[0, 3, 0, None], [3, 8, 1, 0.92]]
+            # 事件 0 = call_1(发起轮起点 0,verdict 缺失);事件 1 = call_2(起点 3,0.9)
+            assert spans == [[0, 3, 0, None], [3, 8, 1, 0.9]]
 
     def test_budget_reset_hack_call_gets_no_ordinal(self):
         """`rm ...budget && bash pipeline` 非白名单:不给序号不给 credit。"""
@@ -704,7 +704,7 @@ def _ladder_chain_with_later_attempt() -> list[CompletionRecord]:
 class TestParseVerdictPicksLast:
     def test_case_counts_belong_only_to_last_verdict(self):
         detailed = _VERDICT_FAIL + " cases_passed=4 cases_total=5"
-        assert attempt_spans.verdict_score(attempt_spans.parse_verdict(detailed)) == pytest.approx(0.42)
+        assert attempt_spans.verdict_score(attempt_spans.parse_verdict(detailed)) == pytest.approx(0.38)
         for text in (detailed + "\n" + _VERDICT_FAIL,
                      _VERDICT_FAIL + "\ncases_passed=4 cases_total=5"):
             assert attempt_spans.verdict_score(attempt_spans.parse_verdict(text)) == 0.35
@@ -787,7 +787,7 @@ class TestVerdictRejectsSourceCode:
 
 class TestBestOrdinal:
     def test_first_attempt_reaching_max_wins(self):
-        # ordinal 1 得 0.92 > ordinal 0 的 0.35
+        # ordinal 1 得 0.9 > ordinal 0 的 0.35
         assert attempt_spans.best_ordinal(
             {"a": (0, "c1"), "b": (1, "c2")},
             {"c1": _VERDICT_FAIL, "c2": _VERDICT_OK},
@@ -837,7 +837,7 @@ class TestPostBestMasking:
                     prompt_messages=[_verdict_msg("p2", _VERDICT_FAIL + " cases_passed=4 cases_total=5")]),
         ]
         trace = _build(records).traces[0]
-        assert [s[3] for s in trace.metadata["attempt_spans"]] == pytest.approx([0.33, 0.42])
+        assert [s[3] for s in trace.metadata["attempt_spans"]] == pytest.approx([0.32, 0.38])
         assert trace.metadata.get("post_best_masked_tokens", 0) == 0
         assert trace.loss_mask == [1, 1, 0, 1, 1, 0, 1, 1]
 
@@ -858,7 +858,7 @@ class TestPostBestMasking:
         with _PostBestGuard("1"):
             traj = _build(_ladder_chain_with_later_attempt())
         trace = traj.traces[0]
-        assert trace.metadata["attempt_spans"] == [[0, 3, 0, 0.35], [3, 9, 1, 0.92], [9, 14, 2, 0.35]]
+        assert trace.metadata["attempt_spans"] == [[0, 3, 0, 0.35], [3, 9, 1, 0.9], [9, 14, 2, 0.35]]
         #            c0 保留 | c1 保留 | c2 保留(仍在最优段内)| c3/c4 清零
         assert trace.loss_mask == [1, 1, 0, 1, 1, 0, 1, 1, 0, 0, 0, 0, 0, 0]
         assert trace.metadata["post_best_masked_tokens"] == 4
@@ -868,7 +868,7 @@ class TestPostBestMasking:
         with _PostBestGuard("1"):
             traj = _build(_ladder_chain())
         trace = traj.traces[0]
-        assert trace.metadata["attempt_spans"] == [[0, 3, 0, 0.35], [3, 11, 1, 0.92]]
+        assert trace.metadata["attempt_spans"] == [[0, 3, 0, 0.35], [3, 11, 1, 0.9]]
         assert trace.loss_mask == [1, 1, 0, 1, 1, 0, 1, 1, 0, 1, 1]
         assert "post_best_masked_tokens" not in trace.metadata
 
@@ -1058,8 +1058,8 @@ class TestT3ABlockParsing:
 
     def test_classify_and_score_ladder(self):
         v = attempt_spans.t3a_verdict_score
-        assert v("PASS") == 0.5
-        assert v("D", 4, 5) == 0.3 + 0.15 * 0.8
+        assert v("PASS") == 0.4
+        assert v("D", 4, 5) == 0.3 + 0.1 * 0.8
         assert v("D") == 0.35
         assert v("A") == 0.2
         assert v("UNKNOWN") is None and v(None) is None
@@ -1100,8 +1100,8 @@ class TestT3ABuilderIntegration:
             ]
             traj = _build(records)
             spans = traj.traces[0].metadata["attempt_spans"]
-            # response = [10,EOT, 50, 20,EOT] -> 5 tokens;事件 0 从 hook 块得分(PASS→0.5)
-            assert spans == [[0, 5, 0, 0.5]]
+            # response = [10,EOT, 50, 20,EOT] -> 5 tokens;事件 0 从 hook 块得分(PASS→0.4)
+            assert spans == [[0, 5, 0, 0.4]]
 
     def test_fifo_pairing_same_command_reruns(self):
         with _EnvGuard("1"), _T3AEnvGuard("1"):
@@ -1126,8 +1126,8 @@ class TestT3ABuilderIntegration:
             traj = _build(records)
             spans = traj.traces[0].metadata["attempt_spans"]
             # response = [10,EOT, 50, 20,EOT, 51, 30,EOT] -> 8 tokens
-            # 事件 0=A(0.2),事件 1=PASS(0.5);best=1 在最后,无 post-best 掩码
-            assert spans == [[0, 3, 0, 0.2], [3, 8, 1, 0.5]]
+            # 事件 0=A(0.2),事件 1=PASS(0.4);best=1 在最后,无 post-best 掩码
+            assert spans == [[0, 3, 0, 0.2], [3, 8, 1, 0.4]]
             assert "post_best_masked_tokens" not in traj.traces[0].metadata
 
     def test_flag_off_t3a_session_yields_no_spans(self):

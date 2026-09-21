@@ -469,8 +469,8 @@ def parse_verdict(tool_content: Any) -> dict[str, Any] | None:
         metrics.update(cases_passed=passed, cases_total=total)
     if success:
         if speedup is None:
-            # 成功档的分完全由 speedup 决定(0.80 + 0.20*tanh(ln s)),取不到数就是取不到,
-            # 不能拿 1.0 顶上 —— 那等于凭空判一个 0.8。真实成功路径必然带得出数字
+            # 成功档的分完全由 speedup 决定(0.75 + 0.25*tanh(ln s)),取不到数就是取不到,
+            # 不能拿 1.0 顶上 —— 那等于凭空判一个 0.75。真实成功路径必然带得出数字
             # (pipeline 在 $SP 为空时走的是 benchmark FAILED 分支,根本到不了 done 行),
             # 所以到这里只说明这行不是真的运行输出。返回 None,交给既有的 score=None 兜底:
             # 位置保留、不给分、绝不编造。
@@ -490,11 +490,11 @@ def verdict_score(metrics: dict[str, Any]) -> float:
     except Exception:
         pass
     # Conservative fallback mirroring this repo's ladder coarse shape
-    # (0.2/0.25/0.3/0.35/0.5/0.6-0.8+): only used when the import/scoring breaks.
+    # (0.2/0.25/0.3/0.35/0.4/0.5-0.75+): only used when the import/scoring breaks.
     if metrics.get("success"):
-        return 0.6
-    if metrics.get("correctness_ok"):
         return 0.5
+    if metrics.get("correctness_ok"):
+        return 0.4
     if metrics.get("ast_check_ok"):
         return 0.25
     return 0.2
@@ -812,18 +812,18 @@ def t3a_case_stats(stdout: str) -> tuple[int, int]:
 def t3a_verdict_score(classification: str | None, case_pass: int = 0, case_total: int = 0) -> float | None:
     """hook 分类 → operator_reward ladder 同尺度分(终局 reward 同一把尺):
 
-      PASS(本地全过) -> 0.5   correctness_ok 档;benchmark 只有 judge 可判,不进 success 档
-      D(对拍跑完没对)-> 0.3 + 0.15*通过率(缺统计回退 0.35)  correctness_failed 档同公式
+      PASS(本地全过) -> 0.4   correctness_ok 档;benchmark 只有 judge 可判,不进 success 档
+      D(对拍跑完没对)-> 0.3 + 0.1*通过率(缺统计回退 0.35)  correctness_failed 档同公式
       A(编译/崩溃)   -> 0.2   「编译过但没能有效跑完」档
       UNKNOWN/无判决 -> None  位置保留、不给分、绝不编造(与 t2a score=None 同语义)
 
-    全档严格低于 judge success 下限 0.6:本地 PASS ≠ success,正确性门控语义不变。
+    全档严格低于 judge success 下限 0.5:本地 PASS ≠ success,正确性门控语义不变。
     """
     if classification == "PASS":
-        return 0.5
+        return 0.4
     if classification == "D":
         if case_total > 0 and 0 <= case_pass <= case_total:
-            return 0.3 + 0.15 * min(case_pass / case_total, 0.999)
+            return 0.3 + 0.1 * min(case_pass / case_total, 0.999)
         return 0.35
     if classification == "A":
         return 0.2
