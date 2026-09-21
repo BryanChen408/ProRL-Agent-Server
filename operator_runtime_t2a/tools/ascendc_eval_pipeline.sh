@@ -931,7 +931,7 @@ if [[ -z "$MSPROF_BIN" ]]; then
   echo "[ascendc-eval] msprof NOT FOUND"; fail_hint; exit 1
 fi
 export PATH="$(dirname "$MSPROF_BIN"):$PATH"
-MSPROF_WARMUP="${MSPROF_WARMUP:-30}"
+MSPROF_WARMUP="${MSPROF_WARMUP:-3}"
 PERF_JSON="$TASK_DIR/performance.json"
 rm -f "$PERF_JSON"
 ( export PYTHONPATH="$SK/$PERF_SKILL/scripts:${PYTHONPATH:-}" \
