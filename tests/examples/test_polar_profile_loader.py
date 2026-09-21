@@ -57,7 +57,8 @@ def test_real_profiles_separate_attempt_credit_from_call_limits(tmp_path, name):
         assert "max_turns" not in op["agent"]["settings"]
         assert "--max-turns" not in command
     else:
-        assert env["POLAR_THINKING_TOKEN_BUDGET"] == "32768"
+        assert profile["operator"]["agent"]["thinking_token_budget"] is None
+        assert "POLAR_THINKING_TOKEN_BUDGET" not in env
         assert op["agent"]["settings"]["operator_completion_guard"] == {
             "generation_max": profile["operator_runtime"]["budget"]["generation_max"],
             "optimization_max": profile["operator_runtime"]["budget"]["optimization_max"],
@@ -100,6 +101,7 @@ def test_profile_thinking_budget_exports_only_valid_explicit_values(tmp_path, bu
 
 def test_t2a_profile_budget_reaches_gateway_wire_request(tmp_path):
     profile = yaml.safe_load((ROOT / "deploy/ascend_operator/profile.t2a.yaml").read_text())
+    profile["operator"]["agent"]["thinking_token_budget"] = 32768
     profile["paths"]["output_dir"] = str(tmp_path / "out")
     path = tmp_path / "profile.yaml"
     path.write_text(yaml.safe_dump(profile))

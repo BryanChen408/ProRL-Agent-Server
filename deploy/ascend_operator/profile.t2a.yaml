@@ -27,7 +27,7 @@ operator_runtime:
   backend: ascendc      # ← delta 5:prepare 走 input/{op}.py + --backend ascendc(triton 侧无此字段=默认 triton)
   # ← delta 6:算子同名 .json(NPUKernelBench 用例规格,get_input_groups() 要读)随 prepare 上传到 input/。
   #   {op}.py 走 vime task_source 内容寻址,.json 没有该通道 → 从数据集目录直传。triton 侧无此字段=不产生该动作。
-  task_assets_dir: /home/docker/datasets/ascendc-rl-datasets/NPUKernelBench/op_tasks
+  task_assets_dir: /home/docker/datasets/ascendc-rl-datasets/NPUKernelBench/src_simple
   # ← delta 11:asc-devkit(上游 init.sh Step 4 会 clone 的算子开发资料仓)。
   #   $ASC_DEVKIT_DIR 在 21 个 skill 文档里被引用 46 次,是出现最多的环境变量;
   #   ascendc-docs-search 整个 skill 就是查它。只读挂到 /opt/asc-devkit,不进 workdir 拷贝。
@@ -46,7 +46,7 @@ operator_runtime:
     interval_seconds: 2
   npu_lease:
     enabled: true
-    pool: [0, 1, 2, 3, 4, 5, 6, 7]
+    pool: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
     lock_dir: /dev/shm/npu-locks
 
 observer:
@@ -58,9 +58,9 @@ gateway:
   # session 终态后通知 VIME LB 精确删除该 session 的 sticky/KV 压力记账；
   # 通知失败只告警，仍由 LB TTL 与权重边界清理兜底，不影响结果回传。
   release_session_affinity: true
-  max_init_workers: 8
-  max_run_workers: 64
-  max_postrun_workers: 16
+  max_init_workers: 16
+  max_run_workers: 96
+  max_postrun_workers: 32
   completion_persistence:
     enabled: true
     max_field_bytes: 67108864
@@ -120,7 +120,7 @@ operator:
     skills_path: ""
     max_output_tokens: 49152
     # 由 loader 导出到 gateway；推理引擎需加载 Polar thinking-budget 插件。
-    thinking_token_budget: 32768
+    thinking_token_budget: null
     inference_timeout_ms: 14400000
     # t2a 只把 skill 当本地知识文件使用，禁止 Skill 工具自动加载/反复调用；其他 profile 不变。
     allowed_tools: "Bash Read Edit Write Grep Glob"
@@ -141,10 +141,9 @@ operator:
       timeout 参数必须显式填 2700000(45 分钟)——禁止省略 timeout,也不要填更小的值
       (小于实际耗时会被自动转后台);if it still gets auto-backgrounded, read the output file it
       prints to fetch the verdict and error output.
-      每次模型回复的总输出预算上限为 49152 tokens，包含思考、正文和工具调用参数，其中思考上限为 32768 tokens。
+      每次模型回复的总输出预算上限为 49152 tokens，包含思考、正文和工具调用参数。
       这是单次回复的上限，不是应当用满的目标，也不是整个 session 的剩余预算。
       尽早结束已完成的分析，为必要的正文或工具调用留出空间。
-      达到思考上限仅结束本次思考，仍可继续输出正文或工具调用，不表示任务完成；任务完成仍以 task_complete 为准。
       输出纪律：按 CLAUDE.md 在主轨迹中完成简短设计核对（每项一两句），
       API 不确定时先 Read 对应文档与示例，再写代码；不要抄录整份文档、长篇方案或文件草稿。
       写代码分小块（每个 Write/Edit 一段或一个函数），完成首版实现后再评测；修复时只更新
