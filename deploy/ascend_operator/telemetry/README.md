@@ -1,5 +1,39 @@
 # Agentic-RL 推理侧负载采集(P0 + P1)
 
+## 主机内存耗尽探针
+
+在 **64 宿主机 root 终端**运行，无需重启 Polar 或训练：
+
+```bash
+cd /home/docker/polar_can/ProRL-Agent-Server
+bash deploy/ascend_operator/telemetry/start_memory_probe.sh
+```
+
+需要 py-spy。本工作区已单独安装到 `output/ascend_operator/memory_probe_tools/bin/py-spy`；
+其他机器可通过 `POLAR_PY_SPY=/absolute/path/to/py-spy` 指定已有二进制。
+后台使用 transient systemd service，退出终端仍运行；**宿主机重启后需要重新启动**。
+服务本身限 512 MiB、20% 单核 CPU，并设置 OOMScoreAdjust=-900，尽量保留取证进程。
+`systemctl status polar-memory-probe` 查看状态，`journalctl -u polar-memory-probe` 查看错误，
+`systemctl stop polar-memory-probe` 停止。
+
+每 2 秒按 `(MemTotal-MemAvailable)/MemTotal` 记录整机内存及所有可见进程中 RSS 最大、增长最快的各 30 个。
+首次达到 85%、90%、95%、98% 时抓快照；持续高水位每 60 秒重抓。启动时已高水位也立即抓取。
+阈值可以追加参数覆盖，例如 `--thresholds 80 85 90 95 --interval 2`。
+取证写本地共享工作区 `output/ascend_operator/memory_probe/`，不要放在 NFS 上。
+
+- `memory.jsonl`：时间戳、内存分类、RSS/增长排行榜、PID/父 PID/cgroup。RSS 求和含共享页，不能当整机唯一占用。
+- `incident-*/processes.json`：全部可见进程；cgroup 路径含 Docker ID，可用于映射评测容器。
+- `incident-*/cgroups.jsonl`：cgroup v2 的 memory.current/stat/events/max，含匿名、文件缓存等分类。
+- `incident-*/<pid>/`：最大和增长最快的各 5 个进程的 smaps_rollup、状态、最多 64 个线程内核栈及 Python 栈。
+- `incident-*/meminfo`、`slabinfo`、`vmstat`、压力和内核日志：辅助定位不反映在进程 RSS 上的内存。
+
+Python 栈通过 `py-spy dump --nonblocking` 读取，不暂停训练，不抓局部变量/张量，也不发信号。
+单次调用限 3 秒，最多选 10 个进程；取栈期间采样会延后。非 Python 进程不提供用户态栈，仍保存内核栈和占用；
+权限不足、进程退出、解释器不受支持会记录到对应文件，不能保证每个目标都有 Python 栈。
+这是**当时的调用栈，不是历史内存分配栈**。没有故障前的分配追踪，不能仅凭一张栈判定泄漏来源。
+日志轮转约 32 MiB×2；保留第一次和最近 31 次事故快照。输出目录默认仅当前用户可读。
+默认拒绝在 PID 隔离容器运行，避免把局部进程榜误当整机全貌；`--allow-container --once` 仅用于测试。
+
 覆盖:块①显存/内存、块②rollout-step 耗时/长度、块③batch(engine 连续批 + rollout group)长度。
 块④(rollout 非推理占比)= P2,埋 `rollout_span`/`verify_job`,尚未在此实现。
 
