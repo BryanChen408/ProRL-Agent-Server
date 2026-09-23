@@ -244,8 +244,13 @@ def test_two_tensor_forward(tmp_path):
     gsig = next(l for l in kern.splitlines() if "GM_ADDR in0" in l)   # 入口签名行
     assert gsig.count("GM_ADDR y") == 1 and "GM_ADDR in1" in gsig     # 输出唯一、双输入俱在
     assert kern.count("in0Gm;") == 1 and kern.count("in1Gm;") == 1 and kern.count("yGm;") == 1
-    assert "inQueue0" in kern and "inQueue1" in kern     # 双输入各建 queue
+    assert "inQueue0" in kern and "inQueue1" in kern  # 恢复全部输入搬运
     host = (out / "kernel" / "op_host" / "my_op.cpp").read_text()
+    assert "y.scalar_type() == x.scalar_type()" in host
+    assert "y.is_contiguous()" in host
+    assert "_dtypeSize * 6;" in host
+    assert "AscendC::DataCopy(in1Local, in1Gm[" in kern
+    assert "inQueue1.FreeTensor(in1Local);" in kern
     assert "x, y, _output" in host                       # EXEC_KERNEL_CMD 双输入都接
 
 
@@ -701,9 +706,9 @@ def test_skeleton_labels_semantic_placeholders_without_rewriting_reference(tmp_p
     host = (out / "kernel/op_host/my_op.cpp").read_text()
     kernel = (out / "kernel/op_kernel/my_op_kernel.cpp").read_text()
     assert "elementwise 占位不是本题语义契约" in host
-    assert "empty_like、fp16/fp32/连续性限制、单输出接线与 tiling" in host
+    assert "empty_like、连续性检查、单输出接线与 tiling" in host
     assert "不能只替换 Compute" in kernel
-    assert "不代表支持 BF16" in kernel
+    assert "dtypeFlag 按实际 scalar_type 分派" in kernel
     assert "其余(tiling/双 buffer/dtype 分发)别动" not in kernel
 
 
@@ -822,3 +827,60 @@ def test_documented_source_lookup_uses_current_environment_without_importing_til
         "skills/tilelang2ascend-tilelang-designer/SKILL.md",
     ):
         assert "开发源码只读范围" in (CANONICAL / relative).read_text()
+
+
+@pytest.mark.parametrize('source', [SINGLE, TWO_TENSOR, '# fallback skeleton\n'])
+def test_generated_host_and_kernel_dispatch_preserves_scalar_type(tmp_path, source):
+    """编译并执行生成的 host 分派与 kernel 入口；不依赖 NPU，验证同宽类型不混淆。"""
+    import subprocess
+    import shutil
+    compiler = shutil.which('g++')
+    if compiler is None:
+        pytest.skip('g++ is required for the generated dispatch contract check')
+    task, js = _write_model(tmp_path, source)
+    out = _instantiate(tmp_path, task, js)
+    host = (out / 'kernel/op_host/my_op.cpp').read_text()
+    kernel = (out / 'kernel/op_kernel/my_op_kernel.cpp').read_text()
+    block = host[host.index('    int64_t _dtypeFlag'):host.index('\n    at::Tensor _output')]
+    # 单输入签名为 x；静态兜底签名为 self。只替换测试用张量变量，保留实际生成的 switch。
+    block = block.replace('x.scalar_type()', 'self.scalar_type()')
+    multi = source == TWO_TENSOR
+    entry = kernel[kernel.index('extern "C" __global__'):]
+    # PyTorch 枚举故意不等于 dtypeFlag，避免误把枚举值当自定义标记。
+    types = [('Float', 'float'), ('Half', 'half'), ('BFloat16', 'bfloat16_t'),
+             ('Int', 'int32_t'), ('Long', 'int64_t'), ('Char', 'int8_t'),
+             ('Bool', 'uint8_t'), ('Byte', 'uint8_t'), ('Short', 'int16_t'), ('Double', 'double')]
+    cpp = '''#include <cstdint>
+#include <cassert>
+#include <typeinfo>
+#include <stdexcept>
+#define __global__
+#define __aicore__
+#define TORCH_CHECK(ok, ...) if (!(ok)) throw std::runtime_error("unsupported dtype")
+using GM_ADDR = void*;
+struct half {}; struct bfloat16_t {};
+const std::type_info* selected = nullptr;
+template<class T> struct KernelMyOp {
+    template<class... Args> void Init(Args...) { selected = &typeid(T); }
+    void Process() {}
+};
+namespace at { enum ScalarType { ''' + ','.join(f'k{name}={100+i*3}' for i,(name,_) in enumerate(types)) + ''' }; }
+struct Tensor { at::ScalarType value; at::ScalarType scalar_type() const { return value; } bool is_contiguous() const { return true; } };
+int64_t dispatch(Tensor self, Tensor y) {
+''' + block + '\nreturn _dtypeFlag;\n}\n' + entry + '\nint main() {\n'
+    for name, typ in types:
+        cpp += f'my_op_kernel({"nullptr, " if multi else ""}nullptr, nullptr, 0, 0, 0, 0, dispatch({{at::k{name}}}, {{at::k{name}}})); assert(*selected == typeid({typ}));\n'
+    if multi:
+        cpp += '''bool mixed_rejected = false;
+try { dispatch({at::kHalf}, {at::kBFloat16}); } catch (const std::runtime_error&) { mixed_rejected = true; }
+assert(mixed_rejected);
+'''
+    cpp += '''bool rejected = false;
+try { dispatch({static_cast<at::ScalarType>(999)}, {at::kFloat}); } catch (const std::runtime_error&) { rejected = true; }
+assert(rejected);
+}\n'''
+    path = tmp_path / 'dispatch.cpp'
+    path.write_text(cpp)
+    binary = tmp_path / 'dispatch'
+    subprocess.run([compiler, '-std=c++17', str(path), '-o', str(binary)], check=True, capture_output=True)
+    subprocess.run([str(binary)], check=True)

@@ -1,9 +1,11 @@
 // {op_name} op_host — 校验 + tiling + EXEC_KERNEL_CMD 启动
+// 签名由 prepare 按 model.py 生成(与 register.cpp/ops.h/model_new 自洽);
 // elementwise 占位不是本题语义契约:按原始 reference 核对完整计算、输出与分支。
-// empty_like、fp16/fp32/连续性限制、单输出接线与 tiling 均需按本题改写,不只改 Compute。
-// 构建/loader 机制不重建;接口变化须同步 wrapper/register.cpp/ops.h/op_host。
+// empty_like、连续性检查、单输出接线与 tiling 均需按本题改写,不只改 Compute。
+// 要改签名请四处同步;构建/loader 机制不重建,设计复用 CLAUDE.md 指向的 cannbot 资料。
 #include <algorithm>
 #include <cstdint>
+#include <tuple>
 
 #include <torch/extension.h>
 #include <torch/library.h>
@@ -20,48 +22,60 @@ constexpr int64_t CACHE_LINE_BYTE_LENGTH = 512;
 
 at::Tensor {op_name}(const at::Tensor &self)
 {
-    TORCH_CHECK(self.scalar_type() == at::kHalf || self.scalar_type() == at::kFloat,
-                "{op_name}: only float16 and float32 are supported, got ", self.scalar_type());
-    TORCH_CHECK(self.is_contiguous(), "{op_name}: input must be contiguous");
-
-    at::Tensor output = at::empty_like(self);
-
-    int64_t totalLength = self.numel();
-    if (totalLength == 0) {
-        return output;
+    TORCH_CHECK(self.is_contiguous(), "{op_name}: self must be contiguous");
+    // CANNBot rms_norm 的显式 dtypeFlag 分派；element_size 只用于字节数计算。
+    int64_t _dtypeFlag = -1;
+    switch (self.scalar_type()) {
+        case at::kFloat: _dtypeFlag = 0; break;
+        case at::kHalf: _dtypeFlag = 1; break;
+        case at::kBFloat16: _dtypeFlag = 2; break;
+        case at::kInt: _dtypeFlag = 3; break;
+        case at::kLong: _dtypeFlag = 4; break;
+        case at::kChar: _dtypeFlag = 5; break;
+        case at::kBool: _dtypeFlag = 6; break;
+        case at::kByte: _dtypeFlag = 7; break;
+        case at::kShort: _dtypeFlag = 8; break;
+        case at::kDouble: _dtypeFlag = 9; break;
+        default: TORCH_CHECK(false, "{op_name}: extend dtype dispatch for ", self.scalar_type());
     }
-    int64_t dtypeSize = self.element_size();
 
-    auto ascendc_platform = platform_ascendc::PlatformAscendCManager::GetInstance();
-    int64_t coreNum = static_cast<int64_t>(ascendc_platform->GetCoreNumAiv());
-    if (coreNum <= 0) { coreNum = 1; }
-    uint64_t ubSize = 0;
-    ascendc_platform->GetCoreMemSize(platform_ascendc::CoreMemType::UB, ubSize);
+    at::Tensor _output = at::empty_like(self);
 
-    int64_t totalLengthCore = (totalLength + coreNum - 1) / coreNum;
-    int64_t totalLengthCoreAlign = (totalLengthCore + CACHE_LINE_BYTE_LENGTH - 1) /
+    int64_t _totalLength = self.numel();
+    if (_totalLength == 0) {
+        return _output;
+    }
+    int64_t _dtypeSize = self.element_size();
+
+    auto _ascendc_platform = platform_ascendc::PlatformAscendCManager::GetInstance();
+    int64_t _coreNum = static_cast<int64_t>(_ascendc_platform->GetCoreNumAiv());
+    if (_coreNum <= 0) { _coreNum = 1; }
+    uint64_t _ubSize = 0;
+    _ascendc_platform->GetCoreMemSize(platform_ascendc::CoreMemType::UB, _ubSize);
+
+    int64_t _totalLengthCore = (_totalLength + _coreNum - 1) / _coreNum;
+    int64_t _totalLengthCoreAlign = (_totalLengthCore + CACHE_LINE_BYTE_LENGTH - 1) /
                                    CACHE_LINE_BYTE_LENGTH * CACHE_LINE_BYTE_LENGTH;
 
-    int64_t usedCoreNum = (totalLength + totalLengthCoreAlign - 1) / totalLengthCoreAlign;
-    int64_t formerNum = usedCoreNum - 1;
-    int64_t formerLength = totalLengthCoreAlign;
-    int64_t tailLength = totalLength - formerNum * formerLength;
+    int64_t _usedCoreNum = (_totalLength + _totalLengthCoreAlign - 1) / _totalLengthCoreAlign;
+    int64_t _formerNum = _usedCoreNum - 1;
+    int64_t _formerLength = _totalLengthCoreAlign;
+    int64_t _tailLength = _totalLength - _formerNum * _formerLength;
 
-    int64_t bufferCoefficient = dtypeSize * 4;  // 按 UB 分配表调整(in/out 双 buffer)
-    if (bufferCoefficient <= 0) { bufferCoefficient = 1; }
-    int64_t maxTileElements = static_cast<int64_t>(ubSize) / bufferCoefficient;
-    int64_t alignElements = 32 / (dtypeSize > 0 ? dtypeSize : 1);
-    if (alignElements <= 0) { alignElements = 1; }
-    int64_t tileLength = (maxTileElements / alignElements) * alignElements;
-    if (tileLength <= 0) { tileLength = alignElements; }
+    int64_t _bufferCoefficient = _dtypeSize * 4;  // 全部输入 queue + 输出 queue，各双 buffer
+    if (_bufferCoefficient <= 0) { _bufferCoefficient = 1; }
+    int64_t _maxTileElements = static_cast<int64_t>(_ubSize) / _bufferCoefficient;
+    int64_t _alignElements = 32 / (_dtypeSize > 0 ? _dtypeSize : 1);
+    if (_alignElements <= 0) { _alignElements = 1; }
+    int64_t _tileLength = (_maxTileElements / _alignElements) * _alignElements;
+    if (_tileLength <= 0) { _tileLength = _alignElements; }
 
-    uint32_t blockDim = static_cast<uint32_t>(usedCoreNum);
+    uint32_t _blockDim = static_cast<uint32_t>(_usedCoreNum);
 
-    EXEC_KERNEL_CMD({op_name}_kernel, blockDim,
-                    self, output,
-                    formerNum, formerLength, tailLength, tileLength, dtypeSize);
+    EXEC_KERNEL_CMD({op_name}_kernel, _blockDim,
+                    self, _output, _formerNum, _formerLength, _tailLength, _tileLength, _dtypeFlag);
 
-    return output;
+    return _output;
 }
 
 }  // namespace ascend_kernel

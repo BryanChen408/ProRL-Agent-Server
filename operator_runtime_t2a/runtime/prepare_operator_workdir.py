@@ -131,6 +131,15 @@ _CPP_TYPE = {
 # 能接进 kernel 入口的标量 kind → kernel 形参类型;不在表里的 kind 只到 host(留 TODO)
 _KERNEL_SCALAR = {"int": "int64_t", "float": "float", "bool": "int64_t"}
 
+# CANNBot archive_tasks/rms_norm: scalar_type -> dtypeFlag -> Kernel<T>。
+# 扩展的是恒等搬运占位，不代表任意计算 API 支持这些类型；数学由 agent 按任务实现。
+_SKELETON_DTYPES = (
+    ("Float", "float"), ("Half", "half"), ("BFloat16", "bfloat16_t"),
+    ("Int", "int32_t"), ("Long", "int64_t"), ("Char", "int8_t"),
+    ("Bool", "uint8_t"),  # bool 仅按一字节存储搬运，不转成 half/float
+    ("Byte", "uint8_t"), ("Short", "int16_t"), ("Double", "double"),
+)
+
 
 def _module_consts(tree) -> dict:
     """模块级常量。先做一遍字面量直收,再按引用展开 tuple/list/算术表达式
@@ -639,7 +648,7 @@ def _render_op_host_cpp(op: str, sig: _OpSig, ordered: list[_Param], cpp_args: s
     a(f"// {op} op_host — 校验 + tiling + EXEC_KERNEL_CMD 启动")
     a("// 签名由 prepare 按 model.py 生成(与 register.cpp/ops.h/model_new 自洽);")
     a("// elementwise 占位不是本题语义契约:按原始 reference 核对完整计算、输出与分支。")
-    a("// empty_like、fp16/fp32/连续性限制、单输出接线与 tiling 均需按本题改写,不只改 Compute。")
+    a("// empty_like、连续性检查、单输出接线与 tiling 均需按本题改写,不只改 Compute。")
     a("// 要改签名请四处同步;构建/loader 机制不重建,设计复用 CLAUDE.md 指向的 cannbot 资料。")
     a("#include <algorithm>")
     a("#include <cstdint>")
@@ -689,10 +698,17 @@ def _render_op_host_cpp(op: str, sig: _OpSig, ordered: list[_Param], cpp_args: s
         a("")
         a("}  // namespace ascend_kernel")
         return "\n".join(lines) + "\n"
-    for t in tensors:
-        a(f'    TORCH_CHECK({t.name}.scalar_type() == at::kHalf || {t.name}.scalar_type() == at::kFloat,')
-        a(f'                "{op}: only float16 and float32 are supported, got ", {t.name}.scalar_type());')
+    a(f'    TORCH_CHECK({first}.is_contiguous(), "{op}: {first} must be contiguous");')
+    a("    // CANNBot rms_norm 的显式 dtypeFlag 分派；element_size 只用于字节数计算。")
+    a("    int64_t _dtypeFlag = -1;")
+    a(f"    switch ({first}.scalar_type()) {{")
+    for flag, (torch_type, _) in enumerate(_SKELETON_DTYPES):
+        a(f"        case at::k{torch_type}: _dtypeFlag = {flag}; break;")
+    a(f'        default: TORCH_CHECK(false, "{op}: extend dtype dispatch for ", {first}.scalar_type());')
+    a("    }")
+    for t in tensors[1:]:
         a(f'    TORCH_CHECK({t.name}.is_contiguous(), "{op}: {t.name} must be contiguous");')
+        a(f'    TORCH_CHECK({t.name}.scalar_type() == {first}.scalar_type(), "{op}: skeleton expects matching input dtypes; implement mixed input types according to reference");')
     for p in unwired:
         a(f"    // TODO: {p.name}({_SCHEMA_TYPE[p.kind]})未接入 kernel 入口,按算子语义自行接线")
     if sig.ret_arity > 1:
@@ -741,7 +757,7 @@ def _render_op_host_cpp(op: str, sig: _OpSig, ordered: list[_Param], cpp_args: s
     a("")
     # EXEC_KERNEL_CMD 的位置实参与 kernel 入口按位置对应(输入 in0..inN → 输出 → tiling → 标量)
     exec_args = [t.name for t in tensors] or [first]
-    exec_args += [out_names[0], "_formerNum", "_formerLength", "_tailLength", "_tileLength", "_dtypeSize"]
+    exec_args += [out_names[0], "_formerNum", "_formerLength", "_tailLength", "_tileLength", "_dtypeFlag"]
     for p in scalars:
         if p.kind == "float":
             a(f"    float _{p.name}_l = static_cast<float>({p.name});  // EXEC_KERNEL_CMD 需要左值")
@@ -777,9 +793,10 @@ def _render_op_kernel_cpp(op: str, camel: str, sig: _OpSig, ordered: list[_Param
     a = lines.append
     a(f"// {op} device kernel — elementwise 骨架({n_inputs} 输入;dtype 分发 + 尾块 + 32B 对齐 + 双 buffer)")
     a("// 数学在 Compute() 里,默认把第 1 个输入恒等拷贝到输出(能编过、能注册、跑通打包链路,")
-    a("// 不代表实现了 reference)。多输入各自有 queue/GM,但不保证同 shape/dtype 或相同偏移。")
+    a("// 不代表实现了 reference)。全部普通 Tensor 输入按相同类型搬运，host 检查类型一致。")
     a("// 必须按本题改写 tiling、buffer、尾块有效长度和全部输出,不能只替换 Compute。")
-    a("// dtypeSize==2 仅是 half 占位,不代表支持 BF16;整数/混合 dtype 须显式接线,不能只删 host 检查。")
+    a("// dtypeFlag 按实际 scalar_type 分派，区分 FP16/BF16/整数；bool 占位仅按 uint8_t 搬运。")
+    a("// 类型/API/转换参考 .claude/skills/tilelang2ascend-translator/SKILL.md 与 archive_tasks/rms_norm/。")
     a('#include "kernel_operator.h"')
     a("")
     a("constexpr int32_t BUFFER_NUM = 2;")
@@ -857,10 +874,7 @@ def _render_op_kernel_cpp(op: str, camel: str, sig: _OpSig, ordered: list[_Param
     a("")
     a(f"        // TODO: 换成你的算子数学。默认恒等拷贝 y = in0(只为打通打包/注册链路)。")
     a(f"        // 例: AscendC::Abs(yLocal, in0Local, curTileLength);       // |x|")
-    if n_inputs >= 2:
-        a(f"        //     AscendC::Add(yLocal, in0Local, in1Local, curTileLength); // x + y")
-    else:
-        a(f"        //     AscendC::Adds(yLocal, in0Local, (T)1, curTileLength); // x + 1")
+    a("        // 混合类型输入需按 reference 分别实现类型与 buffer，并调整 host 检查。")
     a(f"        AscendC::DataCopy(yLocal, in0Local, curTileLength);")
     a("")
     a("        outQueueY.EnQue<T>(yLocal);")
@@ -891,7 +905,7 @@ def _render_op_kernel_cpp(op: str, camel: str, sig: _OpSig, ordered: list[_Param
     a("")
     gparams = [f"GM_ADDR {n}" for n, _, _ in inputs] + ["GM_ADDR y"]
     gparams += ["int64_t formerNum", "int64_t formerLength",
-              "int64_t tailLength", "int64_t tileLength", "int64_t dtypeSize"]
+              "int64_t tailLength", "int64_t tileLength", "int64_t dtypeFlag"]
     gparams += [f"{kt} {p.name}" for p, kt in scalar_decls]
     a(f'extern "C" __global__ __aicore__ void {op}_kernel(')
     a(f"    {', '.join(gparams[:2])},")
@@ -899,15 +913,12 @@ def _render_op_kernel_cpp(op: str, camel: str, sig: _OpSig, ordered: list[_Param
     a("{")
     init_call = [n for n, _, _ in inputs] + ["y", "formerNum", "formerLength",
                                              "tailLength", "tileLength"] + [p.name for p, _ in scalar_decls]
-    a("    if (dtypeSize == 2) {")
-    a(f"        Kernel{camel}<half> op;")
-    a(f"        op.Init({', '.join(init_call)});")
-    a("        op.Process();")
-    a("    } else {")
-    a(f"        Kernel{camel}<float> op;")
-    a(f"        op.Init({', '.join(init_call)});")
-    a("        op.Process();")
-    a("    }")
+    for flag, (_, kernel_type) in enumerate(_SKELETON_DTYPES):
+        a(f"    {'if' if flag == 0 else 'else if'} (dtypeFlag == {flag}) {{")
+        a(f"        Kernel{camel}<{kernel_type}> op;")
+        a(f"        op.Init({', '.join(init_call)});")
+        a("        op.Process();")
+        a("    }")
     a("}")
     return "\n".join(lines) + "\n"
 

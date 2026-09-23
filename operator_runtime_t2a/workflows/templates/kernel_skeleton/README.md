@@ -58,7 +58,10 @@ Polar prepare 已生成工作目录顶层的 `{op_name}/`，直接原位开发�
     └── utils/torch_kernel_helper.h     # EXEC_KERNEL_CMD 宏(原样,别改)
 ```
 
-kernel 的 `Compute()` 里默认是 `DataCopy`（恒等拷贝，能编过、能注册）。
-**不只改 Compute**：`empty_like`、fp16/fp32 限制、按 dtypeSize 分发、连续性要求、
-输入偏移、单输出接线、buffer 与尾块都是 elementwise 占位假设，需要按本题核对改写。
-BF16/整数支持不能只删除 host 检查；完整输出结构、类型与舍入行为均以原始 reference 为准。
+kernel 的 `Compute()` 默认只将首输入恒等拷贝到首输出，不代表实现了任务。
+类型分派复用 cannbot `archive_tasks/rms_norm` 的 `scalar_type → dtypeFlag → Kernel<T>` 模式，
+区分 FP32、FP16、BF16，并扩展整数搬运；bool 按 uint8_t 存储搬运。`element_size()` 只用于尺寸计算。
+保留全部普通 Tensor 输入的队列与搬运，host 检查输入类型一致；混合类型需由 agent 按 reference 分别实现类型与 buffer，再调整检查。
+同类型检查参考 cannbot rms_norm；这是当前同类型骨架的限制，不是任务本身禁止混合类型。
+类型转换与计算 API 支持查 translator 的步骤 0-B、官方 Cast 文档和 rms_norm 示例。
+`empty_like`、连续性、单输出、tiling 与尾块仍是占位，实际数学、输出与累加类型由任务决定。

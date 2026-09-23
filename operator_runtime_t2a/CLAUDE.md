@@ -724,7 +724,7 @@ Polar prepare 在 Agent 启动前已经读取本题 `model.py` 的 `__init__` / 
 `get_inputs/get_input_groups/get_init_inputs` 中实际存在的入口与关联用例；不要把多步计算
 缩减成文件名中的一个操作，也不要忽略子模块参数、返回结构或分支。
 
-骨架中的 `empty_like(首个输入)`、fp16/fp32 限制、连续性检查、按字节数分发 dtype、
+骨架中的 `empty_like(首个输入)`、连续性检查、默认类型与输入搬运、
 单输出接线、恒等拷贝与 elementwise tiling 都是**待改写占位**，不保证符合本题。
 按 reference 修正输出 shape/dtype、全部输出、布局、累加精度、buffer 与尾块；BF16/整数
 支持不能只删 host 检查，必须同步修正 kernel 类型与访存。静态签名提取不等于已实现
