@@ -981,6 +981,7 @@ import importlib.util
 import inspect
 import os
 import sys
+import time
 import torch
 from collections.abc import Mapping
 from pathlib import Path
@@ -1043,8 +1044,13 @@ def _one_iter():
 for _ in range({warmup}):
     _one_iter()
 
+# 墙钟兜底:reference 是纯 view / 零 device 任务时 msprof 采不到任何东西,
+# 这个标记是解析侧唯一还能拿到诚实耗时的来源。只覆盖正式 repeats 段。
+_wall_t0 = time.perf_counter()
 for _ in range({repeats}):
     _one_iter()
+torch.npu.synchronize()
+print("POLAR_WALL_US=" + repr((time.perf_counter() - _wall_t0) * 1e6 / max(1, {repeats})))
 """
 
 
@@ -1682,6 +1688,26 @@ def _measure_one_impl(mi: _MeasureInput):
     return None, err, prof_dir
 
 
+_WALL_MARKER_RE = re.compile(r"^POLAR_WALL_US=([0-9.]+)$", re.MULTILINE)
+
+
+def _wall_us_from_app_log(output_dir: str):
+    """被采集进程打印的墙钟兜底(µs/次正式迭代)。只在 csv 缺数时使用。"""
+    try:
+        text = Path(output_dir, "app_output.log").read_text(
+            encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    match = _WALL_MARKER_RE.search(text)
+    if not match:
+        return None
+    try:
+        value = float(match.group(1))
+    except ValueError:
+        return None
+    return value if value > 0 else None
+
+
 def _measure_one_impl_quick(mi: _MeasureInput):
     """快速模式：Measure one implementation with retries and repeats.
 
@@ -1689,7 +1715,7 @@ def _measure_one_impl_quick(mi: _MeasureInput):
     wrapper 在同一个被采集进程内做 warmup，再做 repeats 次正式测试；解析器
     丢弃前 warmup 轮次，避免重复初始化 Python/NPU。
 
-    Returns (duration_us, error, prof_dir).
+    Returns (duration_us, error, prof_dir, method);method ∈ {"task_time", "wall_clock", None}。
     """
     prof_dir = None
     impl_abbr = "ref" if mi.impl == "reference" else "asc"
@@ -1709,12 +1735,17 @@ def _measure_one_impl_quick(mi: _MeasureInput):
         duration, _op_name, parse_err = _parse_msprof_duration_quick(
             prof_dir, warmup, repeats)
         if duration is None:
+            wall_us = _wall_us_from_app_log(tmpdir)
+            if wall_us is not None:
+                # csv 缺数但 wrapper 跑完了:reference 纯 view / 零 device 任务,
+                # 用墙钟,不判失败。method 交给调用方做同 case 同钟处理。
+                return wall_us, None, prof_dir, "wall_clock"
             err = parse_err
             continue
 
-        return duration, None, prof_dir
+        return duration, None, prof_dir, "task_time"
 
-    return None, err, prof_dir
+    return None, err, prof_dir, None
 
 
 def _generate_grouped_wrapper_script(out_dir: Path, blocks: list, seed: int,
@@ -1742,6 +1773,7 @@ import inspect
 import json
 import os
 import sys
+import time
 import torch
 from collections.abc import Mapping
 from pathlib import Path
@@ -1821,6 +1853,7 @@ for block_no, block in enumerate(blocks):
 
         start_event = torch.npu.Event()
         end_event = torch.npu.Event()
+        _wall_t0 = time.perf_counter()
         start_event.record()
         timed_error = None
         try:
@@ -1831,6 +1864,9 @@ for block_no, block in enumerate(blocks):
         finally:
             end_event.record()
             end_event.synchronize()
+            # 进程内墙钟兜底:窗口切不出 kernel(纯 view / reference 零 device 任务)
+            # 时,这是唯一诚实的耗时来源;解析侧只在 csv 缺数时才用它。
+            entry["wall_us"] = (time.perf_counter() - _wall_t0) * 1e6 / repeats
             entry["has_markers"] = True
 
         if timed_error is not None:
@@ -1854,6 +1890,26 @@ def _load_grouped_manifest(manifest_path: Path):
     return None, "invalid grouped manifest: missing blocks list"
 
 
+def _wall_measurements(manifest):
+    """进程内墙钟兜底:全部带 marker 的块都有 wall_us 时给出整套测量,否则返回 None。
+
+    只用于 csv 切不出来的时候(纯 view / reference 零 device 任务);csv 能切
+    仍走 task_time,口径不变。
+    """
+    measurements = {}
+    for block in manifest:
+        key = (int(block["case"]), str(block["impl"]))
+        wall_us = block.get("wall_us")
+        if block.get("ok") and isinstance(wall_us, (int, float)) and wall_us > 0:
+            measurements[key] = {"duration_us": wall_us, "error": None,
+                                 "timing": "wall_clock"}
+        elif not block.get("has_markers"):
+            measurements[key] = {"duration_us": None, "error": block.get("error")}
+        else:
+            return None
+    return measurements
+
+
 def _parse_msprof_grouped(prof_dir: str, manifest_path: Path, repeats: int):
     """Split one msprof task-time CSV by paired NPU event markers."""
     manifest, manifest_error = _load_grouped_manifest(manifest_path)
@@ -1864,6 +1920,9 @@ def _parse_msprof_grouped(prof_dir: str, manifest_path: Path, repeats: int):
         prof_dir, "mindstudio_profiler_output", "task_time_*.csv"
     )))
     if not task_time_files:
+        wall = _wall_measurements(manifest)
+        if wall is not None:
+            return wall, None
         return None, "no task_time csv found"
     try:
         with open(task_time_files[0], "r", encoding="utf-8", errors="replace") as stream:
@@ -1878,15 +1937,21 @@ def _parse_msprof_grouped(prof_dir: str, manifest_path: Path, repeats: int):
     ]
     expected_markers = 2 * len(marked_blocks)
     if len(marker_positions) != expected_markers:
+        wall = _wall_measurements(manifest)
+        if wall is not None:
+            return wall, None
         return None, (
             f"grouped marker mismatch: expected {expected_markers}, "
             f"found {len(marker_positions)}"
         )
 
     measurements = {}
+    wall_fallback = 0
     marker_idx = 0
+    wall_by_key = {}
     for block in manifest:
         key = (int(block["case"]), str(block["impl"]))
+        wall_by_key[key] = block.get("wall_us")
         if not block.get("has_markers"):
             measurements[key] = {"duration_us": None, "error": block.get("error")}
             continue
@@ -1897,16 +1962,41 @@ def _parse_msprof_grouped(prof_dir: str, manifest_path: Path, repeats: int):
         if end_pos <= start_pos:
             return None, f"invalid grouped marker order for case {key[0]} {key[1]}"
         kernels = _collect_task_time_kernels(rows[start_pos + 1:end_pos])
+        wall_us = block.get("wall_us")
         if block.get("ok") and kernels:
             measurements[key] = {
                 "duration_us": sum(item[2] for item in kernels) / max(1, repeats),
                 "error": None,
             }
+        elif block.get("ok") and isinstance(wall_us, (int, float)) and wall_us > 0:
+            # 块跑完了但窗口切不出 device 任务:reference 纯 view / 零 NPU 工作,
+            # 用进程内墙钟兜底而不是判失败。
+            wall_fallback += 1
+            measurements[key] = {"duration_us": wall_us, "error": None,
+                                 "timing": "wall_clock"}
         else:
             measurements[key] = {
                 "duration_us": None,
                 "error": block.get("error") or "no timed device task found",
             }
+    # 同一 case 两侧必须同钟:一侧落了墙钟,另一侧也换 wall,避免跨口径比值。
+    for case_idx in {key[0] for key in measurements}:
+        sides = [key for key in ((case_idx, "reference"), (case_idx, "ascendc"))
+                 if key in measurements]
+        methods = {measurements[s].get("timing") for s in sides
+                   if measurements[s].get("duration_us") is not None}
+        if "wall_clock" in methods and len(methods) > 1:
+            for s in sides:
+                wall = wall_by_key.get(s)
+                meas = measurements[s]
+                if meas.get("duration_us") is not None and isinstance(wall, (int, float)) and wall > 0:
+                    meas["duration_us"] = wall
+                    meas["timing"] = "wall_clock"
+    if wall_fallback:
+        LOGGER.info(
+            "[INFO] wall-clock fallback used for %d block(s) with no device tasks",
+            wall_fallback,
+        )
     return measurements, None
 
 
@@ -2321,8 +2411,18 @@ def _run_quick_loop(out_dir, cases, case_cache_paths, n_cases, args, device_id):
         asc_mi = _MeasureInput(
             out_dir, idx, "ascendc", args, device_id, jsonl_case, case_cache_path
         )
-        ref_us, ref_err, ref_prof_dir = _measure_one_impl_quick(ref_mi)
-        asc_us, asc_err, asc_prof_dir = _measure_one_impl_quick(asc_mi)
+        ref_us, ref_err, ref_prof_dir, ref_method = _measure_one_impl_quick(ref_mi)
+        asc_us, asc_err, asc_prof_dir, asc_method = _measure_one_impl_quick(asc_mi)
+
+        # 同一 case 两侧必须同钟:一侧落了墙钟(reference 零 device 任务),
+        # 另一侧也改用它自己的墙钟,避免「含发射开销 vs 不含」的跨口径比值。
+        if ref_us is not None and asc_us is not None and ref_method != asc_method:
+            ref_wall = _wall_us_from_app_log(str(Path(ref_prof_dir).parent)) if ref_prof_dir else None
+            asc_wall = _wall_us_from_app_log(str(Path(asc_prof_dir).parent)) if asc_prof_dir else None
+            if ref_wall is not None and asc_wall is not None:
+                ref_us, asc_us = ref_wall, asc_wall
+                ref_method = asc_method = "wall_clock"
+                LOGGER.info(f"{idx:<5} [INFO] mixed timing clocks; both sides use wall-clock")
 
         if ref_us is not None and asc_us is not None and asc_us > 0:
             sp = ref_us / asc_us

@@ -303,11 +303,11 @@ def test_quick_warmup_runs_inside_the_profiled_python_process(tmp_path, monkeypa
     out_dir = tmp_path / f"op_{tmp_path.name}"
     args = SimpleNamespace(retry=0, repeats=1, warmup=3, seed=17)
 
-    duration, error, _ = module._measure_one_impl_quick(
+    duration, error, _, method = module._measure_one_impl_quick(
         module._MeasureInput(out_dir, 0, "reference", args, 0)
     )
 
-    assert duration == 8.0 and error is None
+    assert duration == 8.0 and error is None and method == "task_time"
     assert len(calls) == 1
     assert calls[0][0] == "msprof" and calls[0][1] == "_wrapper.py"
     assert "range(3)" in calls[0][2]
