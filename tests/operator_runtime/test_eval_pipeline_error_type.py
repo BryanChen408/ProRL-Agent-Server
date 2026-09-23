@@ -73,37 +73,38 @@ LOG_NAN_MISMATCH = _ENV_DUMP + (
     "Result: fail\n"
 )
 
-# 与 pipeline 里 verify 分支同一组判据。外层看「对拍给出结论没有」(case[N]: 行),
-# 内层再分数值差异 / 前置检查不通过。
-_CASE_RE = r"case\[[0-9]+\]:"
-_NUM_RE = r"(max_abs_diff|mere|matched_ratio)[[:space:]]*="
-
-
 def _decide(log_text: str, tmp_path: Path) -> str:
-    """跑 pipeline 里那两条真实的 grep,复现 bash 侧的三分支判定。"""
-    p = tmp_path / "verify.log"
-    p.write_text(log_text)
+    """执行实际 Bash 分类分支，不在测试里复制规则。"""
+    (tmp_path / "verify.log").write_text(log_text)
+    source = PIPELINE.read_text()
+    start = source.index('  if grep -qEi "')
+    end = source.index('\n  extract_case_stats', start)
+    result = subprocess.run(
+        ["bash", "-c", 'OUT_DIR="$1"\n' + source[start:end]
+         + '\nprintf "%s" "$_VER_TYPE"', "classify", str(tmp_path)],
+        text=True, capture_output=True, check=True,
+    )
+    return result.stdout
 
-    def _grep(pat: str, ci: bool = False) -> bool:
-        flags = "-qEi" if ci else "-qE"
-        return subprocess.run([("grep"), flags, pat, str(p)], check=False).returncode == 0
 
-    if _grep(_CASE_RE):
-        return "correctness_failed" if _grep(_NUM_RE, ci=True) else "output_precheck_failed"
-    if _grep(
-        r"ModuleNotFoundError|ImportError|_OpNamespace|has no attribute|cannot open shared object|undefined symbol",
-        ci=True,
-    ):
-        return "ascendc_load_failed"
-    if _grep(r"507035"):
-        return "ascendc_launch_failed"
-    if _grep(r"507034"):
-        return "ascendc_run_timeout"
-    if _grep(r"kernel launch failed|aclrtlaunch[a-zA-Z0-9_]*.*failed|vector core exception|aic error", ci=True):
-        return "ascendc_launch_failed"
-    if _grep(r"timed?[[:space:]]*out|timeout|超时|kernel hang|vector core timeout", ci=True):
-        return "ascendc_run_timeout"
-    return "ascendc_run_crashed"
+@pytest.mark.parametrize("signal", [
+    "Segmentation fault (core dumped)",
+    "/bin/sh: helper.sh: No such file or directory",
+    "error: invalid argument",
+])
+def test_cannbot_a_signals_precede_numeric_diff(tmp_path, signal):
+    log = LOG_PRECISION + signal + "\n"
+    assert _decide(log, tmp_path) == "ascendc_run_crashed"
+    import ast
+    source = PIPELINE.read_text().split("python3 - <<'PY'", 1)[1].split("\nPY", 1)[0]
+    node = next(n for n in ast.parse(source).body if isinstance(n, ast.FunctionDef) and n.name == "classify")
+    namespace = {"re": re}
+    exec(compile(ast.Module(body=[node], type_ignores=[]), "classify", "exec"), namespace)
+    assert namespace["classify"](log) == "ascendc_run_crashed"
+
+
+def test_matched_case_does_not_override_numeric_failure(tmp_path):
+    assert _decide("case[1]: output[1]: matched\n" + LOG_PRECISION, tmp_path) == "correctness_failed"
 
 
 def test_precision_failure_not_labeled_compile(tmp_path):

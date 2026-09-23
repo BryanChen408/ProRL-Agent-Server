@@ -117,6 +117,9 @@ def classify(t):
     if "对拍" in t or "mare" in l or "mere" in l or "correctness" in l or "result: fail" in l:
         # 有结论再分「数值差异」和「输出契约/前置检查不通过」。后者虽然已经跑到
         # comparator,但不满足 D 类的 shape/可比较前提,粗分类仍是 A 类。
+        # CANNBot hook _classify_result: 明确 A 类错误优先于数值差异；保留本地既有失败类型。
+        if re.search(r"\berror:\s|\bfatal error:\s|undefined reference|segmentation fault|core dumped|cannot find -l|no such file or directory|cmake error|make\[\d+\]: \*\*\*", l):
+            return "ascendc_run_crashed"
         if re.search(r"case\[\d+\]:", l):
             if re.search(r"(max_abs_diff|mere|matched_ratio)\s*=", l):
                 return "correctness_failed"
@@ -863,7 +866,10 @@ VER="$SK/$TRANS_SKILL/scripts/verification_ascendc.py"
 if ! VER_OUT=$(cd "$WORK" && export WORKDIR="$WORK" PYTHONPATH="$SK/$TRANS_SKILL/scripts:${PYTHONPATH:-}" \
       && run_npu_phase verify "$PY_BIN" "$VER" "$OP_DIR_NAME" --json-file "$OUT_DIR/verify_report.json" 2>&1); then
   printf "%s\n" "$VER_OUT" > "$OUT_DIR/verify.log"
-  if grep -qE "case\[[0-9]+\]:" "$OUT_DIR/verify.log"; then
+  # CANNBot hook 的 A 类关键词优先于 D 类数值差异。
+  if grep -qEi "\berror:[[:space:]]|\bfatal error:[[:space:]]|undefined reference|Segmentation fault|core dumped|cannot find -l|No such file or directory|CMake Error|make\[[0-9]+\]: \*\*\*" "$OUT_DIR/verify.log"; then
+    _VER_TYPE="ascendc_run_crashed"
+  elif grep -qE "case\[[0-9]+\]:" "$OUT_DIR/verify.log"; then
     if grep -qEi "(max_abs_diff|mere|matched_ratio)[[:space:]]*=" "$OUT_DIR/verify.log"; then
       _VER_TYPE="correctness_failed"
     else
