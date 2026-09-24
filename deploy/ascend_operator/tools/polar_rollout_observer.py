@@ -2322,10 +2322,13 @@ HTML_PAGE = r"""<!doctype html>
     function renderHeader() {
       const h = state.gateway_health || state.health || {};
       const ok = h.status === 'ok';
-      $('health').className = `badge ${ok ? 'green':'red'}`;
+      const upstream = h.inference || {};
+      const upstreamFailed = Boolean(upstream.error) || ['error', 'unhealthy', 'degraded'].includes(upstream.status);
+      $('health').className = `badge ${ok && !upstreamFailed ? 'green':'red'}`;
       const counts = h.active_status_counts || {};
       const abortN = (state.sessions || []).reduce((n, s) => n + (s.abort_traces || 0), 0);
       $('health').textContent = ok ? `gateway ok · running ${counts.RUNNING || 0} · abort ${abortN}` : `gateway check failed: ${h.error || h.status || 'unknown status'}`;
+      if (ok && upstreamFailed) $('health').textContent = `gateway ok · upstream check failed: ${upstream.error || upstream.status}`;
       $('root').textContent = state.root;
       $('updated').textContent = `updated ${new Date().toLocaleTimeString()}`;
     }

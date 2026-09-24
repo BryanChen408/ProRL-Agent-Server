@@ -68,6 +68,7 @@ class InferenceClient:
     """
 
     _DEFAULT_LIVENESS_TIMEOUT_SECONDS = 900.0
+    _HEALTH_TIMEOUT_SECONDS = 2.0
     _LIVENESS_TIMEOUT_ENV = "POLAR_INFERENCE_REQUEST_TIMEOUT_SECONDS"
 
     def __init__(
@@ -311,10 +312,14 @@ class InferenceClient:
         return resp.json()
 
     async def health(self) -> dict[str, Any]:
-        """Passthrough GET /health."""
+        """Bound the upstream probe below the observer's 5-second deadline."""
         client = await self._get_client()
         try:
-            resp = await client.get("/health")
+            resp = await asyncio.wait_for(
+                client.get("/health"), timeout=self._HEALTH_TIMEOUT_SECONDS
+            )
+        except asyncio.TimeoutError as exc:
+            raise UpstreamTimeoutError("Upstream health probe timed out") from exc
         except httpx.RequestError as exc:
             raise self._translate_transport_error(exc) from exc
         await self._raise_for_status(resp)

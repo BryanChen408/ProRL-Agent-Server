@@ -5,7 +5,34 @@ import asyncio
 import pytest
 
 from polar.gateway.engine import SGLangEngine
-from polar.gateway.proxy import InferenceClient
+from polar.gateway.proxy import InferenceClient, UpstreamTimeoutError
+
+
+def test_health_probe_timeout_cancels_only_probe() -> None:
+    async def run() -> None:
+        cancelled = asyncio.Event()
+
+        class BlockingHTTPClient:
+            is_closed = False
+
+            async def get(self, path):
+                assert path == "/health"
+                try:
+                    await asyncio.Event().wait()
+                finally:
+                    cancelled.set()
+
+        client = InferenceClient(
+            "http://127.0.0.1:30000", SGLangEngine(), liveness_timeout_seconds=900
+        )
+        client._client = BlockingHTTPClient()
+        client._HEALTH_TIMEOUT_SECONDS = 0.01
+        with pytest.raises(UpstreamTimeoutError, match="health probe timed out"):
+            await asyncio.wait_for(client.health(), timeout=1)
+        assert cancelled.is_set()
+        assert client.generation_status()["request_timeout_seconds"] == 900
+
+    asyncio.run(run())
 
 
 def test_inference_client_uses_default_liveness_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
