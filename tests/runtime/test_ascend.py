@@ -6,8 +6,11 @@ Standalone: `python tests/runtime/test_ascend.py`  | or via pytest.
 from __future__ import annotations
 
 import os
+import subprocess
 import sys
 import tempfile
+from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 
 _SRC = os.path.join(os.path.dirname(__file__), "..", "..", "src")
 if os.path.isdir(_SRC) and _SRC not in sys.path:
@@ -100,6 +103,42 @@ def test_mount_recipe_does_not_require_or_inject_device_id():
     env = dict(p.split("=", 1) for p in _vals(args, "-e"))
     assert env == {"CUSTOM_FLAG": "1"}
     assert "ASCEND_RT_VISIBLE_DEVICES" not in env
+
+
+def test_npu_smi_info_cache_mount_and_reuse():
+    vols = _vals(ascend_mount_create_args({"cache_npu_smi_info": True}), "-v")
+    assert "/usr/local/bin/npu-smi:/usr/local/bin/npu-smi.real:ro" in vols
+    assert any(v.endswith(":/usr/local/bin/npu-smi:ro") for v in vols)
+    assert any(v.endswith(":/usr/local/sbin/npu-smi:ro") for v in vols)
+    assert "/usr/local/bin/npu-smi:/usr/local/bin/npu-smi:ro" not in vols
+
+    wrapper = Path(_SRC) / "polar/runtime/npu_smi_cached.py"
+    with tempfile.TemporaryDirectory() as d:
+        real = Path(d) / "real.py"
+        real.write_text(
+            "#!/usr/bin/env python3\n"
+            "import pathlib, sys\n"
+            "import time; time.sleep(0.1)\n"
+            f"p = pathlib.Path({str(Path(d) / 'calls')!r})\n"
+            "p.write_text((p.read_text() if p.exists() else '') + 'x')\n"
+            "print('Ascend 910B1' if sys.argv[1:] == ['info'] else 'other')\n"
+        )
+        real.chmod(0o755)
+        env = {**os.environ, "POLAR_NPU_SMI_REAL": str(real), "POLAR_NPU_SMI_CACHE_DIR": d}
+        for _ in range(2):
+            result = subprocess.run([sys.executable, str(wrapper), "info"], env=env, capture_output=True, text=True)
+            assert result.returncode == 0
+            assert result.stdout == "Ascend 910B1\n"
+        assert (Path(d) / "calls").read_text() == "x"
+        (Path(d) / "npu-smi-info.out").unlink()
+        (Path(d) / "calls").unlink()
+        with ThreadPoolExecutor(max_workers=6) as pool:
+            results = list(pool.map(
+                lambda _: subprocess.run([sys.executable, str(wrapper), "info"], env=env, capture_output=True),
+                range(6),
+            ))
+        assert all(r.returncode == 0 and r.stdout == b"Ascend 910B1\n" for r in results)
+        assert (Path(d) / "calls").read_text() == "x"
 
 
 def test_no_per_card_device_remap():

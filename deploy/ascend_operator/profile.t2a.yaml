@@ -74,6 +74,7 @@ operator:
   timeout_seconds: 21600.0
   runtime:
     image: ascendc-tilelang:v1                          # ← delta 2
+    cache_npu_smi_info: true
     network: host
     workdir: /opt/workspace/agent_workdir
     env:

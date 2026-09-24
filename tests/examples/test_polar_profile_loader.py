@@ -57,6 +57,10 @@ def test_real_profiles_separate_attempt_credit_from_call_limits(tmp_path, name):
         assert "max_turns" not in op["agent"]["settings"]
         assert "--max-turns" not in command
     else:
+        assert op["runtime"]["kwargs"]["ascend"]["cache_npu_smi_info"] is True
+        assert op["evaluator"]["runtime"]["kwargs"]["ascend"]["cache_npu_smi_info"] is True
+        assert "Skill" in op["agent"]["settings"]["allowed_tools"].split()
+        assert "Skill" not in op["agent"]["settings"]["disallowed_tools"].split()
         assert profile["operator"]["agent"]["thinking_token_budget"] is None
         assert "POLAR_THINKING_TOKEN_BUDGET" not in env
         assert op["agent"]["settings"]["operator_completion_guard"] == {

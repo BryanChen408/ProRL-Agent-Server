@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import fcntl
 import os
+from pathlib import Path
 from typing import Any
 
 # Ascend driver/runtime mounts (host paths == the user's openhands worker). With -v /dev:/dev these
@@ -95,6 +96,16 @@ def ascend_mount_create_args(cfg: dict) -> list[str]:
     if cfg.get("shm_size", "500g"):
         args += ["--shm-size", str(cfg.get("shm_size", "500g"))]
     mounts = [str(mount) for mount in _DRIVER_MOUNTS]
+    if cfg.get("cache_npu_smi_info"):
+        mounts.remove("/usr/local/bin/npu-smi:/usr/local/bin/npu-smi:ro")
+        wrapper = Path(__file__).with_name("npu_smi_cached.py")
+        mounts.extend(
+            (
+                "/usr/local/bin/npu-smi:/usr/local/bin/npu-smi.real:ro",
+                f"{wrapper}:/usr/local/bin/npu-smi:ro",
+                f"{wrapper}:/usr/local/sbin/npu-smi:ro",
+            )
+        )
     lock_mount = _lock_dir_mount(cfg, mounts + [str(mount) for mount in cfg.get("mounts", []) or []])
     if lock_mount is not None:
         mounts.append(lock_mount)

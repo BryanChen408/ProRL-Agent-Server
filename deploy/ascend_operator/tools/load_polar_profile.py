@@ -301,7 +301,8 @@ def main() -> int:
         "network": str(runtime.get("network", "host")),
         "workdir": workdir,
         "env": runtime_env,
-        "kwargs": {"ascend": {"pool": npu_pool, "lock_dir": npu_lock_dir, "lease_at_start": False}, "volumes": volumes},
+        "kwargs": {"ascend": {"pool": npu_pool, "lock_dir": npu_lock_dir, "lease_at_start": False,
+                              "cache_npu_smi_info": bool(runtime.get("cache_npu_smi_info", False))}, "volumes": volumes},
         "prepare": prepare,
         "eval_prepare": eval_prepare,
     }
