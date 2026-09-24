@@ -72,8 +72,8 @@ argument-hint: >
 本 skill 提供以下参考资料：
 - `.claude/workflows/cannbot-reference-index.md` — 首次设计先读；按实际计算结构选择 cannbot 原版设计/代码模板，及 archive 的真实 host/kernel 路径。没有 SKILL.md 的旧资料目录直接 Read references/templates，不调用旧工作流。
 - `.claude/workflows/templates/design-template.md` — cannbot 原有设计模板，按下方「内嵌设计与审查」读取相关章节，不要求填写整份文档
-- `.claude/skills/ascendc-tiling-design/SKILL.md` — cannbot 原有 tiling 场景索引与设计要素
-- `.claude/skills/ascendc-api-best-practices/SKILL.md` — cannbot 原有 API 场景索引；按本题操作读取相关 references，不另造 API 对照表
+- 调用 Skill `ascendc-tiling-design`（入口 `.claude/skills/ascendc-tiling-design/SKILL.md`）— cannbot 原有 tiling 场景索引与设计要素
+- 调用 Skill `ascendc-api-best-practices`（入口 `.claude/skills/ascendc-api-best-practices/SKILL.md`）— cannbot 原有 API 场景索引；按本题操作读取相关 references，不另造 API 对照表
 - `.claude/skills/tilelang2ascend-translator/references/dsl2Ascendc.md` — TileLang 转 AscendC 指南
 - `.claude/skills/tilelang2ascend-translator/references/TileLang-AscendC-API-Mapping.md` — TileLang 与 AscendC API 映射表
 - `.claude/skills/tilelang2ascend-translator/references/AscendCVerification.md` — AscendC 验证指南
@@ -466,7 +466,7 @@ class ModelNew(nn.Module):
 | **运行时 vector core exception / UB 违例 / all-zero output** | ① 🛑 **优先执行步骤 0-C** 完成 sync checklist<br>② 查找 `$ASC_DEVKIT_DIR/docs/zh/api/TBuf*.md` 检查 buffer 大小<br>③ `.claude/workflows/templates/archive_tasks/rms_norm/` 对比 EXEC_KERNEL_CMD 传参模式<br>④ 检查是否有 struct 指针被传给 `EXEC_KERNEL_CMD`（常见根因） |
 | **运行时 hang/死锁 / 跨核数据不流通** | 🛑 **必须先执行步骤 0-C**（含读取 ascendc-sync-guide.md 全文 + 6 项 checkpoint），再逐项排查 |
 | **运行时 vector core timeout (507034)** | 🛑 这是硬件级别的 core 挂起错误。按顺序排查:<br>① **work buffer 尺寸**: 检查所有 API 的 work buffer (ReduceSum/Cos/Sin/Broadcast) 是否通过 GetXxxMaxMinTmpSize 正确计算 — 硬编码不足是最常见根因<br>② **Buffer 总溢出**: 计算所有 InitBuffer 分配的总 UB 字节数，确认不超过 GetCoreMemSize(UB)<br>③ **PipeBarrier 配对**: 每个 GM→UB (MTE2) 后必须有 PIPE_MTE2 barrier; 每个 V 计算块结束后必须有 PIPE_V barrier; 每个 UB→GM (MTE3) 前必须有 PIPE_V barrier<br>④ **循环边界**: 检查所有循环的边界类型一致性 (int32_t vs int64_t)，确认不会因类型不匹配导致死循环<br>⑤ **隔离法**: 将 kernel 逐步简化为 identity copy，每次恢复一个操作，定位触发 timeout 的具体 API<br>⑥ **参考历史**: 查阅 `.claude/workflows/templates/archive_tasks/` 中相似规模的融合算子，对比 work buffer 计算方式 |
-| **精度不匹配 (MERE/MARE 超标)** | 直接 Read `.claude/skills/ascendc-precision-debug/SKILL.md`（见步骤 4） |
+| **精度不匹配 (MERE/MARE 超标)** | 调用 Skill `ascendc-precision-debug`（见步骤 4） |
 
 **⚠️ 在查阅完成并在思考中列出根因分析之前，禁止 Edit/Write 任何 kernel 代码。**
 
@@ -481,11 +481,10 @@ class ModelNew(nn.Module):
 
 ### 步骤 4: 精度知识文件深度诊断（固定入口分类为 D 类时）
 
-只按固定入口的 D 类 `next_step` 直接读取精度知识文件：
+只按固定入口的 D 类 `next_step` 调用相应精度 Skill：
 
 ```
-4.1 🛑 Read `.claude/skills/ops-precision-standard/SKILL.md`，再 Read
-    `.claude/skills/ascendc-precision-debug/SKILL.md`；结合 output_dir + 错误输出执行诊断
+4.1 🛑 调用 Skill `ops-precision-standard`，再 调用 Skill `ascendc-precision-debug`；结合 output_dir + 错误输出执行诊断
     等待返回诊断结论和修复建议。此步骤不可跳过。
 
 4.2 根据建议修改 kernel/ 代码，运行 CLAUDE.md 规定的固定入口
@@ -493,7 +492,7 @@ class ModelNew(nn.Module):
 4.3 如果仍 FAIL 且 `next_step` 仍要求 precision-debug、预算尚有剩余 → 回到 4.1
 
 4.4 如果 `next_step` 要求 precision-tuning →
-    🛑 Read `.claude/skills/tilelang2ascend-precision-tuning/SKILL.md`，结合 output_dir + 错误输出执行深度审计
+    🛑 调用 Skill `tilelang2ascend-precision-tuning`，结合 output_dir + 错误输出执行深度审计
     等待返回取证→审计→修复分析。此步骤不可跳过。
 
 4.5 根据建议修改 kernel/ 代码，运行 CLAUDE.md 规定的固定入口

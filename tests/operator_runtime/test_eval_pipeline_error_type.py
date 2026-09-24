@@ -227,28 +227,32 @@ def _run_fail_hint(tmp_path, error_type, log_text="", *, success=False):
 
 
 @pytest.mark.parametrize("error_type,log_text,topic,reference", [
-    ("ascendc_compile_failed", "", "编译/链接", "ascendc-docs-search/SKILL.md"),
-    ("ast_check_failed", "", "AST退化", "tilelang2ascend-translator/SKILL.md"),
-    ("op_not_registered", LOG_LOAD, "加载失败", "tilelang2ascend-translator/SKILL.md"),
+    ("ascendc_compile_failed", "", "编译/链接", "调用 Skill ascendc-docs-search"),
+    ("ast_check_failed", "", "AST退化", "调用 Skill tilelang2ascend-translator"),
+    ("op_not_registered", LOG_LOAD, "加载失败", "调用 Skill tilelang2ascend-translator"),
     ("ascendc_load_failed", LOG_LOAD, "加载失败", "ascendc-runtime-debug/references/kernel_binary_debug.md"),
     ("ascendc_run_crashed", LOG_CRASH, "崩溃", "ascendc-crash-debug/references/crash_workflow.md"),
     ("ascendc_run_timeout", LOG_TIMEOUT, "超时", "ascendc-crash-debug/references/crash_workflow.md"),
     ("ascendc_launch_failed", LOG_LAUNCH, "启动失败", "ascendc-runtime-debug/references/error_codes.md"),
-    ("output_precheck_failed", LOG_SHAPE_MISMATCH, "输出契约", "tilelang2ascend-translator/SKILL.md"),
-    ("output_precheck_failed", LOG_NAN_MISMATCH, "输出契约", "ascendc-precision-debug/SKILL.md"),
-    ("correctness_failed", LOG_PRECISION, "D类-精度不匹配", "tilelang2ascend-precision-tuning/SKILL.md"),
+    ("output_precheck_failed", LOG_SHAPE_MISMATCH, "输出契约", "调用 Skill tilelang2ascend-translator"),
+    ("output_precheck_failed", LOG_NAN_MISMATCH, "输出契约", "调用 Skill ascendc-precision-debug"),
+    ("correctness_failed", LOG_PRECISION, "D类-精度不匹配", "调用 Skill tilelang2ascend-precision-tuning"),
     ("correctness_failed", LOG_CRASH, "A类-kernel崩溃", "ascendc-crash-debug/references/crash_workflow.md"),
-    ("stateful_impl_detected", "", "状态化", "tilelang2ascend-translator/SKILL.md"),
-    ("benchmark_failed", "", "benchmark执行失败", "ops-profiling/SKILL.md"),
+    ("stateful_impl_detected", "", "状态化", "调用 Skill tilelang2ascend-translator"),
+    ("benchmark_failed", "", "benchmark执行失败", "调用 Skill ops-profiling"),
 ])
 def test_fail_hint_links_existing_references_from_any_cwd(
     tmp_path, error_type, log_text, topic, reference,
 ):
     output, work_root = _run_fail_hint(tmp_path, error_type, log_text)
     assert topic in output
-    assert f"{work_root}/.claude/skills/{reference}" in output
+    expected = reference if reference.startswith("调用 Skill ") else f"{work_root}/.claude/skills/{reference}"
+    assert expected in output
     paths = re.findall(re.escape(str(work_root)) + r"/\.claude/skills/([\w./-]+\.md)", output)
-    assert paths
+    skills = re.findall(r"调用 Skill ([\w-]+)", output)
+    assert paths or skills
+    for name in skills:
+        assert (PIPELINE.parent.parent / "skills" / name / "SKILL.md").is_file(), name
     for path in paths:
         assert (PIPELINE.parent.parent / "skills" / path).is_file(), path
     assert "Read .claude/" not in output
@@ -288,6 +292,7 @@ def test_reference_paths_survive_real_session_prepare(tmp_path):
     )
     source = PIPELINE.read_text().split("<<'CLASSIFY'", 1)[1].split("\nCLASSIFY", 1)[0]
     paths = set(re.findall(r"\.claude/skills/([\w./-]+\.md)", source))
+    paths.update(f"{name}/SKILL.md" for name in re.findall(r"调用 Skill ([\w-]+)", source))
     for path in paths:
         installed = work_root / ".claude/skills" / path
         assert installed.read_bytes() == (runtime / "skills" / path).read_bytes()

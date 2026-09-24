@@ -54,8 +54,8 @@ GUIDE 中的 `references/xxx.md` 相对 `.claude/skills/ascendc-code-gen/`，裸
 历史 `ascendc-operator-project-init` 中的工程文件，当前对应
 [kernel_skeleton 的 CMakeLists.txt](templates/kernel_skeleton/kernel/CMakeLists.txt) 和本题预生成的 `kernel/`；helper 原件在
 [torch_kernel_helper.h](templates/kernel_skeleton/kernel/utils/torch_kernel_helper.h)。
-查旧 `ascendc-performance-analyzer/script/performance.py` 的目的是理解测速时，应读当前
-[ops-profiling](../skills/ops-profiling/SKILL.md)；需要解释 profiling 字段时读
+查旧 `ascendc-performance-analyzer/script/performance.py` 的目的是理解测速时，应调用 Skill
+`ops-profiling`；需要解释 profiling 字段时读
 [字段说明](../skills/ops-profiling/references/csv_fields_reference.md)，不以阅读测速脚本作为优化前置；
 不寻找旧脚本来另起测速，不复用旧 PASS 或历史耗时作为当前判分。
 
@@ -105,7 +105,7 @@ PY
 
 1. Read 失败后，Glob 文件所在目录；目录本身不存在就退到上述 skills/archive 根目录检索。
 2. 按返回的真实文件名 Read；Gather 等多变体先读 host，不能任选一个变体代替不存在的名字。
-3. API/示例缺失时按 [docs-search](../skills/ascendc-docs-search/SKILL.md) 检索 devkit；
+3. API/示例缺失时调用 Skill `ascendc-docs-search`，按其指引检索 devkit；
    需要底层定义或官方 OPP 实现时，再用上方实际工具链入口。
 4. 评测报错先读 `judge_out/metrics_error.log`，核对实际评测的顶层 `{op_name}/` 与修改路径，
    再按分类检查本题实现、skill 和官方资料；不要把 `output/{op_name}/` 当作被评测工程。

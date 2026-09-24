@@ -18,7 +18,7 @@ description: 基于固定评测入口产出的真实逐 case 性能证据，定�
 
 ## 调用条件
 
-固定入口返回 `correctness_ok=true`，但 `perf_data.speedup_vs_torch < next_step.perf_target_speedup`（默认 `1.1`），且 `next_step.optimization_remaining > 0` 时必须直接 Read 本文件并按下述步骤执行。
+固定入口返回 `correctness_ok=true`，但 `perf_data.speedup_vs_torch < next_step.perf_target_speedup`（默认 `1.1`），且 `next_step.optimization_remaining > 0` 时调用 Skill `ops-profiling` 并按下述步骤执行。
 
 调用时至少提供或读取：
 

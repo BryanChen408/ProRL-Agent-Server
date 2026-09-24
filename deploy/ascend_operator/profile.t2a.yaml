@@ -102,9 +102,9 @@ operator:
       BASH_MAX_TIMEOUT_MS: "2700000"
     model_name: claude-opus-4-5
     # ← delta 14:generation 8 次与 optimization 4 次独立计数，每次都可能需要
-    #   「读日志→Read 对应 SKILL.md→改代码→重跑」；
+    #   「读日志→调用对应 Skill→改代码→重跑」；
     #   加 Phase 0-3 探索和长算子实现，保留 200 轮会话上限。
-    max_turns: 200
+    max_turns: 350
     # ← delta 8:规则 —— 只保留本项目(canonical/skills)提供的 skill,CLI 自带的一律关掉
     #   (每个 session 白占 4,327 字符 prompt,还可能被误调白烧 turn)。
     #   prepare 按 canonical/skills 的实际内容取补集,写 .claude/settings.json 的
@@ -122,15 +122,16 @@ operator:
     # 由 loader 导出到 gateway；推理引擎需加载 Polar thinking-budget 插件。
     thinking_token_budget: null
     inference_timeout_ms: 14400000
-    # t2a 只把 skill 当本地知识文件使用，禁止 Skill 工具自动加载/反复调用；其他 profile 不变。
-    allowed_tools: "Bash Read Edit Write Grep Glob"
-    disallowed_tools: "Skill AskUserQuestion CronCreate CronDelete CronList EnterPlanMode EnterWorktree ExitPlanMode ExitWorktree NotebookEdit ScheduleWakeup TaskCreate TaskGet TaskList TaskOutput TaskStop TaskUpdate TodoWrite WebFetch WebSearch Workflow Agent"
+    # t2a 恢复按名调用项目 Skill；references、reference 和日志仍用 Read。
+    allowed_tools: "Bash Read Edit Write Grep Glob Skill"
+    disallowed_tools: "AskUserQuestion CronCreate CronDelete CronList EnterPlanMode EnterWorktree ExitPlanMode ExitWorktree NotebookEdit ScheduleWakeup TaskCreate TaskGet TaskList TaskOutput TaskStop TaskUpdate TodoWrite WebFetch WebSearch Workflow Agent"
     append_system_prompt: >-
       Follow ./CLAUDE.md. The user instruction provides the concrete operator name; reference is at
       input/{op_name}.py. 产出 {op_name}/ 工程并打成单个 tarball 到
       output/submission/{op_name}_impl.tar.gz。Do not ask user questions in this non-interactive run.
-      Skill 工具在本 profile 中禁用；需要知识时直接 Read
-      .claude/skills/<skill-name>/SKILL.md 及其明确引用的 references，禁止尝试调用 Skill。
+      需要技能时按名调用 Skill，传入当前 output_dir 和必要错误上下文；
+      references、reference、API 文档与日志继续用 Read。编译、验证、测速仍只走固定 Pipeline，
+      Skill 调用不改变 attempt 计数、预算、next_step 或 task_complete。
       完成判定(硬规则):固定入口的 operator_valid=true 只表示正确性通过，不表示任务完成；
       是否允许结束只认 task_complete。task_complete=false 时 Stop hook 会阻止结束，必须按
       next_step 优化 kernel 并重跑固定入口；task_complete=true（达到目标或 optimization 预算耗尽）

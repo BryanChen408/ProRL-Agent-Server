@@ -155,7 +155,7 @@ def test_failure_feedback_paths_do_not_follow_shell_cwd(tmp_path):
         "PATH": "/usr/bin:/bin:/usr/local/bin", "WORK_ROOT": str(root),
         "SRC_DIR": str(root / "op_x"), "OUT_DIR": str(out_dir),
     }, nested)
-    assert f"Read {root}/.claude/skills/tilelang2ascend-translator/SKILL.md" in out
+    assert "调用 Skill tilelang2ascend-translator" in out
     assert f"完整错误在 {out_dir}/metrics_error.log" in out
     assert f"只改 {root}/op_x 下实现" in out
 
@@ -195,7 +195,8 @@ def test_prompt_says_not_met_below_target(tmp_path):
     assert "未达标" in out and "不要结束任务" in out
     assert "0.859x" in out and "1.1x" in out
     assert "剩 4 次" in out
-    assert "Read /opt/workspace/agent_workdir/.claude/skills/ops-profiling/SKILL.md" in out
+    assert "调用 Skill ops-profiling" in out
+    assert "ops-profiling/SKILL.md" not in out
 
 
 def test_prompt_stops_optimization_above_target(tmp_path):
@@ -255,7 +256,8 @@ def test_prompt_is_also_written_into_metrics_json(tmp_path):
     assert ns["phase_next"] == "optimization"
     assert ns["optimization_remaining"] == 4
     assert "不要结束任务" in ns["action"]
-    assert "Read /opt/workspace/agent_workdir/.claude/skills/ops-profiling/SKILL.md" in ns["action"]
+    assert "调用 Skill ops-profiling" in ns["action"]
+    assert "ops-profiling/SKILL.md" not in ns["action"]
     # 原有键一个都不能动:judge 侧的 reward 只认这几个
     for k in ("success", "error_type", "perf_data", "ast_check_ok", "correctness_ok"):
         assert d[k] == _METRICS[k]
@@ -335,14 +337,17 @@ def test_success_output_no_longer_aliases_operator_valid_to_task_completion():
     assert "operator_valid=true task_complete=false" in script
 
 
-def test_only_t2a_profile_disables_skill_tool():
-    """直接 Read 是 polar t2a 的局部策略，不能改变其他 profile 的工具能力。"""
+def test_t2a_profile_allows_skill_without_enabling_agent():
+    """恢复 Skill 入口，保持子 Agent 禁用；其他 profile 不受影响。"""
     t2a = (ROOT / "deploy" / "ascend_operator" / "profile.t2a.yaml").read_text(
         encoding="utf-8"
     )
-    assert 'allowed_tools: "Bash Read Edit Write Grep Glob"' in t2a
-    assert 'allowed_tools: "Bash Read Edit Write Grep Glob Skill"' not in t2a
-    assert 'disallowed_tools: "Skill ' in t2a
+    import yaml
+    agent = yaml.safe_load(t2a)["operator"]["agent"]
+    assert "Skill" in agent["allowed_tools"].split()
+    assert "Skill" not in agent["disallowed_tools"].split()
+    assert "Agent" in agent["disallowed_tools"].split()
+    assert "禁止尝试调用 Skill" not in agent["append_system_prompt"]
     for name in ("profile.yaml", "profile.ascendc.yaml", "profile.legacy.yaml"):
         other = (ROOT / "deploy" / "ascend_operator" / name).read_text(encoding="utf-8")
         assert 'allowed_tools: "Bash Read Edit Write Grep Glob"' not in other

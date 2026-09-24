@@ -2,12 +2,15 @@
 
 以上内容与本节冲突时,一律以本节为准。
 
-## Skill 只作为本地知识文件
+## 按名调用 Skill
 
-本 profile 禁用了 `Skill` 工具。任何“调用某个 skill”的上游表述，一律解释为先用 `Read`
-打开 `.claude/skills/<skill-name>/SKILL.md`，再按其中明确引用的相对路径读取必要的
-`references/` 文件。不要尝试调用 Skill，也不要等待 Skill 返回内容；读完后由当前会话直接
-检查和修改工程。路径不确定时先列出 `.claude/skills/`，不要猜路径。
+需要进入技能流程时使用 `Skill` 工具，按已安装的技能名调用；不要用 Read SKILL.md
+代替技能调用。例如 `Skill(skill="tilelang2ascend-translator", args="output_dir={op_name}/")`。
+修复时在 args 中补充本轮错误与证据路径。技能的 references、模板、reference、API 文档
+和日志继续按需 Read。技能正文已加载且上下文仍完整时，不为凑轮次重复调用。
+路径或名称不确定时先列出 `.claude/skills/`；只有含 `SKILL.md` 的目录才是可调用技能。
+本次仅恢复技能入口，现有骨架、固定 Pipeline、attempt、预算和完成门禁不变。
+技能要求编译、验证或测速时，统一执行下文固定入口，不另起评测或自行维护计数器。
 
 首次设计或找参考实现时，先 Read `.claude/workflows/cannbot-reference-index.md`。
 它列出 cannbot 原版设计资料、host/kernel 模板及 archive 的真实文件名；只读本题相关条目，
@@ -150,15 +153,15 @@ Stop feedback 要求继续时，下一轮执行一个新的诊断或实质修改
 
 固定入口输出末尾的 `错误分类:` 行是分类的权威来源:
 
-| 分类 | 处理（全部直接 Read，不调用 Skill） |
+| 分类 | 处理（按名调用 Skill；references 用 Read） |
 |---|---|
 | `通过` | 仅表示 `operator_valid=true`；严格按 `task_complete/next_step` 进入优化或结束 |
-| `A类-提交物/AST/编译` | 读 `metrics_error.log` 与 `tilelang2ascend-translator/SKILL.md`；API 不明再读 `ascendc-docs-search/SKILL.md` |
-| `A类-注册/加载` | 读 `ascendc-runtime-debug/SKILL.md` 和 `references/kernel_binary_debug.md` |
-| `A类-崩溃/超时/启动失败` | 读 `ascendc-crash-debug/SKILL.md`；ACL 错误码再读 runtime-debug 的 `error_codes.md` |
-| `A类-输出契约/状态化退化` | 严格按固定入口给出的 translator/precision-debug 文件路径修，不得冒充 D 类 |
-| `D类-精度不匹配` | 仅当正常运行、输出契约正确且存在数值差异字段时进入；先读 precision-standard，再读 precision-debug |
-| `A类-benchmark执行失败` | 读 `ops-profiling/SKILL.md`；若是 kernel/ACL 崩溃改走运行期路线 |
+| `A类-提交物/AST/编译` | Read `metrics_error.log`，调用 Skill `tilelang2ascend-translator`；API 不明再调用 Skill `ascendc-docs-search` |
+| `A类-注册/加载` | 调用 Skill `ascendc-runtime-debug`，再 Read 其 `references/kernel_binary_debug.md` |
+| `A类-崩溃/超时/启动失败` | 调用 Skill `ascendc-crash-debug`；ACL 错误码再读 runtime-debug 的 `error_codes.md` |
+| `A类-输出契约/状态化退化` | 严格按固定入口指引调用 Skill `tilelang2ascend-translator` 或 `ascendc-precision-debug` 修复，不得冒充 D 类 |
+| `D类-精度不匹配` | 仅当正常运行、输出契约正确且存在数值差异字段时进入；先调用 Skill `ops-precision-standard`，再调用 Skill `ascendc-precision-debug` |
+| `A类-benchmark执行失败` | 调用 Skill `ops-profiling`；若是 kernel/ACL 崩溃改走运行期路线 |
 | `B类-INFRA` | **不要改 kernel、不要读取修复文档**,直接停止并说明 |
 
 [A1] 照做:asc-devkit 就在 `$ASC_DEVKIT_DIR`。完整错误在 `judge_out/metrics_error.log`,先读它。
@@ -183,8 +186,7 @@ Phase 6(全量恢复)因此已从工作流移除。不要自行精简、修改�
   加速比的几何平均值。
 - 加速比 **≥ 1.1x** PyTorch reference → 达标；低于 `1.1x` → 未达标。
 - `operator_valid=true` 只表示实现正确；只有 `task_complete=true` 才表示任务允许结束。
-  固定入口提示未达标且仍有 optimization 预算时，必须先 Read
-  `.claude/skills/ops-profiling/SKILL.md`，再读取真实逐 case 结果和当前 kernel，实施一项有证据的
+  固定入口提示未达标且仍有 optimization 预算时，必须先调用 Skill `ops-profiling`，再读取真实逐 case 结果和当前 kernel，实施一项有证据的
   通用性能改动。只有源码内容确实变化后才能重跑固定入口。
 - `task_complete=false` 时 Stop 完成门禁会拒绝总结；按 `next_step.action` 继续即可。
 - 达到 `1.1x` 后停止性能迭代；预算耗尽则停止调用工具，并使用固定入口保存的 `.best` 最佳

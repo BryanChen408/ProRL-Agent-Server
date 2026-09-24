@@ -256,33 +256,33 @@ crash_failure = not bool(re.search(r"case\[\d+\]:", _log_low))
 # 不增加 Skill 调用、编辑门禁或独立修复计数器。
 _SUBMISSION_ROUTE = (";下一步:检查工程顶层、model_new_ascendc.py、kernel/ 与 tarball 布局,"
                      "不需要读取调试 Skill")
-_AST_ROUTE = (";参考资料:Read .claude/skills/tilelang2ascend-translator/SKILL.md"
+_AST_ROUTE = (";参考资料:调用 Skill tilelang2ascend-translator"
               "（关键限制、接口接线与自定义算子调用；结合本轮退化检查详情）")
-_COMPILE_ROUTE = (";参考资料:Read .claude/skills/tilelang2ascend-translator/SKILL.md"
+_COMPILE_ROUTE = (";参考资料:调用 Skill tilelang2ascend-translator"
                   "（接口接线与编译验证）;"
-                  "API签名/参数/dtype不明时 Read .claude/skills/ascendc-docs-search/SKILL.md"
+                  "API签名/参数/dtype不明时 调用 Skill ascendc-docs-search"
                   "（按报错符号查 $ASC_DEVKIT_DIR 文档及同名API变体）")
-_LOAD_ROUTE = (";参考资料:Read .claude/skills/tilelang2ascend-translator/SKILL.md"
+_LOAD_ROUTE = (";参考资料:调用 Skill tilelang2ascend-translator"
                "（步骤2：接口接线与模型加载）;"
                "Read .claude/skills/ascendc-runtime-debug/references/kernel_binary_debug.md"
                "（实际加载路径、构建产物与二进制一致性）")
-_CRASH_ROUTE = (";参考资料:Read .claude/skills/ascendc-crash-debug/SKILL.md"
+_CRASH_ROUTE = (";参考资料:调用 Skill ascendc-crash-debug"
                 "（崩溃/超时/内存错误路由）和 "
                 ".claude/skills/ascendc-crash-debug/references/crash_workflow.md"
                 "（plog、同步/Buffer、越界与调试方法）;"
                 "ACL错误码参考 .claude/skills/ascendc-runtime-debug/references/error_codes.md")
-_OUTPUT_ROUTE = (";参考资料:shape/dtype/返回结构问题 Read "
-                 ".claude/skills/tilelang2ascend-translator/SKILL.md（关键限制与接口接线）;"
-                 "NaN/Inf/全零输出 Read .claude/skills/ascendc-precision-debug/SKILL.md"
+_OUTPUT_ROUTE = (";参考资料:shape/dtype/返回结构问题调用 Skill "
+                 "tilelang2ascend-translator（关键限制与接口接线）;"
+                 "NaN/Inf/全零输出 调用 Skill ascendc-precision-debug"
                  "（快速诊断与症状-原因速查）")
-_PRECISION_ROUTE = (";参考资料:Read .claude/skills/ops-precision-standard/SKILL.md"
+_PRECISION_ROUTE = (";参考资料:调用 Skill ops-precision-standard"
                     "（按计算类型/dtype选择精度标准）;"
-                    "Read .claude/skills/ascendc-precision-debug/SKILL.md（症状与根因诊断）;"
-                    "中间值定位参考 .claude/skills/tilelang2ascend-precision-tuning/SKILL.md"
+                    "调用 Skill ascendc-precision-debug（症状与根因诊断）;"
+                    "中间值定位调用 Skill tilelang2ascend-precision-tuning"
                     "（短版DumpTensor流程：最小抽样、输入→中间→输出，含Vector/Cube分支）")
-_STATEFUL_ROUTE = (";参考资料:Read .claude/skills/tilelang2ascend-translator/SKILL.md"
+_STATEFUL_ROUTE = (";参考资料:调用 Skill tilelang2ascend-translator"
                    "（关键限制与reference语义）；结合本轮缓存/常量输出检测详情")
-_BENCHMARK_ROUTE = (";参考资料:Read .claude/skills/ops-profiling/SKILL.md"
+_BENCHMARK_ROUTE = (";参考资料:调用 Skill ops-profiling"
                     "（perf.log与逐case性能证据）；本轮测速未完成，先区分失败原因与性能瓶颈;"
                     "若测速日志为kernel崩溃/超时，参考 "
                     ".claude/skills/ascendc-crash-debug/references/crash_workflow.md;"
@@ -322,8 +322,8 @@ else:
     label = "B类-INFRA-分类器未覆盖该error_type(停止并上报,不要猜测修复):" + et
 label = label.replace(".claude/", f"{sys.argv[3]}/.claude/")
 print(f"[ascendc-eval] 错误分类: {label}")
-if ".claude/skills/" in label:
-    print("[ascendc-eval] 资料读取:按本轮问题选读；已读内容可复用。直接 Read 上述绝对路径，"
+if ".claude/skills/" in label or "调用 Skill " in label:
+    print("[ascendc-eval] 资料读取:按名调用上述 Skill；已读内容可复用。references 用 Read 上述绝对路径，"
           "不要随当前目录改写路径；找不到时 Glob 对应目录确认文件名。"
           "参考资料中的执行方式以当前任务CLAUDE.md和固定评测入口为准。")
 if first_exc:
@@ -427,7 +427,7 @@ elif complete:
 else:
     action = (f"正确性已通过,但 speedup={os.environ.get('SP','')}x < 目标线 {target}x —— "
               f"未达标,不要结束任务。下一次调用本固定入口进入 optimization 阶段，还剩 {remain} 次预算。"
-              f" 先 Read {os.environ['WORK_ROOT']}/.claude/skills/ops-profiling/SKILL.md，再读取真实逐 case 结果并修改 kernel；"
+              " 先调用 Skill ops-profiling，再读取真实逐 case 结果并修改 kernel；"
               "源码变化后再重跑。"
               " .best.tar.gz 只在 speedup 更高时才替换。")
 d["operator_valid"] = bool(d.get("success") and d.get("correctness_ok"))
@@ -469,7 +469,7 @@ PY
     echo "[ascendc-eval] task status — operator_valid=true task_complete=false completion_reason=pending_optimization"
     echo "[ascendc-eval] 正确性已通过,但 speedup=${sp}x < 目标线 ${PERF_TARGET}x —— 未达标,不要结束任务。"
     echo "[ascendc-eval] 下一次调用本固定入口进入 optimization 阶段:预算 ${PIPELINE_OPT_MAX} 次,已用 ${PIPELINE_OPT_COUNT} 次,剩 ${remain} 次。"
-    echo "[ascendc-eval] 先 Read $WORK_ROOT/.claude/skills/ops-profiling/SKILL.md,再读取真实逐 case 结果并修改 kernel;源码变化后重跑本入口。"
+    echo "[ascendc-eval] 先调用 Skill ops-profiling,再读取真实逐 case 结果并修改 kernel;源码变化后重跑本入口。"
     echo "[ascendc-eval] .best.tar.gz 只在 speedup 更高时才替换 —— 优化失败不会覆盖已知最佳版本。"
   fi
 

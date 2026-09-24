@@ -31,6 +31,10 @@ def test_prompt_uses_pre_generated_skeleton_and_delegates_routing_to_claude_md()
     assert ".claude/skills/*/scripts/" in text
     assert ".claude/skills/ascendc-*/scripts/" not in text
     assert ".claude/skills/tilelang2ascend-*/scripts/" not in text
+    assert "through the Skill tool" in text
+    assert "Use Read for their references, templates, API documents and logs" in text
+    assert "Do not dispatch extra agents" in text
+    assert "Do not invoke Skill" not in text
 
 
 def test_prompt_does_not_embed_obsolete_or_foreign_skill_routes():
