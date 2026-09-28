@@ -429,7 +429,7 @@ else:
               f"未达标,不要结束任务。下一次调用本固定入口进入 optimization 阶段，还剩 {remain} 次预算。"
               " 先调用 Skill ops-profiling，再读取真实逐 case 结果并修改 kernel；"
               "源码变化后再重跑。"
-              " .best.tar.gz 只在 speedup 更高时才替换。")
+              " .best.tar.gz 只在当前 reward_scheme 的候选 reward 更高时才替换；同分保留先前版本。")
 d["operator_valid"] = bool(d.get("success") and d.get("correctness_ok"))
 d["task_complete"] = complete
 d["completion_reason"] = reason
@@ -470,7 +470,7 @@ PY
     echo "[ascendc-eval] 正确性已通过,但 speedup=${sp}x < 目标线 ${PERF_TARGET}x —— 未达标,不要结束任务。"
     echo "[ascendc-eval] 下一次调用本固定入口进入 optimization 阶段:预算 ${PIPELINE_OPT_MAX} 次,已用 ${PIPELINE_OPT_COUNT} 次,剩 ${remain} 次。"
     echo "[ascendc-eval] 先调用 Skill ops-profiling,再读取真实逐 case 结果并修改 kernel;源码变化后重跑本入口。"
-    echo "[ascendc-eval] .best.tar.gz 只在 speedup 更高时才替换 —— 优化失败不会覆盖已知最佳版本。"
+    echo "[ascendc-eval] .best.tar.gz 只在当前 reward_scheme 的候选 reward 更高时才替换；同分保留先前版本 —— 优化失败不会覆盖已知最佳版本。"
   fi
 
 }

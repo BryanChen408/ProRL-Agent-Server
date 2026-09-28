@@ -796,6 +796,7 @@ gateway 查询失败时不按本地文件放行，agent 退出后服务端还会
 或修改这个门禁。
 
 `judge_out/`、`output/.selfcheck/`、`.best` 及其元数据均由固定入口维护，只读。
+`.best` 按当前训练 `reward_scheme` 的候选结果 reward 选择；只有严格更高才替换，同分保留先前版本。
 禁止修改或删除 `task_state.json`、`metrics.json`、budget/hash 状态来结束任务或重置次数；
 也不要清空 `input/`、`output/`、整个 `judge_out/` 来“修编译缓存”。
 `success=true`、已有 `.best`、自认为无法再优化，都不能替代 `task_complete=true`。
@@ -872,7 +873,9 @@ Phase 6(全量恢复)因此已从工作流移除。不要自行精简、修改�
 ## 禁止
 
 - 自行设置 `ASCEND_RT_VISIBLE_DEVICES`。
-- 运行 `npu-smi` 或任何探测 NPU 的命令。`SOC_VERSION` 已在环境变量里。
+- 绕过宿主统一入口直接探测 NPU，或执行 `npu-smi set/reset/clear/upgrade` 等写操作。
+  `SOC_VERSION` 已在环境变量里；必要的硬件信息读取可用受管 `npu-smi info` 及其查询参数，
+  它们由宿主串行执行并共享缓存。接口失败时不要改用 DCMI、自写探针或其他驱动入口。
 - 修改或删除 `tools/` 与 `.claude/skills/*/scripts/` 下的脚本，或复制改写后执行、绕过固定入口判分。
 - 为了解骨架生成机制或修复普通编译、加载、shape/dtype、数值错误而读取构建、打包、
   评测脚本内部实现。先检查本题实际工程与评测日志，按错误分类查已有 skill 和官方资料。

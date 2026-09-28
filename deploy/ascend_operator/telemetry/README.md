@@ -47,6 +47,42 @@ gateway 在发往 engine 的请求头注入 **`x-polar-trace-id = {session_id}:{
 
 ## 组件与部署
 
+### 统一 NPU 信息查询
+
+所有受管 session 和本仓库 telemetry exporter 的 `npu-smi` 只读查询由宿主
+`npu_smi_snapshot.py` 执行。容器读取普通 `info` 快照；参数查询通过同目录
+`query.sock` 请求宿主，保留真实 stdout、stderr 和返回码，不回退到容器直接探测。
+目录按 `POLAR_NPU_SMI_CACHE_DIR` 配置，默认 `/dev/shm/npu-locks/npu-smi-snapshot`。
+
+支持 `info` 整个只读命名空间，包括 `-l`、`-m`、`-t TYPE -i ID -c CHIP`、
+`info proc`、帮助和版本。命令与参数按 argv 传递，不经过 shell；
+`set/reset/clear/upgrade` 等写操作拒绝执行。硬件实际支持哪些查询类型由宿主
+安装的 npu-smi 决定，未知参数原样返回其错误，不伪造字段。
+
+宿主只有一个 owner，定时采集与参数查询串行，不同时启动驱动探测；相同 argv
+共用 30 秒结果缓存，失败缓存 300 秒。`--interval`、`--failure-interval`
+可调。缓存最多 256 种查询。原生探测默认限 5 秒，客户端等待限 15 秒；
+持续 `info watch` 也受该上限约束，超时返回已有输出和 124，不能持续独占接口。
+驱动子进程即使无法退出，也保留 singleton 锁，阻止新 owner 重叠探测；
+读者快速返回超时或使用已有普通 info 快照，不绕过统一接口。
+这些是硬件信息查询，算子验证、测速继续走评测入口和 NPU 租约。
+
+部署在每台需要读取本机 NPU 的**宿主机**执行：
+
+```bash
+python3 -u deploy/ascend_operator/telemetry/npu_smi_snapshot.py \
+  --directory /dev/shm/npu-locks/npu-smi-snapshot
+# 另一个终端测试；不会在当前进程直接访问驱动
+python3 src/polar/runtime/npu_smi_cached.py info -t board -i 0 -c 0
+```
+
+Polar 启动脚本和 `start_all_telemetry.sh` 均会启动 owner。
+从旧版升级时，先确认旧 collector 的 PID/命令行并停止**仅该采集器**，再启动新版；
+不要因此重启训练、Gateway 或评测。旧 owner 没有 query.sock，新版检测后报错，
+不能把“already running”误当作参数查询可用。读取快照的裸 info 在切换期间仍可用。
+若另有不属于本仓库的 exporter 或硬件工具，必须接入相同 client；本接口无法拦截
+任意用户直接调用 DCMI、torch_npu 或其他未接入工具。
+
 ### 1. npu-smi exporter(块① + 利用率,两池分标签)— 零侵入
 ```bash
 python3 npu_smi_exporter.py --topology card_topology.yaml --port 9800 --interval 5

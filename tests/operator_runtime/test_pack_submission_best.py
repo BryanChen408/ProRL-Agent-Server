@@ -264,18 +264,21 @@ def test_promote_uses_evaluated_tar_not_source_tree_or_latest_public_tar(tmp_pat
         },
     ],
 )
-def test_best_score_matches_authoritative_training_reward(tmp_path: Path, values: dict[str, object]):
+@pytest.mark.parametrize("scheme", ["legacy", "correctness_banded"])
+def test_best_score_matches_authoritative_training_reward(tmp_path: Path, values: dict[str, object], scheme: str):
     case_root = tmp_path / hashlib.sha256(repr(values).encode()).hexdigest()[:10]
     _make_workspace(case_root)
     candidate = _candidate(case_root, "candidate", "score-contract")
     metrics_path = _metrics(case_root, "metrics", candidate, **values)
     metrics = json.loads(metrics_path.read_text(encoding="utf-8"))
 
-    proc = _promote(case_root, candidate, metrics_path)
+    proc = _promote(case_root, candidate, metrics_path, {"POLAR_OPERATOR_REWARD_SCHEME": scheme})
     assert proc.returncode == 0, proc.stderr
     assert not is_infra_failure(metrics)
     stored = json.loads(_meta(case_root).read_text(encoding="utf-8"))["reward_score"]
-    assert stored == pytest.approx(reward_from_metrics(metrics))
+    expected = (reward_from_metrics(metrics) if scheme == "legacy"
+                else _reward_module.banded_reward_from_metrics(metrics))
+    assert stored == pytest.approx(expected)
 
 
 def test_case_weight_override_matches_training_reward(tmp_path: Path):
@@ -357,6 +360,7 @@ def test_incomplete_meta_first_transaction_recovers_from_immutable_candidate(tmp
         "schema_version": 2,
         "tier": 2,
         "reward_score": 0.4,
+        "reward_scheme": "legacy",
         "candidate_sha256": _sha256(pending),
         "candidate_path": str(pending),
     }
@@ -367,3 +371,60 @@ def test_incomplete_meta_first_transaction_recovers_from_immutable_candidate(tmp
     assert "best 保持不变" in proc.stdout
     assert best.read_bytes() == pending.read_bytes()
     assert "marker:pending" in _marker(best)
+
+
+def test_banded_selects_higher_reward_and_keeps_equal_score(tmp_path):
+    _make_workspace(tmp_path)
+    old = _candidate(tmp_path, "old", "missing-cases")
+    old_metrics = _metrics(tmp_path, "old", old, error_type="correctness_failed")
+    env = {"POLAR_OPERATOR_REWARD_SCHEME": "correctness_banded"}
+    assert _promote(tmp_path, old, old_metrics, env).returncode == 0
+    new = _candidate(tmp_path, "new", "two-cases")
+    new_metrics = _metrics(tmp_path, "new", new, error_type="correctness_failed",
+                           cases_passed=2, cases_total=10)
+    # Missing cases (.03) loses to 2/10 (.044).
+    assert _promote(tmp_path, new, new_metrics, env).returncode == 0
+    assert "marker:two-cases" in _marker(_best(tmp_path))
+    meta = json.loads(_meta(tmp_path).read_text())
+    assert meta["reward_scheme"] == "correctness_banded"
+    assert meta["reward_score"] == pytest.approx(.044)
+    tie = _candidate(tmp_path, "tie", "later-tie")
+    tie_metrics = _metrics(tmp_path, "tie", tie, error_type="correctness_failed",
+                           cases_passed=2, cases_total=10)
+    assert _promote(tmp_path, tie, tie_metrics, env).returncode == 0
+    assert "marker:two-cases" in _marker(_best(tmp_path))
+
+
+@pytest.mark.parametrize("values", [
+    {"error_type": "npu_runtime_unavailable"},
+    {"correctness_ok": None},
+    {"success": True, "correctness_ok": False},
+    {"correctness_ok": True, "ast_check_ok": False},
+    {"success": True, "correctness_ok": True, "perf_data": {"speedup_vs_torch": float("nan")}},
+])
+def test_banded_invalid_metrics_do_not_promote(tmp_path, values):
+    _make_workspace(tmp_path)
+    candidate = _candidate(tmp_path, "invalid", "invalid")
+    metrics = _metrics(tmp_path, "invalid", candidate, **values)
+    proc = _promote(tmp_path, candidate, metrics, {"POLAR_OPERATOR_REWARD_SCHEME": "correctness_banded"})
+    assert proc.returncode == 0, proc.stderr
+    assert not _best(tmp_path).exists()
+
+
+def test_banded_zero_ties_and_correct_speedup_order(tmp_path):
+    _make_workspace(tmp_path)
+    env = {"POLAR_OPERATOR_REWARD_SCHEME": "correctness_banded"}
+    rows = [
+        ("compile", {"error_type": "ascendc_compile_failed"}, "compile"),
+        ("unknown", {"error_type": "unknown_failure"}, "compile"),
+        ("correct-no-benchmark", {"correctness_ok": True, "error_type": "benchmark_failed"}, "correct-no-benchmark"),
+        ("correct-slow", {"success": True, "correctness_ok": True, "error_type": None,
+                          "perf_data": {"speedup_vs_torch": .001}}, "correct-slow"),
+        ("correct-faster", {"success": True, "correctness_ok": True, "error_type": None,
+                            "perf_data": {"speedup_vs_torch": 2.0}}, "correct-faster"),
+    ]
+    for name, values, expected in rows:
+        candidate = _candidate(tmp_path, name, name)
+        proc = _promote(tmp_path, candidate, _metrics(tmp_path, name, candidate, **values), env)
+        assert proc.returncode == 0, proc.stderr
+        assert f"marker:{expected}\n" in _marker(_best(tmp_path))

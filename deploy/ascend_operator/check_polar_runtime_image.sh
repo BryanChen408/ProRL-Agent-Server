@@ -98,9 +98,14 @@ if [ -n "$IMAGE" ] && [ "$INSIDE" -eq 0 ]; then
     [ -e /usr/local/Ascend/driver ] && docker_args+=(-v /usr/local/Ascend/driver:/usr/local/Ascend/driver:ro)
     [ -e /usr/local/Ascend/firmware ] && docker_args+=(-v /usr/local/Ascend/firmware:/usr/local/Ascend/firmware:ro)
     [ -e /usr/local/dcmi ] && docker_args+=(-v /usr/local/dcmi:/usr/local/dcmi:ro)
-    [ -e /usr/local/bin/npu-smi ] && docker_args+=(-v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi:ro)
     [ -e /etc/ascend_install.info ] && docker_args+=(-v /etc/ascend_install.info:/etc/ascend_install.info:ro)
     [ -e /usr/local/sbin ] && docker_args+=(-v /usr/local/sbin:/usr/local/sbin:ro)
+    query_client="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)/src/polar/runtime/npu_smi_cached.py"
+    query_dir="${POLAR_NPU_SMI_CACHE_DIR:-${POLAR_NPU_LOCK_DIR:-/dev/shm/npu-locks}/npu-smi-snapshot}"
+    [[ -d "$query_dir" ]] || { echo "Start the host NPU query collector first: $query_dir" >&2; exit 1; }
+    docker_args+=(-v "$query_client:/usr/local/bin/npu-smi:ro"
+                 -v "$query_client:/usr/local/sbin/npu-smi:ro"
+                 -v "$query_dir:$query_dir:ro" -e "POLAR_NPU_SMI_CACHE_DIR=$query_dir")
     inside_args+=(--with-npu)
   fi
   if [ -n "$ASCEND_DEVICE" ]; then

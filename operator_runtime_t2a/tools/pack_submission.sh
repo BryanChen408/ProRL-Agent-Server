@@ -160,9 +160,9 @@ PY
 fi
 mkdir -p "$SUB_DIR"
 
-# 比较与替换在同一个文件锁内完成。reward_score 与 server 端 reward_from_metrics 顺序一致；
-# 测试会逐档对账，避免以后只改 reward、忘记同步 best 选择器。
+# 比较与替换在同一个文件锁内完成，直接复用 server 的当前 reward_scheme。
 if ! PROMOTION=$(OP="$OP_NAME" METRICS="$METRICS" CANDIDATE="$CANDIDATE" \
+  POLAR_OPERATOR_REWARD_MODULE="${POLAR_OPERATOR_REWARD_MODULE:-$_TOOLS_DIR/../../src/polar/trajectory/evaluator/operator_reward.py}" \
   BEST="$BEST_TARBALL" META="$BEST_META" LOCK="$SUB_DIR/.${OP_NAME}_impl.best.lock" \
   "$PY_BIN" - <<'PY'
 import fcntl
@@ -171,6 +171,7 @@ import json
 import math
 import os
 import shutil
+import runpy
 import tempfile
 import time
 from pathlib import Path
@@ -182,15 +183,9 @@ best = Path(os.environ["BEST"])
 meta_path = Path(os.environ["META"])
 lock_path = Path(os.environ["LOCK"])
 
-INFRA = {
-    "npu_runtime_unavailable", "input_load_failed", "judge_container_failed",
-    "judge_metrics_unreadable", "judge_no_metrics", "task_missing",
-    "submission_fetch_failed", "profiler_unavailable", "judge_classification_failed",
-}
-RUN_FAILURES = {
-    "op_not_registered", "ascendc_load_failed", "ascendc_run_crashed",
-    "ascendc_run_timeout", "ascendc_launch_failed", "stateful_impl_detected",
-}
+scheme = os.environ.get("POLAR_OPERATOR_REWARD_SCHEME", "legacy")
+reward_module = runpy.run_path(os.environ["POLAR_OPERATOR_REWARD_MODULE"])
+candidate_reward = reward_module["candidate_reward_from_metrics"]
 
 def sha256(path: Path) -> str:
     h = hashlib.sha256()
@@ -206,12 +201,6 @@ def finite(value, default=None):
         return default
     return value if math.isfinite(value) else default
 
-def integer(value, default=0):
-    try:
-        return int(value)
-    except (TypeError, ValueError, OverflowError):
-        return default
-
 def atomic_json(path: Path, data: dict):
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, name = tempfile.mkstemp(prefix=path.name + ".tmp.", dir=str(path.parent))
@@ -224,38 +213,10 @@ def atomic_json(path: Path, data: dict):
         tmp.unlink(missing_ok=True)
 
 def score(metrics: dict):
-    error_type = str(metrics.get("error_type") or "")
-    if error_type in INFRA:
-        return None, None, "infra"
-    if bool(metrics.get("success")):
-        speedup = finite((metrics.get("perf_data") or {}).get("speedup_vs_torch", 1.0))
-        if speedup is None or speedup < 0:
-            return None, None, "invalid success speedup"
-        square = speedup * speedup
-        reward = 0.75 + 0.25 * (square - 1.0) / (square + 1.0)
-        if not math.isfinite(reward):
-            return None, None, "invalid success reward"
-        return reward, 3, f"success speedup={speedup}"
-    if bool(metrics.get("correctness_ok")):
-        return 0.4, 2, "correctness passed; benchmark failed"
-    if not bool(metrics.get("ast_check_ok")):
-        return 0.0, 0, error_type or "ast/submission failed"
-    if error_type == "ascendc_compile_failed":
-        return 0.1, 1, error_type
-    if error_type in RUN_FAILURES:
-        return 0.2, 1, error_type
-    if error_type in {"correctness_failed", "output_precheck_failed"}:
-        weight = finite(os.environ.get("POLAR_CASE_PASS_WEIGHT", "0.10") or "0.10", 0.10)
-        if weight <= 0.0:
-            return 0.35, 1, f"{error_type} cases=fixed"
-        passed, total = metrics.get("cases_passed"), metrics.get("cases_total")
-        if (isinstance(passed, int) and not isinstance(passed, bool)
-                and isinstance(total, int) and not isinstance(total, bool)
-                and 0 <= passed <= total and total > 0):
-            reward = 0.3 + weight * min(passed / total, 0.999)
-            return reward, 1, f"{error_type} cases={passed}/{total}"
-        return 0.35, 1, f"{error_type} cases=unknown"
-    return 0.25, 1, error_type or "unknown operator failure"
+    reward = candidate_reward(metrics, scheme)
+    tier = (3 if metrics.get("success") else 2 if metrics.get("correctness_ok")
+            else 1 if metrics.get("ast_check_ok") else 0)
+    return reward, tier, f"scheme={scheme};{metrics.get('error_type') or 'success'}"
 
 try:
     metrics = json.loads(metrics_path.read_text(encoding="utf-8"))
@@ -280,11 +241,11 @@ record_path = os.environ.get("POLAR_EVALUATION_RECORD_PATH")
 record_id = Path(record_path).stem if record_path else None
 if record_path and not Path(record_path).exists():
     # The Gateway supplies a private path. HTTP retries reuse this record;
-    # scores are computed exactly once by the same selector that updates best.
+    # the recorded score uses the same current reward as best selection.
     atomic_json(Path(record_path), {
         "record_id": record_id, "op_name": op, "score": current_score,
         "candidate_sha256": candidate_hash, "metrics_sha256": metrics_hash,
-        "metrics": metrics,
+        "metrics": metrics, "reward_scheme": scheme,
     })
 elif record_path:
     recorded = json.loads(Path(record_path).read_text())
@@ -309,7 +270,7 @@ with lock_path.open("a+") as lock:
     if best.exists() and not previous:
         print("SKIP\t已有 best 但 meta 缺失/损坏；为避免覆盖未知历史版本而保留")
         raise SystemExit(0)
-    if integer(previous.get("schema_version"), 0) >= 2:
+    if previous:
         expected = str(previous.get("candidate_sha256") or "")
         actual = sha256(best) if best.exists() else ""
         if not expected or actual != expected:
@@ -332,21 +293,11 @@ with lock_path.open("a+") as lock:
 
     previous_score = None
     if best.exists():
-        previous_score = finite(previous.get("reward_score"))
+        if previous.get("reward_scheme") != scheme:
+            raise ValueError("Best reward scheme mismatch; start a new session")
+        previous_score = finite(previous["reward_score"])
         if previous_score is None:
-            # 旧版 meta 没有精确失败分数。T1 用失败侧上界保守迁移，避免升级时
-            # 用一个新编译失败覆盖未知的旧 correctness 候选。
-            old_tier = integer(previous.get("tier"), 0)
-            if old_tier >= 3:
-                old_sp = finite(previous.get("speedup"))
-                previous_score = (0.75 + 0.25 * (old_sp * old_sp - 1.0) / (old_sp * old_sp + 1.0)
-                                  if old_sp is not None and old_sp >= 0 else 1.0)
-            elif old_tier == 2:
-                previous_score = 0.4
-            elif old_tier == 1:
-                previous_score = 0.399999
-            else:
-                previous_score = 0.0
+            raise ValueError("Invalid best reward_score")
 
     update = previous_score is None or current_score > previous_score
     if not update:
@@ -358,6 +309,7 @@ with lock_path.open("a+") as lock:
         "op_name": op,
         "tier": tier,
         "reward_score": current_score,
+        "reward_scheme": scheme,
         "speedup": finite((metrics.get("perf_data") or {}).get("speedup_vs_torch")),
         "cases_passed": metrics.get("cases_passed"),
         "cases_total": metrics.get("cases_total"),

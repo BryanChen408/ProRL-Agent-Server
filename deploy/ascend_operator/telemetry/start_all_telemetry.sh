@@ -22,6 +22,18 @@ start() { # name pgrep-pat cmd...
 }
 
 # T1 NPU 卡负载(利用率/显存/功耗/温度)
+export POLAR_NPU_SMI_CACHE_DIR="${POLAR_NPU_SMI_CACHE_DIR:-${POLAR_NPU_LOCK_DIR:-/dev/shm/npu-locks}/npu-smi-snapshot}"
+start npu_queries "npu_smi_snapshot\.py" \
+  "$PY" "$HERE/npu_smi_snapshot.py" --directory "$POLAR_NPU_SMI_CACHE_DIR"
+# Layout detection must wait for the shared reader endpoint, never probe locally.
+for _ in {1..100}; do
+  "$PY" "$HERE/npu_smi_snapshot.py" --check --directory "$POLAR_NPU_SMI_CACHE_DIR" && break
+  sleep 0.1
+done
+if ! "$PY" "$HERE/npu_smi_snapshot.py" --check --directory "$POLAR_NPU_SMI_CACHE_DIR"; then
+  echo "[tele] NPU query socket unavailable; replace any old collector before starting telemetry" >&2
+  exit 1
+fi
 start npu_exporter "npu_smi_exporter\.py" \
   "$PY" "$HERE/npu_smi_exporter.py" --topology "$HERE/card_topology.yaml" \
   --port "$PORT" --interval "$INT" --out "$D/npu_state"

@@ -196,6 +196,26 @@ def is_infra_failure(metrics: dict | None) -> bool:
     return str(metrics.get("error_type") or "") in INFRA_ERROR_TYPES
 
 
+def candidate_reward_from_metrics(metrics: dict, scheme: str = "legacy") -> float | None:
+    """Best/attempt outcome score, using the terminal judge's metrics validity gates.
+
+    Session-wide process bonuses and truncation deductions are not candidate properties.
+    The correctness_banded scheme has neither, so this equals its terminal reward.
+    """
+    if scheme not in {"legacy", "correctness_banded"}:
+        raise ValueError(f"Unknown reward scheme: {scheme}")
+    outcome = judge_outcome(metrics)
+    if outcome["retry"]:
+        return None
+    if scheme == "correctness_banded":
+        try:
+            return banded_reward_from_metrics(metrics)
+        except ValueError:
+            return None
+    reward = outcome["reward"]
+    return reward if math.isfinite(reward) else None
+
+
 def judge_outcome(metrics: dict | None) -> dict:
     """judge metrics -> {status, retry, reward, error_type, reason} for the Polar evaluator.
 

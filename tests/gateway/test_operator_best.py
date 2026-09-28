@@ -244,3 +244,39 @@ def test_pack_client_uses_gateway_and_reports_transport_failure(tmp_path):
         http.shutdown()
         http.server_close()
         worker.join()
+
+
+def test_banded_host_best_and_attempts_share_recorded_scores(tmp_path):
+    managed, workdir = session(tmp_path)
+    managed.request.evaluator.config["reward_scheme"] = "correctness_banded"
+
+    async def run():
+        first = inputs(workdir, "missing-cases")
+        data = json.loads(Path(first[1]).read_text())
+        data["error_type"] = "correctness_failed"
+        Path(first[1]).write_text(json.dumps(data))
+        await retain_best(managed, *first)
+        best = best_submission(managed.session_dir, "op_test")
+        second = inputs(workdir, "two-cases", cases_passed=2, cases_total=10)
+        data = json.loads(Path(second[1]).read_text())
+        data["error_type"] = "correctness_failed"
+        Path(second[1]).write_text(json.dumps(data))
+        await retain_best(managed, *second)
+        assert best.read_bytes() == b"two-cases"
+        records = evaluation_records(managed.session_dir, "op_test")
+        assert sorted(r["score"] for r in records["records"].values()) == pytest.approx([.03, .044])
+        assert records["records"][records["best_record_id"]]["score"] == pytest.approx(.044)
+        correct = inputs(workdir, "correct")
+        data = json.loads(Path(correct[1]).read_text())
+        data.update(correctness_ok=True, error_type="benchmark_failed")
+        Path(correct[1]).write_text(json.dumps(data))
+        await retain_best(managed, *correct)
+        assert best.read_bytes() == b"correct"
+        retry = await retain_best(managed, *second)
+        assert "best 保持不变" in retry["message"]
+        assert best.read_bytes() == b"correct"
+        records = evaluation_records(managed.session_dir, "op_test")
+        assert len(records["records"]) == 3
+        assert records["records"][records["best_record_id"]]["score"] == pytest.approx(.9)
+
+    asyncio.run(run())

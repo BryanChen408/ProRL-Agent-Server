@@ -58,6 +58,10 @@ def test_real_profiles_separate_attempt_credit_from_call_limits(tmp_path, name):
         assert "--max-turns" not in command
     else:
         assert op["evaluator"]["config"]["reward_scheme"] == "correctness_banded"
+        for runtime in (op["runtime"], op["evaluator"]["runtime"]):
+            assert runtime["env"]["POLAR_OPERATOR_REWARD_SCHEME"] == "correctness_banded"
+            assert runtime["env"]["POLAR_OPERATOR_REWARD_MODULE"] == "/opt/polar/operator_reward.py"
+            assert f"{ROOT}/src/polar/trajectory/evaluator/operator_reward.py:/opt/polar/operator_reward.py:ro" in runtime["kwargs"]["volumes"]
         assert op["runtime"]["kwargs"]["ascend"]["cache_npu_smi_info"] is True
         assert op["evaluator"]["runtime"]["kwargs"]["ascend"]["cache_npu_smi_info"] is True
         snapshot_dir = str(Path(op["runtime"]["kwargs"]["ascend"]["lock_dir"]) / "npu-smi-snapshot")

@@ -144,6 +144,16 @@ if [[ "${POLAR_NPU_SMI_SNAPSHOT_ENABLED:-0}" == "1" ]]; then
     --directory "${POLAR_NPU_SMI_CACHE_DIR}" \
     >>"${LOG_DIR}/npu_smi_snapshot.log" 2>&1 &
   start_log "npu-snapshot" "$!" "${LOG_DIR}/npu_smi_snapshot.log"
+  for _ in {1..100}; do
+    "${PYTHON_BIN}" "${POLAR_DEPLOY_DIR}/telemetry/npu_smi_snapshot.py" --check \
+      --directory "${POLAR_NPU_SMI_CACHE_DIR}" && break
+    sleep 0.1
+  done
+  if ! "${PYTHON_BIN}" "${POLAR_DEPLOY_DIR}/telemetry/npu_smi_snapshot.py" --check \
+    --directory "${POLAR_NPU_SMI_CACHE_DIR}"; then
+    echo "[fatal] NPU query socket unavailable; replace the old snapshot collector first. See ${LOG_DIR}/npu_smi_snapshot.log" >&2
+    exit 1
+  fi
 fi
 
 start_one rollout serve_rollout -c "${TOPOLOGY}"

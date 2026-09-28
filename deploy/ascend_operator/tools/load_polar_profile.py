@@ -278,6 +278,15 @@ def main() -> int:
     if asc_devkit_dir:
         asc_devkit_dir = _repo_path(repo, asc_devkit_dir)
     volumes = _runtime_volumes(operator_runtime_dir, workflow, asc_devkit_dir)
+    if backend == "ascendc" and workflow == "legacy":
+        reward_scheme = str(evaluator.get("reward_scheme", "legacy"))
+        if reward_scheme not in {"legacy", "correctness_banded"}:
+            raise SystemExit(f"unsupported reward_scheme: {reward_scheme!r}")
+        reward_module = repo / "src/polar/trajectory/evaluator/operator_reward.py"
+        volumes.append(f"{reward_module}:/opt/polar/operator_reward.py:ro")
+        for env in (runtime_env, eval_env):
+            env.update(POLAR_OPERATOR_REWARD_SCHEME=reward_scheme,
+                       POLAR_OPERATOR_REWARD_MODULE="/opt/polar/operator_reward.py")
     upload_source = str(op_assets_dir / "op_tasks" / "{op_name}.py")
     workdir = str(runtime.get("workdir", "/opt/workspace/agent_workdir"))
     # ascendc 专用:算子同名 .json(用例规格)所在的数据集目录;triton 侧不配=不产生该动作

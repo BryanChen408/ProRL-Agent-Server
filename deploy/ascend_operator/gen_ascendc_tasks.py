@@ -73,10 +73,13 @@ def _instruction(op_name: str, model_rel: str) -> str:
         # NPU 卡是 agent/judge 共享的卡池,固定入口内部会排队抢锁;任何绕过它的探针都会
         # 和别的 session 撞在同一张卡上(性能测量失真 = reward 失真)。
         "- Do not run custom Python tests, manual import/forward checks, torch.allclose, temporary "
-        "kernels, npu-smi, or any executable "
+        "kernels, or any executable "
         "probe that touches the NPU. The fixed validation entry is the only executable validation "
         "path, and the only thing allowed to acquire an NPU card. Never set ASCEND_RT_VISIBLE_DEVICES "
         "yourself.\n"
+        "- Hardware information reads may use the managed npu-smi info wrapper, including query "
+        "parameters; it routes to the host shared query service. Never bypass it with direct DCMI "
+        "or other device probes, and never use npu-smi set/reset/clear/upgrade.\n"
         "- For unchanged-source feedback or unexpected results, first compare your edited paths with "
         f"the evaluated top-level `{op_name}/`, not `output/{op_name}/`, and inspect the candidate and logs. "
         "Do not read build, packing or evaluation script internals under tools/ or .claude/skills/*/scripts/ "

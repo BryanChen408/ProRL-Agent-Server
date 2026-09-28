@@ -111,7 +111,9 @@ async def retain_best(managed: ManagedSession, candidate: str, metrics: str) -> 
             record_path = root / "evaluations" / f"{record_id}.json"
             env = {**os.environ, "WORKDIR": str(root), "PY_BIN": sys.executable,
                    "POLAR_OPERATOR_BEST_URL": "", "POLAR_RUNTIME_SESSION_DIR": str(root / "no-mirror"),
-                   "POLAR_EVALUATION_RECORD_PATH": str(record_path)}
+                   "POLAR_EVALUATION_RECORD_PATH": str(record_path),
+                   "POLAR_OPERATOR_REWARD_SCHEME": str(spec.config.get("reward_scheme", "legacy")),
+                   "POLAR_OPERATOR_REWARD_MODULE": str(PACK.parents[2] / "src/polar/trajectory/evaluator/operator_reward.py")}
             proc = await asyncio.create_subprocess_exec(
                 "bash", str(PACK), op_name, "--promote", "--candidate", str(frozen),
                 "--metrics", str(frozen_metrics), env=env,

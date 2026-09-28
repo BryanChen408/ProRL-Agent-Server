@@ -6,6 +6,7 @@ Standalone: `python tests/runtime/test_ascend.py`  | or via pytest.
 from __future__ import annotations
 
 import fcntl
+import json
 import os
 import runpy
 import time
@@ -145,7 +146,9 @@ def test_npu_smi_snapshot_collector_and_readers():
                                   capture_output=True, timeout=5)
 
         assert read("info").returncode == 124
-        for args in [("info", "-l"), ("info", "-t", "memory", "-i", "4"), ("--collect",), ()]:
+        for args in [("info", "-l"), ("info", "-t", "memory", "-i", "4"), ()]:
+            assert read(*args).returncode == 124  # No host query service yet.
+        for args in [("--collect",), ("set", "-t", "power"), ("reset",)]:
             assert read(*args).returncode == 64
         assert not (directory / "calls").exists()  # No reader path starts a real query.
 
@@ -154,7 +157,7 @@ def test_npu_smi_snapshot_collector_and_readers():
             # A second collector must exit without issuing a query.
             second = subprocess.run([sys.executable, str(collector), "--directory", d,
                                      "--real", str(real)], capture_output=True, timeout=5)
-            assert second.returncode == 0 and b"already running" in second.stdout
+            assert second.returncode == 1 and b"prior owner" in second.stdout
             assert not (directory / "calls").exists()
             assert collect(str(real), directory, lock.fileno(), 2)
             with ThreadPoolExecutor(max_workers=6) as pool:
@@ -173,6 +176,93 @@ def test_npu_smi_snapshot_collector_and_readers():
             assert snapshot.read_bytes() == b"Ascend 910B1\n"
             assert snapshot.stat().st_mtime == old
             assert (directory / "calls").read_text() == "xxx"
+
+
+def test_npu_smi_parameter_queries_share_host_owner():
+    wrapper = Path(_SRC).resolve() / "polar/runtime/npu_smi_cached.py"
+    collector = wrapper.parents[3] / "deploy/ascend_operator/telemetry/npu_smi_snapshot.py"
+    with tempfile.TemporaryDirectory() as d:
+        root = Path(d)
+        real = root / "real.py"
+        real.write_text(
+            "#!/usr/bin/env python3\n"
+            "import pathlib, json, sys, time, os\n"
+            "root = pathlib.Path(__file__).parent\n"
+            "fd = os.open(root/'active', os.O_CREAT | os.O_EXCL | os.O_WRONLY)\n"
+            "os.close(fd)\n"
+            "with (root/'calls').open('a') as f: f.write(json.dumps(sys.argv[1:])+'\\n')\n"
+            "print('answer: '+json.dumps(sys.argv[1:]), flush=True)\n"
+            "try:\n"
+            "    if 'slow' in sys.argv: time.sleep(5)\n"
+            "    else: time.sleep(0.03)\n"
+            "finally: (root/'active').unlink()\n"
+            "if 'error' in sys.argv:\n"
+            "    print('native query error', file=sys.stderr); sys.exit(7)\n"
+        )
+        real.chmod(0o755)
+        env = {**os.environ, "POLAR_NPU_SMI_CACHE_DIR": d}
+        command = [sys.executable, str(collector), "--directory", d, "--real", str(real),
+                   "--interval", "0.4", "--timeout", "0.15", "--failure-interval", "0.6"]
+        proc = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        try:
+            deadline = time.monotonic() + 5
+            while not (root / "npu-smi-info.out").exists():
+                assert proc.poll() is None, proc.communicate()
+                assert time.monotonic() < deadline
+                time.sleep(0.01)
+
+            def read(args):
+                return subprocess.run([sys.executable, str(wrapper), *args], env=env,
+                                      capture_output=True, timeout=5)
+
+            board = ["info", "-t", "board", "-i", "4", "-c", "0"]
+            with ThreadPoolExecutor(max_workers=6) as pool:
+                results = list(pool.map(read, [board] * 6))
+            assert all(r.returncode == 0 and b'"board"' in r.stdout for r in results)
+            calls = lambda: [json.loads(l) for l in (root / "calls").read_text().splitlines()]
+            assert calls().count(board) == 1
+            for args in [["info", "-l"], ["info", "-m"], ["info", "proc", "-i", "0"],
+                         ["info", "-t", "memory", "-i", "4"], ["info", "--help"], ["--help"], ["-v"], []]:
+                assert read(args).returncode == 0
+            time.sleep(0.45)
+            assert read(board).returncode == 0
+            assert calls().count(board) == 2  # Expired results are refreshed centrally.
+            error = ["info", "-t", "error"]
+            for _ in range(2):
+                r = read(error)
+                assert r.returncode == 7 and b"native query error" in r.stderr
+            assert calls().count(error) == 1
+            exporter = runpy.run_path(str(collector.with_name("npu_smi_exporter.py")))
+            previous = os.environ.get("POLAR_NPU_SMI_CACHE_DIR")
+            os.environ["POLAR_NPU_SMI_CACHE_DIR"] = d
+            try:
+                assert '"board"' in exporter["_run_smi"](["-t", "board", "-i", "4", "-c", "0"])
+                assert exporter["_run_smi"](["-t", "error"]).startswith("__ERROR__ rc=7")
+            finally:
+                if previous is None:
+                    os.environ.pop("POLAR_NPU_SMI_CACHE_DIR", None)
+                else:
+                    os.environ["POLAR_NPU_SMI_CACHE_DIR"] = previous
+            # Validate on the server too: bypassing the wrapper cannot expose writes.
+            import socket
+            with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
+                client.connect(str(root / "query.sock"))
+                client.sendall(b'["reset", "-i", "0"]\n')
+                assert json.loads(client.makefile("rb").readline())["returncode"] == 64
+            assert not any(a and a[0] == "reset" for a in calls())
+            second = subprocess.run(command, capture_output=True, timeout=5)
+            assert second.returncode == 0 and b"already running" in second.stdout
+            r = read(["info", "watch", "-i", "0", "-s", "slow"])
+            assert r.returncode == 124 and b"answer:" in r.stdout and b"timed out" in r.stderr
+            # The killed fake has no finally cleanup; real drivers do not use this test marker.
+            (root / "active").unlink(missing_ok=True)
+            assert read(["info", "-t", "health"]).returncode == 0
+            assert (root / "npu-smi-info.out").read_text().startswith("answer:")
+        finally:
+            proc.terminate()
+            proc.communicate(timeout=5)
+        # A dead socket/owner never causes a local probe fallback.
+        assert read(board).returncode == 124
 
 
 def test_no_per_card_device_remap():

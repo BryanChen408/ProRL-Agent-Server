@@ -2,7 +2,7 @@
 """NPU-SMI → Prometheus exporter(采集块①:显存/内存 + NPU 利用率,按 12 推理 / 4 验证两池分标签)。
 
 设计:
-  - 后台线程每 --interval 秒对 card_topology.yaml 里的每张卡跑 `npu-smi info -t common/-t usages`,
+  - 后台线程每 --interval 秒经宿主统一入口查询每张卡的 `npu-smi info -t common/-t usages`,
     解析 key:value(比 dashboard 表稳),缓存快照;/metrics 处理器只吐缓存,scrape 不阻塞在 npu-smi 上。
   - 标签:card_id / pool{inference|verify} / engine_id / tp_rank。→ 池间、engine 间、engine 内 4 卡不均都能看。
   - 纯标准库,无三方依赖。
@@ -18,7 +18,6 @@ from __future__ import annotations
 import argparse
 import http.server
 import re
-import shutil
 import subprocess
 import sys
 import threading
@@ -122,9 +121,13 @@ def _cards(topo):
 
 
 def _run_smi(args: list[str]) -> str:
-    exe = shutil.which("npu-smi") or "npu-smi"
+    client = Path(__file__).resolve().parents[3] / "src/polar/runtime/npu_smi_cached.py"
     try:
-        return subprocess.run([exe, "info", *args], capture_output=True, text=True, timeout=10).stdout
+        result = subprocess.run([sys.executable, str(client), "info", *args],
+                                capture_output=True, text=True, timeout=20)
+        if result.returncode:
+            return f"__ERROR__ rc={result.returncode} {result.stderr.strip()}"
+        return result.stdout
     except Exception as e:  # noqa: BLE001
         return f"__ERROR__ {e}"
 
@@ -187,7 +190,7 @@ class Sampler(threading.Thread):
         from concurrent.futures import ThreadPoolExecutor
         pool = ThreadPoolExecutor(max_workers=min(16, len(self.cards) or 1))
         while not self._stop.is_set():
-            # 每卡 5 次 npu-smi 子调用;16 卡串行会几十秒/轮,跟不上间隔 → 按卡并发。
+            # 并发请求共享宿主缓存；驱动探测由单一 owner 串行执行。
             vals = list(pool.map(sample_card, self.cards))
             samples = list(zip(self.cards, vals))
             self.snapshot = self._render(samples)

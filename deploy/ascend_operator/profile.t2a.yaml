@@ -78,11 +78,8 @@ operator:
     network: host
     workdir: /opt/workspace/agent_workdir
     env:
-      # ← delta 10:SOC_VERSION 注入容器 env。CLAUDE.md 的 Phase 0「硬件信息查询」按
-      #   优先级 1(读 $SOC_VERSION)→ 2(npu-smi)→ 3(CANN 安装信息)降级,而本环境
-      #   禁止 npu-smi 这类 NPU 探针(多容器共享卡池,探测会干扰别人)。
-      #   env.sh 只被固定入口 source,agent 自己的 shell 读不到 —— 不注入这里就必然
-      #   落空到优先级 2。注入后永远命中第 1 级,降级路径不会被走到。
+      # SOC_VERSION 优先取环境；必要的 npu-smi info 参数查询经宿主统一入口。
+      # 禁止绕过 wrapper 直接探测驱动；env.sh 只被固定入口 source，故仍需注入。
       SOC_VERSION: "ascend910b1"
       ASCENDC_SOC_VERSION: "ascend910b1"
       ASC_DEVKIT_DIR: "/opt/asc-devkit"
@@ -153,6 +150,7 @@ operator:
       已确认的结论，用更小的块继续输出，不要从头规划，也不要跳过必要的设计与查证。
   evaluator:
     # Mixed groups (n<=8): correct reward [0.9,1], incorrect [0,0.1].
+    # 同时用于训练终局 reward、T2A best 选择与 attempt 分数；共用打分函数。
     reward_scheme: correctness_banded
     # ← delta 3+4:AscendC 判分入口 + tarball 提交(golden model.py 在 tarball 内,无需 --task)
     judge_command: "bash /opt/workspace/agent_workdir/tools/ascendc_eval_pipeline.sh --op_name {op_name} --impl output/submission/{op_name}_impl.tar.gz --out_dir judge_out"
