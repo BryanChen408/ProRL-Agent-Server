@@ -5,7 +5,10 @@ Standalone: `python tests/runtime/test_ascend.py`  | or via pytest.
 
 from __future__ import annotations
 
+import fcntl
 import os
+import runpy
+import time
 import subprocess
 import sys
 import tempfile
@@ -105,40 +108,71 @@ def test_mount_recipe_does_not_require_or_inject_device_id():
     assert "ASCEND_RT_VISIBLE_DEVICES" not in env
 
 
-def test_npu_smi_info_cache_mount_and_reuse():
+def test_npu_smi_snapshot_collector_and_readers():
+    snapshot_mount = "/dev/shm/npu-locks/npu-smi-snapshot:/dev/shm/npu-locks/npu-smi-snapshot:ro"
     vols = _vals(ascend_mount_create_args({"cache_npu_smi_info": True}), "-v")
-    assert "/usr/local/bin/npu-smi:/usr/local/bin/npu-smi.real:ro" in vols
+    assert snapshot_mount in vols
+    assert not any("npu-smi.real" in v for v in vols)
     assert any(v.endswith(":/usr/local/bin/npu-smi:ro") for v in vols)
     assert any(v.endswith(":/usr/local/sbin/npu-smi:ro") for v in vols)
     assert "/usr/local/bin/npu-smi:/usr/local/bin/npu-smi:ro" not in vols
+    custom = _vals(ascend_mount_create_args({"cache_npu_smi_info": True, "lock_dir": "/custom"}), "-v")
+    assert "/custom/npu-smi-snapshot:/custom/npu-smi-snapshot:ro" in custom
 
     wrapper = Path(_SRC) / "polar/runtime/npu_smi_cached.py"
+    collector = wrapper.parents[3] / "deploy/ascend_operator/telemetry/npu_smi_snapshot.py"
+    collect = runpy.run_path(str(collector))["collect"]
     with tempfile.TemporaryDirectory() as d:
-        real = Path(d) / "real.py"
+        directory = Path(d)
+        real = directory / "real.py"
         real.write_text(
             "#!/usr/bin/env python3\n"
-            "import pathlib, sys\n"
-            "import time; time.sleep(0.1)\n"
-            f"p = pathlib.Path({str(Path(d) / 'calls')!r})\n"
+            "import pathlib, sys, time\n"
+            "p = pathlib.Path(__file__).with_name('calls')\n"
             "p.write_text((p.read_text() if p.exists() else '') + 'x')\n"
-            "print('Ascend 910B1' if sys.argv[1:] == ['info'] else 'other')\n"
+            "mode = pathlib.Path(__file__).with_name('mode')\n"
+            "if mode.exists():\n"
+            "    if mode.read_text() == 'slow': time.sleep(10)\n"
+            "    else: sys.exit(1)\n"
+            "assert sys.argv[1:] == ['info']\n"
+            "print('Ascend 910B1')\n"
         )
         real.chmod(0o755)
         env = {**os.environ, "POLAR_NPU_SMI_REAL": str(real), "POLAR_NPU_SMI_CACHE_DIR": d}
-        for _ in range(2):
-            result = subprocess.run([sys.executable, str(wrapper), "info"], env=env, capture_output=True, text=True)
-            assert result.returncode == 0
-            assert result.stdout == "Ascend 910B1\n"
-        assert (Path(d) / "calls").read_text() == "x"
-        (Path(d) / "npu-smi-info.out").unlink()
-        (Path(d) / "calls").unlink()
-        with ThreadPoolExecutor(max_workers=6) as pool:
-            results = list(pool.map(
-                lambda _: subprocess.run([sys.executable, str(wrapper), "info"], env=env, capture_output=True),
-                range(6),
-            ))
-        assert all(r.returncode == 0 and r.stdout == b"Ascend 910B1\n" for r in results)
-        assert (Path(d) / "calls").read_text() == "x"
+
+        def read(*args):
+            return subprocess.run([sys.executable, str(wrapper), *args], env=env,
+                                  capture_output=True, timeout=5)
+
+        assert read("info").returncode == 124
+        for args in [("info", "-l"), ("info", "-t", "memory", "-i", "4"), ("--collect",), ()]:
+            assert read(*args).returncode == 64
+        assert not (directory / "calls").exists()  # No reader path starts a real query.
+
+        with (directory / "collector.lock").open("a+b") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            # A second collector must exit without issuing a query.
+            second = subprocess.run([sys.executable, str(collector), "--directory", d,
+                                     "--real", str(real)], capture_output=True, timeout=5)
+            assert second.returncode == 0 and b"already running" in second.stdout
+            assert not (directory / "calls").exists()
+            assert collect(str(real), directory, lock.fileno(), 2)
+            with ThreadPoolExecutor(max_workers=6) as pool:
+                results = list(pool.map(lambda _: read("info"), range(6)))
+            assert all(r.returncode == 0 and r.stdout == b"Ascend 910B1\n" for r in results)
+            assert (directory / "calls").read_text() == "x"
+            snapshot = directory / "npu-smi-info.out"
+            old = time.time() - 3600
+            os.utime(snapshot, (old, old))
+            stale = read("info")
+            assert stale.returncode == 0 and b"stale" in stale.stderr
+            (directory / "mode").write_text("fail")
+            assert not collect(str(real), directory, lock.fileno(), 2)
+            (directory / "mode").write_text("slow")
+            assert not collect(str(real), directory, lock.fileno(), 0.1)
+            assert snapshot.read_bytes() == b"Ascend 910B1\n"
+            assert snapshot.stat().st_mtime == old
+            assert (directory / "calls").read_text() == "xxx"
 
 
 def test_no_per_card_device_remap():

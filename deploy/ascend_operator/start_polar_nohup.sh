@@ -136,6 +136,15 @@ start_one() {
   start_log "${name}" "$(cat "${pid_file}")" "${log_file}"
 }
 
+# Host-wide collector owns its flock; keep it across run transitions.
+if [[ "${POLAR_NPU_SMI_SNAPSHOT_ENABLED:-0}" == "1" ]]; then
+  mkdir -p "${POLAR_NPU_SMI_CACHE_DIR}"
+  setsid nohup "${PYTHON_BIN}" -u "${POLAR_DEPLOY_DIR}/telemetry/npu_smi_snapshot.py" \
+    --directory "${POLAR_NPU_SMI_CACHE_DIR}" \
+    >>"${LOG_DIR}/npu_smi_snapshot.log" 2>&1 &
+  start_log "npu-snapshot" "$!" "${LOG_DIR}/npu_smi_snapshot.log"
+fi
+
 start_one rollout serve_rollout -c "${TOPOLOGY}"
 start_one gateway serve_gateway -c "${TOPOLOGY}" --node-id ascend-node-01
 

@@ -59,6 +59,11 @@ def test_real_profiles_separate_attempt_credit_from_call_limits(tmp_path, name):
     else:
         assert op["runtime"]["kwargs"]["ascend"]["cache_npu_smi_info"] is True
         assert op["evaluator"]["runtime"]["kwargs"]["ascend"]["cache_npu_smi_info"] is True
+        snapshot_dir = str(Path(op["runtime"]["kwargs"]["ascend"]["lock_dir"]) / "npu-smi-snapshot")
+        assert env["POLAR_NPU_SMI_SNAPSHOT_ENABLED"] == "1"
+        assert env["POLAR_NPU_SMI_CACHE_DIR"] == snapshot_dir
+        assert op["runtime"]["env"]["POLAR_NPU_SMI_CACHE_DIR"] == snapshot_dir
+        assert op["evaluator"]["runtime"]["env"]["POLAR_NPU_SMI_CACHE_DIR"] == snapshot_dir
         assert "Skill" in op["agent"]["settings"]["allowed_tools"].split()
         assert "Skill" not in op["agent"]["settings"]["disallowed_tools"].split()
         assert profile["operator"]["agent"]["thinking_token_budget"] is None

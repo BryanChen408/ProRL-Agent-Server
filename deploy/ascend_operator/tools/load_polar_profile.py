@@ -230,6 +230,8 @@ def main() -> int:
     lease_enabled = bool(npu_lease.get("enabled", True))
     npu_pool = _pool_spec(npu_lease.get("pool"), runtime.get("npu_pool", "0"))
     npu_lock_dir = _repo_path(repo, npu_lease.get("lock_dir", runtime.get("npu_lock_dir", "/dev/shm/npu-locks")))
+    npu_snapshot_enabled = bool(runtime.get("cache_npu_smi_info", False))
+    npu_snapshot_dir = str(Path(npu_lock_dir) / "npu-smi-snapshot")
     gen_max = str(budget.get("generation_max", legacy_budget.get("generation_max", 6)))
     opt_max = str(budget.get("optimization_max", legacy_budget.get("optimization_max", 3)))
     watch_interval = str(budget.get("interval_seconds", legacy_budget.get("interval_seconds", 2)))
@@ -259,6 +261,9 @@ def main() -> int:
     eval_env = {
         "DISABLE_AUTOUPDATER": "1",
     }
+    if npu_snapshot_enabled:
+        runtime_env["POLAR_NPU_SMI_CACHE_DIR"] = npu_snapshot_dir
+        eval_env["POLAR_NPU_SMI_CACHE_DIR"] = npu_snapshot_dir
     if lease_enabled:
         eval_env.update(
             {
@@ -444,6 +449,8 @@ def main() -> int:
         "POLAR_OBSERVER_HOST": str(observer.get("host", "0.0.0.0")),
         "POLAR_OBSERVER_PORT": str(observer.get("port", 18088)),
         "POLAR_PIPELINE_BUDGET_ENABLED": "1" if budget_enabled else "0",
+        "POLAR_NPU_SMI_SNAPSHOT_ENABLED": "1" if npu_snapshot_enabled else "0",
+        "POLAR_NPU_SMI_CACHE_DIR": npu_snapshot_dir,
         "POLAR_GEN_PIPELINE_MAX": gen_max if budget_enabled else "",
         "POLAR_OPT_PIPELINE_MAX": opt_max if budget_enabled else "",
         "POLAR_T3A_ATTEMPT_SPANS": "1" if gateway.get("t3a_attempt_spans", False) else "0",

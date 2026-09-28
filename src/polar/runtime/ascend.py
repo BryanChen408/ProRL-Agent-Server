@@ -101,9 +101,10 @@ def ascend_mount_create_args(cfg: dict) -> list[str]:
         wrapper = Path(__file__).with_name("npu_smi_cached.py")
         mounts.extend(
             (
-                "/usr/local/bin/npu-smi:/usr/local/bin/npu-smi.real:ro",
                 f"{wrapper}:/usr/local/bin/npu-smi:ro",
                 f"{wrapper}:/usr/local/sbin/npu-smi:ro",
+                f"{cfg.get('lock_dir') or '/dev/shm/npu-locks'}/npu-smi-snapshot:"
+                f"{cfg.get('lock_dir') or '/dev/shm/npu-locks'}/npu-smi-snapshot:ro",
             )
         )
     lock_mount = _lock_dir_mount(cfg, mounts + [str(mount) for mount in cfg.get("mounts", []) or []])
