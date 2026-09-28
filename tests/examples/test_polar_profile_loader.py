@@ -57,6 +57,7 @@ def test_real_profiles_separate_attempt_credit_from_call_limits(tmp_path, name):
         assert "max_turns" not in op["agent"]["settings"]
         assert "--max-turns" not in command
     else:
+        assert op["evaluator"]["config"]["reward_scheme"] == "correctness_banded"
         assert op["runtime"]["kwargs"]["ascend"]["cache_npu_smi_info"] is True
         assert op["evaluator"]["runtime"]["kwargs"]["ascend"]["cache_npu_smi_info"] is True
         snapshot_dir = str(Path(op["runtime"]["kwargs"]["ascend"]["lock_dir"]) / "npu-smi-snapshot")

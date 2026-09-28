@@ -72,8 +72,9 @@ if _DEPS:
         async def download_dir(self, remote_path: str, local_path: str) -> None: ...
 
     def _run(metrics, *, impl=True, exec_rc=0, refresh=True, with_fresh=True, agent_files=None, traces=None,
-             process_info=None, budget_status=None):
-        ev = OperatorJudgeEvaluator(op_name=OP, judge_command="bash pipeline.sh", metrics_path=METRICS)
+             process_info=None, budget_status=None, reward_scheme="legacy"):
+        ev = OperatorJudgeEvaluator(op_name=OP, judge_command="bash pipeline.sh", metrics_path=METRICS,
+                                    reward_scheme=reward_scheme)
         if agent_files is None:
             agent_files = {SUB: "# kernel"} if impl else {}
         agent = FakeRuntime(files=agent_files)
@@ -102,6 +103,29 @@ def test_success_speedup_reward():
     # 无 process_info.json:分量 0,与改造前逐分一致(优雅回退)
     assert res.metadata["process_reward"] == 0.0
     assert res.metadata["process_validation"] == "missing"
+
+
+def test_banded_reward_keeps_legacy_bonuses_diagnostic_only():
+    info = _mk_process_info([("verify", "fail", "correctness_failed", None)] * 3)
+    res, *_ = _run({"success": False, "ast_check_ok": True, "correctness_ok": False,
+                    "error_type": "correctness_failed", "cases_passed": 4, "cases_total": 5},
+                   reward_scheme="correctness_banded", process_info=info,
+                   traces=[Trace(finish_reason="length"), Trace(finish_reason="length")])
+    assert abs(res.outcome_reward - 0.086) < 1e-12
+    assert res.metadata["reward_scheme"] == "correctness_banded"
+    assert res.metadata["process_reward"] == res.metadata["truncation_penalty"] == 0.0
+    assert res.metadata["legacy_reward"] != res.outcome_reward
+    assert res.metadata["metrics"]["cases_passed"] == 4
+
+
+def test_banded_unknown_terminal_label_retries():
+    try:
+        _run({"success": False, "ast_check_ok": True, "error_type": "correctness_failed"},
+             reward_scheme="correctness_banded")
+    except RuntimeError as exc:
+        assert "missing terminal correctness" in str(exc)
+    else:
+        raise AssertionError("Unknown outcome must not become a negative training sample")
 
 
 def test_t3a_relocates_candidates_and_returns_process_reward(tmp_path):

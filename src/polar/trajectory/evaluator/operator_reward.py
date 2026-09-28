@@ -151,6 +151,44 @@ def reward_from_metrics(metrics: dict, env: dict | None = None) -> float:
     return 0.75 + 0.25 * (speedup * speedup - 1.0) / (speedup * speedup + 1.0)
 
 
+def banded_reward_from_metrics(metrics: dict) -> float:
+    """Correct [0.9, 1], incorrect [0, 0.1]; no independent process bonuses.
+
+    With at most eight valid trajectories, centered GRPO gives every correct
+    member of a mixed group positive advantage and every incorrect member negative.
+    Error stages come from the canonical pipeline after compilation/verification.
+    """
+    correct = metrics.get("correctness_ok")
+    if correct is not True and correct is not False:
+        raise ValueError("missing terminal correctness label; cannot score as incorrect")
+    if (metrics.get("success") is True and correct is False
+            or correct is True and metrics.get("ast_check_ok") is False):
+        raise ValueError("inconsistent terminal correctness/AST/success labels")
+    if correct is True:
+        speedup = (metrics.get("perf_data") or {}).get("speedup_vs_torch")
+        try:
+            speedup = float(speedup)
+        except (TypeError, ValueError):
+            return 0.9  # Correctness established, no usable benchmark.
+        if not math.isfinite(speedup) or speedup <= 0:
+            return 0.9
+        # Avoid overflow for finite but very large speedups.
+        h = 1 / (1 + (1 / speedup) ** 2) if speedup >= 1 else speedup**2 / (1 + speedup**2)
+        return 0.9 + 0.1 * h
+    if metrics.get("ast_check_ok") is not True:
+        return 0.0
+    error = str(metrics.get("error_type") or "")
+    if error in ("correctness_failed", "output_precheck_failed"):
+        passed, total = metrics.get("cases_passed"), metrics.get("cases_total")
+        p = (passed / total if type(passed) is int and type(total) is int
+             and total > 0 and 0 <= passed <= total else 0.0)
+        return 0.03 + 0.07 * p
+    if error in ("op_not_registered", "ascendc_load_failed", "ascendc_run_crashed",
+                 "ascendc_run_timeout", "ascendc_launch_failed", "stateful_impl_detected"):
+        return 0.02
+    return 0.0  # AST alone or an unknown stage earns no progress credit.
+
+
 def is_infra_failure(metrics: dict | None) -> bool:
     """True iff the eval couldn't run for infra reasons (=> retry, never score)."""
     if metrics is None:

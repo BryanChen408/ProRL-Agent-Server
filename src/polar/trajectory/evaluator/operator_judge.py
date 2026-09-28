@@ -27,6 +27,7 @@ change freely. Config (``EvaluatorSpec.config``):
                   path against the container ROOT — without this they'd never meet -> a deterministic
                   false-negative ``submission_missing``). Absolute paths pass through unchanged.
   judge_timeout   (float, default 1800)
+  reward_scheme   (str, default legacy) — correctness_banded enables the n<=8 reward bands
 
 Set ``evaluator.refresh_runtime: true`` in the request so final scoring uses a fresh judge runtime.
 """
@@ -45,6 +46,7 @@ from polar.runtime.base import BaseRuntime
 from polar.trajectory.evaluator.base import BaseTrajectoryEvaluator
 from polar.trajectory.evaluator.operator_reward import (
     apply_truncation_penalty,
+    banded_reward_from_metrics,
     classify_infra_error_text,
     judge_outcome,
     process_reward,
@@ -83,6 +85,7 @@ class OperatorJudgeEvaluator(BaseTrajectoryEvaluator):
         metrics_error_path: str = "judge_out/metrics_error.log",
         workdir: str | None = None,
         judge_timeout: float = 1800.0,
+        reward_scheme: str = "legacy",
         cannbot_runtime_root: str = "/opt/canonical/cannbot",
         task_path: str | None = None,
         verify_dir: str = "judge_out/cannbot_verify",
@@ -105,6 +108,9 @@ class OperatorJudgeEvaluator(BaseTrajectoryEvaluator):
         self.metrics_error_path = metrics_error_path
         self.workdir = workdir
         self.judge_timeout = float(judge_timeout)
+        if reward_scheme not in {"legacy", "correctness_banded"}:
+            raise ValueError(f"operator_judge unsupported reward_scheme: {reward_scheme!r}")
+        self.reward_scheme = reward_scheme
         self.cannbot_runtime_root = cannbot_runtime_root.rstrip("/")
         self.task_path = task_path or f"input/{op_name}.py"
         self.verify_dir = verify_dir
@@ -702,15 +708,27 @@ class OperatorJudgeEvaluator(BaseTrajectoryEvaluator):
         # 方向 -> 永不收敛;见 operator_reward.apply_truncation_penalty)。截断段 token 本体
         # 仍不过梯度。扣量写进 metadata,原 reward 可还原(reward + truncation_penalty)。
         reward, truncated_deduction = apply_truncation_penalty(base_reward, truncation_events)
+        legacy_reward = reward
+        if self.reward_scheme == "correctness_banded":
+            try:
+                reward = banded_reward_from_metrics(metrics)
+            except ValueError as exc:
+                raise RuntimeError(f"operator_judge invalid terminal metrics -> retry: {exc}") from exc
         return EvalResult(
             outcome_reward=reward,
             metadata={
                 "mode": self.MODE,
                 "op_name": self.op_name,
                 "reward": reward,
-                "reward_outcome_raw": outcome["reward"],  # 原 outcome 分;R = raw + process_reward - truncation_penalty
-                "process_reward": r_proc,
-                "process_components": process_components,
+                "reward_scheme": self.reward_scheme,
+                "legacy_reward": legacy_reward,
+                "legacy_reward_outcome_raw": outcome["reward"],
+                "legacy_process_reward": r_proc,
+                "legacy_truncation_penalty": truncated_deduction,
+                "reward_outcome_raw": reward if self.reward_scheme == "correctness_banded" else outcome["reward"],
+                "process_reward": 0.0 if self.reward_scheme == "correctness_banded" else r_proc,
+                "process_components": ({"disabled": "correctness_banded", "legacy": process_components}
+                                       if self.reward_scheme == "correctness_banded" else process_components),
                 "process_validation": process_why,
                 "success": bool(metrics.get("success", False)),
                 "error_type": outcome["error_type"],
@@ -726,7 +744,7 @@ class OperatorJudgeEvaluator(BaseTrajectoryEvaluator):
                     else None
                 ),
                 "truncation_events": truncation_events,
-                "truncation_penalty": truncated_deduction,
+                "truncation_penalty": 0.0 if self.reward_scheme == "correctness_banded" else truncated_deduction,
                 "submission_used": submission_used,  # which impl scored (best-so-far vs final)
                 "metrics_path": str(artifacts_dir / "metrics.json"),
                 "metrics_error_path": metrics_error_path,

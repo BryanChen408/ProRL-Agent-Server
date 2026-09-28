@@ -131,10 +131,12 @@ def _operator_prepare(
 
 
 def _evaluator_config(*, workflow: str, evaluator: dict, workdir: str) -> dict:
-    timeouts = {"judge_timeout": float(evaluator["judge_timeout"])} if "judge_timeout" in evaluator else {}
+    options = {"judge_timeout": float(evaluator["judge_timeout"])} if "judge_timeout" in evaluator else {}
+    if "reward_scheme" in evaluator:
+        options["reward_scheme"] = str(evaluator["reward_scheme"])
     if workflow == "cannbot":
         return {
-            **timeouts,
+            **options,
             "lazy_refresh_runtime": True,
             "op_name": "{op_name}",
             "judge_mode": "cannbot",
@@ -143,7 +145,7 @@ def _evaluator_config(*, workflow: str, evaluator: dict, workdir: str) -> dict:
             "workdir": workdir,
         }
     config = {
-        **timeouts,
+        **options,
         "lazy_refresh_runtime": True,
         "op_name": "{op_name}",
         "judge_command": str(evaluator.get("judge_command")),
