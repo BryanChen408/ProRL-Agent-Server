@@ -27,7 +27,7 @@ operator_runtime:
   backend: ascendc      # ← delta 5:prepare 走 input/{op}.py + --backend ascendc(triton 侧无此字段=默认 triton)
   # ← delta 6:算子同名 .json(NPUKernelBench 用例规格,get_input_groups() 要读)随 prepare 上传到 input/。
   #   {op}.py 走 vime task_source 内容寻址,.json 没有该通道 → 从数据集目录直传。triton 侧无此字段=不产生该动作。
-  task_assets_dir: /home/docker/datasets/ascendc-rl-datasets/NPUKernelBench/op_tasks
+  task_assets_dir: /home/docker/datasets/operator_tasks_npu_target_5case_v2_strict/data/op_tasks
   # ← delta 11:asc-devkit(上游 init.sh Step 4 会 clone 的算子开发资料仓)。
   #   $ASC_DEVKIT_DIR 在 21 个 skill 文档里被引用 46 次,是出现最多的环境变量;
   #   ascendc-docs-search 整个 skill 就是查它。只读挂到 /opt/asc-devkit,不进 workdir 拷贝。
@@ -41,8 +41,8 @@ operator_runtime:
   # 准备命令见 README.md；原始 A2/A3 副本保留，session 不重复清理。
   asc_devkit_dir: /home/docker/asc-devkit-9.0.0-a2a3-readable
   budget:
-    generation_max: 30
-    optimization_max: 6
+    generation_max: 40
+    optimization_max: 4
     interval_seconds: 2
   npu_lease:
     enabled: true
@@ -83,7 +83,7 @@ operator:
       SOC_VERSION: "ascend910b1"
       ASCENDC_SOC_VERSION: "ascend910b1"
       ASC_DEVKIT_DIR: "/opt/asc-devkit"
-      CLAUDE_CODE_MAX_CONTEXT_TOKENS: "409600"
+      CLAUDE_CODE_MAX_CONTEXT_TOKENS: "524288"
 
   agent:
     # ← harness 侧 env:随 `claude` 那条 exec 下发,覆盖容器 env。BASH_*_TIMEOUT_MS 只有
@@ -116,7 +116,7 @@ operator:
     #   项目级那份不能省:CLAUDE.md 和任务 prompt 里的命令都走相对路径 `.claude/skills/...`。
     #   triton 侧无此字段 = 保持 /opt/canonical/skills(它的 prepare 不拷 skills,必须靠用户级)。
     skills_path: ""
-    max_output_tokens: 49152
+    max_output_tokens: 65536
     # 由 loader 导出到 gateway；推理引擎需加载 Polar thinking-budget 插件。
     thinking_token_budget: null
     inference_timeout_ms: 14400000
@@ -140,7 +140,7 @@ operator:
       timeout 参数必须显式填 2700000(45 分钟)——禁止省略 timeout,也不要填更小的值
       (小于实际耗时会被自动转后台);if it still gets auto-backgrounded, read the output file it
       prints to fetch the verdict and error output.
-      每次模型回复的总输出预算上限为 49152 tokens，包含思考、正文和工具调用参数。
+      每次模型回复的总输出预算上限为 65536 tokens，包含思考、正文和工具调用参数。
       这是单次回复的上限，不是应当用满的目标，也不是整个 session 的剩余预算。
       尽早结束已完成的分析，为必要的正文或工具调用留出空间。
       输出纪律：按 CLAUDE.md 在主轨迹中完成简短设计核对（每项一两句），

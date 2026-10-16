@@ -263,6 +263,21 @@ def main() -> int:
     eval_env = {
         "DISABLE_AUTOUPDATER": "1",
     }
+    # Keep the fresh Judge isolated, but give it the same read-only AscendC
+    # build contract as the Agent.  These are toolchain paths/target selectors,
+    # not agent state or scores; omitting them makes devkit-only headers visible
+    # to pipeline but invisible to the final Judge.
+    for key in (
+        "SOC_VERSION",
+        "ASCENDC_SOC_VERSION",
+        "ASC_DEVKIT_DIR",
+        "ASCEND_HOME_PATH",
+        "ASCEND_INSTALL_PATH",
+        "CMAKE_PREFIX_PATH",
+        "TORCH_NPU_PATH",
+    ):
+        if key in runtime_env:
+            eval_env[key] = runtime_env[key]
     if npu_snapshot_enabled:
         runtime_env["POLAR_NPU_SMI_CACHE_DIR"] = npu_snapshot_dir
         eval_env["POLAR_NPU_SMI_CACHE_DIR"] = npu_snapshot_dir
@@ -289,6 +304,12 @@ def main() -> int:
                        POLAR_OPERATOR_REWARD_MODULE="/opt/polar/operator_reward.py")
     upload_source = str(op_assets_dir / "op_tasks" / "{op_name}.py")
     workdir = str(runtime.get("workdir", "/opt/workspace/agent_workdir"))
+    if backend == "ascendc" and workflow == "legacy":
+        # Expand inside Judge, preserving its existing Python search paths.
+        evaluator["judge_command"] = (
+            f'export PYTHONPATH="$PYTHONPATH":{shlex.quote(workdir)}; '
+            + str(evaluator.get("judge_command"))
+        )
     # ascendc 专用:算子同名 .json(用例规格)所在的数据集目录;triton 侧不配=不产生该动作
     task_assets_dir = str(operator_runtime.get("task_assets_dir") or "").strip() or None
     # ascendc 专用:只保留 canonical/skills 的 skill(CLI 自带的关掉);triton 侧不配=不产生该参数

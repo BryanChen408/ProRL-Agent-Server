@@ -721,9 +721,16 @@ if [[ ! -f "$JSON_SRC" ]] && grep -q "get_input_groups" "$TASK_SRC" 2>/dev/null;
 fi
 
 inject_baseline() {
+  # Replace submission-owned files/links before installing trusted references.
+  rm -f -- "$TASK_DIR/model.py" "$TASK_DIR/${OP_NAME}.json" "$TASK_DIR/model.json" || return 1
   cp -f "$TASK_SRC" "$TASK_DIR/model.py" || return 1
-  [[ -f "$JSON_SRC" ]] && { cp -f "$JSON_SRC" "$TASK_DIR/${OP_NAME}.json" || return 1; }
-  chmod 444 "$TASK_DIR/model.py" "$TASK_DIR/${OP_NAME}.json" 2>/dev/null || true
+  if [[ -f "$JSON_SRC" ]]; then
+    cp -f "$JSON_SRC" "$TASK_DIR/${OP_NAME}.json" || return 1
+    # References deriving the sidecar from __file__ now execute as model.py.
+    cp -f "$JSON_SRC" "$TASK_DIR/model.json" || return 1
+    chmod 444 "$TASK_DIR/${OP_NAME}.json" "$TASK_DIR/model.json" || return 1
+  fi
+  chmod 444 "$TASK_DIR/model.py" || return 1
   return 0
 }
 if ! inject_baseline; then

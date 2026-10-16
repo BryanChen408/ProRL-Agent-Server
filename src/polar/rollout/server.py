@@ -522,6 +522,24 @@ async def _drive_confirm_drained(
     *,
     wait_timeout_seconds: float,
 ) -> PolicyTransitionRecord:
+    # Session/container cleanup is asynchronous.  Once admission is durably paused
+    # and VIME has proved an all-engine abort, old-policy inference cannot continue;
+    # waiting for every DELETE/POSTRUN fence here only makes training depend on
+    # best-effort resource reclamation.
+    paused_snapshot = list(record.gateway_nodes.values())
+    if record.engine_abort_confirmed and _all_gateways(
+        paused_snapshot,
+        lambda payload: (
+            payload.get("paused") is True
+            and payload.get("transition_id") == record.transition_id
+        ),
+    ):
+        return state.policy_transitions.update(
+            record.transition_id,
+            phase=PolicyTransitionPhase.READY_FOR_TRAINING,
+            clear_error=True,
+        )
+
     deadline = time.monotonic() + max(0.0, wait_timeout_seconds)
     while True:
         observed = await _observe_gateway_control()
@@ -790,6 +808,18 @@ async def _reconcile_transition(
             wait_timeout_seconds=wait_timeout_seconds,
         )
     if record.phase == PolicyTransitionPhase.READY_FOR_TRAINING:
+        # Reconciliation must not turn asynchronous cleanup back into a training
+        # prerequisite.  The durable pause acknowledgement plus VIME's abort proof
+        # is the fence; session/container reclamation continues in the background.
+        paused_snapshot = list(record.gateway_nodes.values())
+        if record.engine_abort_confirmed and _all_gateways(
+            paused_snapshot,
+            lambda payload: (
+                payload.get("paused") is True
+                and payload.get("transition_id") == record.transition_id
+            ),
+        ):
+            return record
         observed = await _observe_gateway_control()
         all_paused = _all_gateways(
             observed,
