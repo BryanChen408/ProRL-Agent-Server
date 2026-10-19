@@ -106,6 +106,9 @@ def test_rollout_manager_defers_real_pipeline_delete_ack_to_resume_fence() -> No
                 return None
 
         class Client:
+            async def aclose(self):
+                pass
+
             async def delete(self, url, params=None):
                 delete_calls.append((url, params))
                 delete_started.set()
@@ -119,7 +122,7 @@ def test_rollout_manager_defers_real_pipeline_delete_ack_to_resume_fence() -> No
         )
 
         async def start() -> None:
-            pipeline._client = Client()
+            pipeline._new_client = Client
             pipeline._started = True
 
         async def dispatch(session):
@@ -176,6 +179,9 @@ def test_rollout_manager_is_fail_closed_when_gateway_delete_fails() -> None:
                 raise RuntimeError("gateway unavailable")
 
         class Client:
+            async def aclose(self):
+                pass
+
             async def delete(self, url, params=None):
                 nonlocal delete_calls
                 delete_calls += 1
@@ -189,7 +195,7 @@ def test_rollout_manager_is_fail_closed_when_gateway_delete_fails() -> None:
         )
 
         async def start() -> None:
-            pipeline._client = Client()
+            pipeline._new_client = Client
             pipeline._started = True
 
         async def dispatch(session):
@@ -244,6 +250,9 @@ def test_rollout_manager_resume_fence_recovers_transient_gateway_delete_failure(
                     raise RuntimeError("temporary gateway failure")
 
         class Client:
+            async def aclose(self):
+                pass
+
             async def delete(self, url, params=None):
                 nonlocal delete_calls
                 delete_calls += 1
@@ -257,7 +266,7 @@ def test_rollout_manager_resume_fence_recovers_transient_gateway_delete_failure(
         )
 
         async def start() -> None:
-            pipeline._client = Client()
+            pipeline._new_client = Client
             pipeline._started = True
 
         async def dispatch(session):
@@ -376,6 +385,9 @@ def test_pipeline_policy_cutoff_waits_for_gateway_delete_ack() -> None:
                 return None
 
         class Client:
+            async def aclose(self):
+                pass
+
             async def delete(self, url, params=None):
                 calls.append((url, params))
                 return Response()
@@ -385,7 +397,7 @@ def test_pipeline_policy_cutoff_waits_for_gateway_delete_ack() -> None:
             save_dir=None,
             scheduler=NodeScheduler(),
         )
-        pipeline._client = Client()
+        pipeline._new_client = Client
         session = SessionContext(
             session_id="session-old-policy",
             task_id="task-old-policy",

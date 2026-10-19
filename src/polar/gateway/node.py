@@ -23,6 +23,7 @@ from polar.gateway.dispatcher import (
     SessionStage,
 )
 from polar.gateway.inflight import InflightGenerationTracker
+from polar.gateway.http_client import closing_client, new_client
 from polar.gateway.operator_completion import completion_state
 from polar.gateway.operator_best import best_root, selected_candidate, retain_best, evaluation_records
 from polar.gateway.session import SessionRegistry
@@ -100,7 +101,6 @@ class GatewayNodeManager:
         self.evaluators = evaluators
         self.default_runtime = default_runtime
         self._session_base_dir = session_base_dir
-        self._client = httpx.AsyncClient(timeout=30.0)
         self._dispatcher = SessionDispatcher(
             max_init_workers=max_init_workers,
             max_run_workers=max_run_workers,
@@ -144,7 +144,6 @@ class GatewayNodeManager:
         if cleanup_tasks:
             await asyncio.gather(*cleanup_tasks, return_exceptions=True)
         self._policy_cleanup_tasks.clear()
-        await self._client.aclose()
 
     async def _register_with_rollout_server(self) -> None:
         if self._control_client is None:
@@ -869,13 +868,13 @@ class GatewayNodeManager:
         url = self._session_affinity_release_url
         if url is None:
             return
+        if not self.storage.is_session_closed(session_id):
+            logger.warning("Skipping affinity release for non-terminal session %s", session_id)
+            return
         try:
-            response = await self._client.post(
-                url,
-                json={"session_id": session_id},
-                timeout=1.0,
-            )
-            response.raise_for_status()
+            async with closing_client(new_client(timeout=1.0)) as client:
+                response = await client.post(url, json={"session_id": session_id})
+                response.raise_for_status()
         except Exception:
             logger.warning(
                 "Failed to release inference affinity for terminal session %s via %s",
@@ -1668,8 +1667,9 @@ class GatewayNodeManager:
         if not callback_url:
             return False
         try:
-            response = await self._client.post(callback_url, json=result.model_dump(mode="json"))
-            response.raise_for_status()
+            async with closing_client(new_client(timeout=30.0)) as client:
+                response = await client.post(callback_url, json=result.model_dump(mode="json"))
+                response.raise_for_status()
             return True
         except Exception:
             logger.warning(

@@ -141,7 +141,7 @@ async def run():
     async with httpx.AsyncClient(
         transport=httpx.MockTransport(handler), base_url=inference["base_url"]
     ) as http:
-        client._client = http
+        client._new_client = lambda: http
         response = await client.completion({"messages": [], "max_tokens": 49152})
     print(json.dumps({"wire": wire, "captured_budget": response["_polar_thinking_token_budget"]}))
 asyncio.run(run())

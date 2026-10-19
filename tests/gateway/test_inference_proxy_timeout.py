@@ -15,6 +15,9 @@ def test_health_probe_timeout_cancels_only_probe() -> None:
         class BlockingHTTPClient:
             is_closed = False
 
+            async def aclose(self):
+                self.is_closed = True
+
             async def get(self, path):
                 assert path == "/health"
                 try:
@@ -25,7 +28,7 @@ def test_health_probe_timeout_cancels_only_probe() -> None:
         client = InferenceClient(
             "http://127.0.0.1:30000", SGLangEngine(), liveness_timeout_seconds=900
         )
-        client._client = BlockingHTTPClient()
+        client._new_client = BlockingHTTPClient
         client._HEALTH_TIMEOUT_SECONDS = 0.01
         with pytest.raises(UpstreamTimeoutError, match="health probe timed out"):
             await asyncio.wait_for(client.health(), timeout=1)
@@ -134,12 +137,15 @@ def test_repeated_cancellation_cannot_leak_generation_slot() -> None:
         class BlockingHTTPClient:
             is_closed = False
 
+            async def aclose(self):
+                self.is_closed = True
+
             async def post(self, *args, **kwargs):  # noqa: ANN002, ANN003, ANN202
                 request_started.set()
                 await asyncio.Event().wait()
 
         client = InferenceClient("http://127.0.0.1:30000", SGLangEngine())
-        client._client = BlockingHTTPClient()
+        client._new_client = BlockingHTTPClient
         generation = asyncio.create_task(
             client.completion({"model": "served", "messages": []})
         )

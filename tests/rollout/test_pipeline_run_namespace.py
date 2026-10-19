@@ -36,7 +36,7 @@ def test_rollout_dispatch_and_wait_include_independent_postrun_budget(tmp_path):
 
     async def run():
         async with httpx.AsyncClient(transport=httpx.MockTransport(dispatch)) as client:
-            pipeline._client = client
+            pipeline._clients[session.session_id] = client
             dispatched = await pipeline._dispatch_session(session)
             started = time.monotonic()
 

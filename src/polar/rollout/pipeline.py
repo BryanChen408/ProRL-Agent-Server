@@ -12,6 +12,7 @@ from pathlib import Path
 
 import httpx
 
+from polar.gateway.http_client import close_client, closing_client, new_client
 from polar.platform.events import EventBus
 from polar.run_namespace import run_dir_name, run_id_from_metadata
 from polar.rollout.balancer import NodeScheduler
@@ -57,7 +58,7 @@ class Pipeline:
         self.callback_grace_seconds = callback_grace_seconds
         self.event_bus = event_bus
 
-        self._client: httpx.AsyncClient | None = None
+        self._clients: dict[str, httpx.AsyncClient] = {}
         self._started = False
         self._lifecycle_lock = asyncio.Lock()
         self._pending: dict[str, asyncio.Future[SessionResult]] = {}
@@ -71,7 +72,6 @@ class Pipeline:
         async with self._lifecycle_lock:
             if self._started:
                 return
-            self._client = httpx.AsyncClient(timeout=30.0)
             self._started = True
 
     async def close(self) -> None:
@@ -83,9 +83,9 @@ class Pipeline:
                     if not future.done():
                         future.cancel()
                 self._pending.clear()
-            if self._client is not None:
-                await self._client.aclose()
-                self._client = None
+            for client in tuple(self._clients.values()):
+                await close_client(client)
+            self._clients.clear()
             self._started = False
 
     async def run_batch(
@@ -122,14 +122,36 @@ class Pipeline:
         path = self._result_path(task_id, session_id, metadata)
         return None if path is None else str(path)
 
+    def _new_client(self) -> httpx.AsyncClient:
+        return new_client(timeout=30.0)
+
     async def _dispatch_and_collect(
         self,
         session: SessionContext,
         callback: ResultCallback | None,
         state_callback: StateCallback | None,
     ) -> SessionResult:
-        if self._client is None:
+        if not self._started:
             raise RuntimeError("pipeline has not been started")
+        if session.session_id in self._clients:
+            raise RuntimeError("session already has an active dispatch client")
+        # Reuse connections for this session's frequent polls, not across sessions.
+        async with closing_client(self._new_client()) as client:
+            self._clients[session.session_id] = client
+            try:
+                return await self._collect_session(session, callback, state_callback)
+            finally:
+                self._clients.pop(session.session_id, None)
+
+    async def _collect_session(
+        self,
+        session: SessionContext,
+        callback: ResultCallback | None,
+        state_callback: StateCallback | None,
+    ) -> SessionResult:
+        client = self._clients.get(session.session_id)
+        if client is None:
+            raise RuntimeError("session dispatch client is not active")
 
         loop = asyncio.get_running_loop()
         future = loop.create_future()
@@ -200,8 +222,9 @@ class Pipeline:
             await self._cleanup_session(session)
 
     async def _dispatch_session(self, session: SessionContext) -> SessionDispatchRequest:
-        if self._client is None:
-            raise RuntimeError("pipeline has not been started")
+        client = self._clients.get(session.session_id)
+        if client is None:
+            raise RuntimeError("session dispatch client is not active")
 
         while True:
             if session.cancel_requested:
@@ -228,7 +251,7 @@ class Pipeline:
                 metadata=dict(session.request.metadata),
             )
             try:
-                response = await self._client.post(
+                response = await client.post(
                     f"{node.gateway_url}/sessions",
                     json=dispatch_request.model_dump(mode="json"),
                     timeout=min(30.0, dispatch_timeout),
@@ -273,11 +296,12 @@ class Pipeline:
         the session belongs to this task, the rollout server should continue to
         wait for its result instead of retrying forever.
         """
-        if self._client is None:
+        client = self._clients.get(session.session_id)
+        if client is None:
             return False
 
         try:
-            response = await self._client.get(
+            response = await client.get(
                 f"{gateway_url}/sessions/{session.session_id}",
                 timeout=5.0,
             )
@@ -401,12 +425,13 @@ class Pipeline:
         *,
         timeout: float,
     ) -> tuple[str | None, SessionResult | None]:
-        if self._client is None:
-            raise RuntimeError("pipeline has not been started")
+        client = self._clients.get(session.session_id)
+        if client is None:
+            raise RuntimeError("session dispatch client is not active")
         if session.gateway_url is None:
             raise RuntimeError("session gateway_url was not assigned")
 
-        response = await self._client.get(
+        response = await client.get(
             f"{session.gateway_url}/sessions/{session.session_id}",
             timeout=min(30.0, timeout),
         )
@@ -458,19 +483,22 @@ class Pipeline:
         reason: str | None = None,
         strict: bool = False,
     ) -> None:
-        if self._client is None or session.gateway_url is None:
+        if session.gateway_url is None:
             if reason:
                 session.cancel_acknowledged = True
                 session.cancel_error = None
             return
 
         try:
-            response = await self._client.delete(
-                f"{session.gateway_url}/sessions/{session.session_id}",
-                params={"reason": reason} if reason else None,
-            )
-            if response.status_code not in {200, 404}:
-                response.raise_for_status()
+            # Cutoff cleanup can outlive a cancelled poll. Never queue DELETE
+            # behind that session's transport, or reuse its cancelled pool.
+            async with closing_client(self._new_client()) as client:
+                response = await client.delete(
+                    f"{session.gateway_url}/sessions/{session.session_id}",
+                    params={"reason": reason} if reason else None,
+                )
+                if response.status_code not in {200, 404}:
+                    response.raise_for_status()
             if reason:
                 session.cancel_acknowledged = True
                 session.cancel_error = None

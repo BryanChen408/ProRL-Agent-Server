@@ -617,7 +617,7 @@ class RolloutManager:
         errors = self._cancel_errors(task_ids)
         retried_sessions = 0
         retry_sessions = self._policy_cutoff_sessions_needing_retry(task_ids)
-        retry_client_ready = getattr(self.pipeline, "_client", None) is not None
+        retry_client_ready = getattr(self.pipeline, "_started", False)
         if errors and retry_sessions and timeout_seconds > 0 and retry_client_ready:
             retried_sessions = len(retry_sessions)
             logger.warning(

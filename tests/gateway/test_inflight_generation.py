@@ -316,7 +316,7 @@ def test_node_manager_close_inflight_generations_is_best_effort() -> None:
     asyncio.run(_run())
 
 
-def test_node_manager_releases_terminal_session_affinity_best_effort() -> None:
+def test_node_manager_releases_terminal_session_affinity_best_effort(monkeypatch) -> None:
     async def _run() -> None:
         class FakeResponse:
             def raise_for_status(self) -> None:
@@ -326,6 +326,9 @@ def test_node_manager_releases_terminal_session_affinity_best_effort() -> None:
             def __init__(self) -> None:
                 self.calls = []
 
+            async def aclose(self):
+                pass
+
             async def post(self, url, **kwargs):
                 self.calls.append((url, kwargs))
                 return FakeResponse()
@@ -334,23 +337,29 @@ def test_node_manager_releases_terminal_session_affinity_best_effort() -> None:
         manager._session_affinity_release_url = (
             "http://127.0.0.1:8011/vime/release_sticky_session"
         )
-        manager._client = FakeClient()
+        http = FakeClient()
+        manager.storage = SessionStore()
+        manager.storage.mark_session_closed("sess1")
+        monkeypatch.setattr("polar.gateway.node.httpx.AsyncClient", lambda **kwargs: http)
 
         await manager.release_session_affinity_best_effort("sess1")
 
-        assert manager._client.calls == [
+        assert http.calls == [
             (
                 "http://127.0.0.1:8011/vime/release_sticky_session",
-                {"json": {"session_id": "sess1"}, "timeout": 1.0},
+                {"json": {"session_id": "sess1"}},
             )
         ]
 
     asyncio.run(_run())
 
 
-def test_node_manager_affinity_release_failure_does_not_escape() -> None:
+def test_node_manager_affinity_release_failure_does_not_escape(monkeypatch) -> None:
     async def _run() -> None:
         class FailingClient:
+            async def aclose(self):
+                pass
+
             async def post(self, *args, **kwargs):
                 raise RuntimeError("router unavailable")
 
@@ -358,7 +367,9 @@ def test_node_manager_affinity_release_failure_does_not_escape() -> None:
         manager._session_affinity_release_url = (
             "http://127.0.0.1:8011/vime/release_sticky_session"
         )
-        manager._client = FailingClient()
+        manager.storage = SessionStore()
+        manager.storage.mark_session_closed("sess1")
+        monkeypatch.setattr("polar.gateway.node.httpx.AsyncClient", lambda **kwargs: FailingClient())
 
         await manager.release_session_affinity_best_effort("sess1")
 

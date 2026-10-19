@@ -12,11 +12,13 @@ import json
 import logging
 import os
 from collections.abc import Callable
+from contextlib import asynccontextmanager
 from typing import Any
 
 import httpx
 
 from polar.gateway.engine import InferenceEngine
+from polar.gateway.http_client import close_client, closing_client, new_client
 
 logger = logging.getLogger(__name__)
 
@@ -86,7 +88,7 @@ class InferenceClient:
             if liveness_timeout_seconds is not None
             else self._read_liveness_timeout_seconds()
         )
-        self._client: httpx.AsyncClient | None = None
+        self._clients: set[httpx.AsyncClient] = set()
         # A gateway restarted in the middle of a weight transition must not briefly
         # reopen inference before the rollout coordinator reconnects.
         self._generation_paused = bool(initially_paused)
@@ -114,31 +116,24 @@ class InferenceClient:
             raise ValueError("liveness timeout must be greater than 0")
         return timeout
 
-    async def _get_client(self) -> httpx.AsyncClient:
-        if self._client is None or self._client.is_closed:
-            self._client = httpx.AsyncClient(
-                base_url=self.base_url,
-                timeout=httpx.Timeout(self._liveness_timeout_seconds, connect=30),
-                # No connection reuse. Closing an idle keep-alive connection is a
-                # UNILATERAL server decision with no protocol handshake, and a write
-                # to a half-closed socket SUCCEEDS -- the peer's FIN only surfaces on
-                # the following read, as an httpx.ReadError wrapping anyio.EndOfStream
-                # (which stringifies to ""). The upstream LB proxy runs uvicorn with
-                # its default timeout_keep_alive=5s while agent turns idle for minutes
-                # between tool calls (compile / NPU verify), so a pooled connection is
-                # routinely dead by the time the next turn reuses it. Measured on run
-                # 092443: 252 such failures, ~52/h, each one flagging an otherwise
-                # complete session non-trainable. Client-side expiry tuning only
-                # narrows the window (both ends time independently); dropping reuse
-                # removes the possibly-dead-pooled-socket state entirely. Cost is one
-                # TCP handshake per request -- both ends are on the same host, no TLS,
-                # so ~50-200us against a request that generates for seconds to minutes.
-                # max_connections is restated because httpx.DEFAULT_LIMITS only applies
-                # when `limits` is omitted entirely -- a bare Limits(...) leaves it None,
-                # i.e. UNLIMITED concurrent sockets, which is not the change we want.
-                limits=httpx.Limits(max_connections=100, max_keepalive_connections=0),
-            )
-        return self._client
+    def _new_client(self) -> httpx.AsyncClient:
+        # One pool per request: cancelled/unused CONNECTING entries cannot
+        # accumulate across turns. Session affinity remains in x-session-id.
+        return new_client(
+            base_url=self.base_url,
+            timeout=httpx.Timeout(self._liveness_timeout_seconds, connect=30),
+            limits=httpx.Limits(max_connections=1, max_keepalive_connections=0),
+        )
+
+    @asynccontextmanager
+    async def _request_client(self):
+        client = self._new_client()
+        self._clients.add(client)
+        try:
+            async with closing_client(client):
+                yield client
+        finally:
+            self._clients.discard(client)
 
     async def _read_error_body(self, response: httpx.Response) -> dict[str, Any] | str | None:
         content = await response.aread()
@@ -192,7 +187,6 @@ class InferenceClient:
             # engine-admission point so it cannot run with the next policy's weights.
             if generation_guard is not None and not generation_guard():
                 raise UpstreamError("generation rejected by policy epoch fence")
-            client = await self._get_client()
             from copy import deepcopy
 
             request_copy = deepcopy(request)
@@ -214,11 +208,12 @@ class InferenceClient:
                     if _session_id:
                         headers["x-session-id"] = _session_id
             try:
-                resp = await client.post(
-                    "/v1/chat/completions",
-                    json=request_copy,
-                    headers=headers,
-                )
+                async with self._request_client() as client:
+                    resp = await client.post(
+                        "/v1/chat/completions",
+                        json=request_copy,
+                        headers=headers,
+                    )
             except httpx.RequestError as exc:
                 raise self._translate_transport_error(exc) from exc
         finally:
@@ -303,9 +298,9 @@ class InferenceClient:
 
     async def list_models(self) -> dict[str, Any]:
         """Passthrough GET /v1/models."""
-        client = await self._get_client()
         try:
-            resp = await client.get("/v1/models")
+            async with self._request_client() as client:
+                resp = await client.get("/v1/models")
         except httpx.RequestError as exc:
             raise self._translate_transport_error(exc) from exc
         await self._raise_for_status(resp)
@@ -313,11 +308,11 @@ class InferenceClient:
 
     async def health(self) -> dict[str, Any]:
         """Bound the upstream probe below the observer's 5-second deadline."""
-        client = await self._get_client()
         try:
-            resp = await asyncio.wait_for(
-                client.get("/health"), timeout=self._HEALTH_TIMEOUT_SECONDS
-            )
+            async with self._request_client() as client:
+                resp = await asyncio.wait_for(
+                    client.get("/health"), timeout=self._HEALTH_TIMEOUT_SECONDS
+                )
         except asyncio.TimeoutError as exc:
             raise UpstreamTimeoutError("Upstream health probe timed out") from exc
         except httpx.RequestError as exc:
@@ -337,5 +332,5 @@ class InferenceClient:
             return {"status": "ok", "body": text}
 
     async def close(self):
-        if self._client and not self._client.is_closed:
-            await self._client.aclose()
+        for client in tuple(self._clients):
+            await close_client(client)

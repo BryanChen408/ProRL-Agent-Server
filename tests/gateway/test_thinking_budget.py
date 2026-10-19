@@ -47,7 +47,7 @@ def test_budget_capture_and_training_mask(monkeypatch, forced_indices):
         async with httpx.AsyncClient(
             transport=httpx.MockTransport(handler), base_url="http://test"
         ) as http:
-            client._client = http
+            client._new_client = lambda: http
             return await client.completion({"messages": [], "max_tokens": 8})
 
     captured = asyncio.run(run())
