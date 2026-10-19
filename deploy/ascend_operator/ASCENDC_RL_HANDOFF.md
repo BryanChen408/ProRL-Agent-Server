@@ -1,3 +1,7 @@
+> 2026-10-16 更新：T2A 提交包携带 `__polar_reference/`，pipeline 与 Judge
+> 直接使用包内基准，不再与外部 input 比较；旧包无该目录时才回退。
+> 下文关于独立数据集覆盖、防篡改能力的描述属于历史设计，现行规则见 EVAL_PIPELINE_DESIGN.md。
+
 # AscendC 算子 RL — 交接文档
 
 把 vime + polar 的算子 agentic RL 从"写 Triton 算子按 speedup 打分"改成"写 AscendC 算子",
@@ -78,7 +82,7 @@ agent 容器、judge 容器、polar 三方共用同一套 flock 锁 `/dev/shm/np
 CLAUDE.md 的 Phase 0-7 是 cannbot `ascend-kernel-developer.md` 的**逐字拷贝**,覆盖声明写在文末契约区:
 
 - **跳过 Phase 2(用例精简)与 Phase 6(全量恢复)** —— 数据集已定稿为每算子 5 个 case,
-  judge 恒用数据集原版覆盖,精简只会让自检与判分不一致。不要调 `ascendc-case-simplifier`。
+  pipeline 和 judge 使用同一包内基准快照；仍禁止修改或精简正式用例。不要调 `ascendc-case-simplifier`。
 - **Phase 4.3 / 4-D / Phase 5 里 8 处"运行 evaluate_ascendc.sh / performance.py"** → 一律改跑固定入口。
 
 ## 当前状态与下一步

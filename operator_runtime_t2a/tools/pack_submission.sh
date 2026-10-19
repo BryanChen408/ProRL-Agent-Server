@@ -99,6 +99,24 @@ if [[ "$PROMOTE" != "1" ]]; then
     echo "[pack] WARN: 当前 candidate 未发现 torch.ops.npu 调用；仍打包供固定入口产生权威 metrics"
   fi
 
+  # Snapshot the reference used by this candidate; promotion retains this exact tar.
+  REF_SRC="$(_abs_from_workdir "${POLAR_PACK_TASK_SOURCE:-input/${OP_NAME}.py}")"
+  REF_STAGE=""
+  REF_ARGS=()
+  if [[ -f "$REF_SRC" ]]; then
+    REF_STAGE=$(mktemp -d) || exit 1
+    trap '[[ -z "$REF_STAGE" ]] || rm -rf -- "$REF_STAGE"' EXIT
+    mkdir "$REF_STAGE/__polar_reference" || exit 1
+    cp "$REF_SRC" "$REF_STAGE/__polar_reference/model.py" || exit 1
+    REF_JSON="$(dirname "$REF_SRC")/${OP_NAME}.json"
+    if [[ -f "$REF_JSON" ]]; then
+      cp "$REF_JSON" "$REF_STAGE/__polar_reference/cases.json" || exit 1
+    elif grep -q get_input_groups "$REF_SRC"; then
+      echo "[pack] FAILED: missing reference cases: $REF_JSON" >&2; exit 1
+    fi
+    REF_ARGS=(-C "$REF_STAGE" __polar_reference)
+  fi
+
   mkdir -p "$(dirname "$CANDIDATE")" "$(dirname "$PUBLIC_TARBALL")"
   _TMP=$(mktemp "${CANDIDATE}.tmp.XXXXXX") \
     || { echo "[pack] FAILED: 无法创建 candidate 临时文件:$CANDIDATE" >&2; exit 1; }
@@ -106,7 +124,7 @@ if [[ "$PROMOTE" != "1" ]]; then
           --exclude='build' --exclude='dist' --exclude='*.so' --exclude='*.a' \
           --exclude='*.o' --exclude='*.whl' --exclude='*.egg-info' \
           --exclude='__pycache__' --exclude='.eval_last.log' \
-          "$OP_NAME" 2>/dev/null); then
+          "$OP_NAME" "${REF_ARGS[@]}" 2>/dev/null); then
     rm -f "$_TMP"
     echo "[pack] FAILED: tar 打包失败" >&2; exit 1
   fi

@@ -13,6 +13,12 @@ argument-hint: >
 
 你是一名 AscendC kernel 转译与实现专家。你的目标是在 Polar 已经为本题生成的工程骨架上完成 AscendC kernel，并通过 AscendC 验证。简单算子以 `model.py` 为语义输入；复杂算子还要参考 TileLang 设计。TileLang 是可选设计输入，不是 correctness gate，也不是工程初始化来源。
 
+## Polar 提交基准
+
+固定 pipeline 自动将 reference 和 JSON 放入提交包的 `__polar_reference/`。
+自检与最终 Judge 都使用该快照，不比较外部 `input/`；旧包无快照时才回退。
+本 skill 只修改实现，不修改输入、reference、快照或手工重打提交包。
+
 ## 前置条件
 本阶段开始前，以下产物必须已经存在：
 - `{output_dir}/model.py` — 唯一语义参考

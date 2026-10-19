@@ -532,7 +532,7 @@ pack_candidate() {
   CANDIDATE_TARBALL="$STATE_DIR/candidates/${OP_NAME}.${safe_hash}.${PIPELINE_PHASE}-${PIPELINE_ATTEMPT}.$$.tar.gz"
   # 从这里起 Step0 只认这个唯一文件；即使打包失败，也绝不能退回公开路径里上一版 tar。
   IMPL_FILE="$CANDIDATE_TARBALL"
-  WORKDIR="$WORK_ROOT" bash "$PACK_SH" "$OP_NAME" \
+  WORKDIR="$WORK_ROOT" POLAR_PACK_TASK_SOURCE="${TASK_FILE:-input/${OP_NAME}.py}" bash "$PACK_SH" "$OP_NAME" \
     --candidate "$CANDIDATE_TARBALL" --public "$PUBLIC_IMPL_FILE" || return 1
   EVALUATED_CANDIDATE_SHA256=$(sha256sum "$CANDIDATE_TARBALL" 2>/dev/null | cut -d' ' -f1)
   [[ -n "$EVALUATED_CANDIDATE_SHA256" ]] || return 1
@@ -544,7 +544,7 @@ promote_candidate() {
   [[ -n "$CANDIDATE_TARBALL" && -f "$CANDIDATE_TARBALL" ]] || return 0
   [[ -f "$OUT_DIR/metrics.json" ]] || return 0
   # 这里只交给选择器“实际评测 tar + 本次 metrics”，不重新读取当前源码。
-  WORKDIR="$WORK_ROOT" bash "$PACK_SH" "$OP_NAME" --promote \
+  WORKDIR="$WORK_ROOT" POLAR_PACK_TASK_SOURCE="${TASK_FILE:-input/${OP_NAME}.py}" bash "$PACK_SH" "$OP_NAME" --promote \
     --candidate "$CANDIDATE_TARBALL" --metrics "$OUT_DIR/metrics.json" || true
 }
 
@@ -697,7 +697,7 @@ fi
 
 _TOP_REL="$(realpath --relative-to="$WORK" "$TASK_DIR" 2>/dev/null | cut -d/ -f1)"
 if [[ -n "$_TOP_REL" && "$_TOP_REL" != "." && "$_TOP_REL" != ".." ]]; then
-  find "$WORK" -mindepth 1 -maxdepth 1 ! -name "$_TOP_REL" -exec rm -rf {} + 2>/dev/null || true
+  find "$WORK" -mindepth 1 -maxdepth 1 ! -name "$_TOP_REL" ! -name __polar_reference -exec rm -rf {} + 2>/dev/null || true
 fi
 
 find "$TASK_DIR" \( -name '*.so' -o -name '*.a' -o -name '*.o' -o -name '*.whl' \
@@ -709,19 +709,30 @@ case "$TASK_SRC" in /*) ;; *) TASK_SRC="$WORK_ROOT/$TASK_SRC";; esac
 JSON_SRC="$(dirname "$TASK_SRC")/${OP_NAME}.json"
 TASK_SRC="$(realpath "$TASK_SRC" 2>/dev/null || echo "$TASK_SRC")"
 JSON_SRC="$(realpath "$JSON_SRC" 2>/dev/null || echo "$JSON_SRC")"
+# Use the exact pipeline reference carried by the candidate. Legacy packages
+# without this directory continue to use the separately staged input.
+BUNDLED_REFERENCE="$WORK/__polar_reference"
+if [[ -e "$BUNDLED_REFERENCE" || -L "$BUNDLED_REFERENCE" ]]; then
+  if [[ -L "$BUNDLED_REFERENCE" || -L "$BUNDLED_REFERENCE/model.py" || -L "$BUNDLED_REFERENCE/cases.json" ]]; then
+    write_metrics false false false "" "" "" "判分基准路径无效(get_input): reference bundle contains symlinks"
+    echo "[ascendc-eval] invalid reference bundle"; fail_hint; exit 1
+  fi
+  TASK_SRC="$BUNDLED_REFERENCE/model.py"
+  JSON_SRC="$BUNDLED_REFERENCE/cases.json"
+fi
 if [[ ! -f "$TASK_SRC" ]]; then
   write_metrics false false false "" "" "" \
-    "判分基准缺失(get_input 无法加载): $TASK_SRC —— judge 侧 input/ 未就位,非算子问题"
+    "判分基准缺失(get_input 无法加载): $TASK_SRC —— 评测基准未就位,非算子问题"
   echo "[ascendc-eval] golden missing"; fail_hint; exit 1
 fi
 if [[ ! -f "$JSON_SRC" ]] && grep -q "get_input_groups" "$TASK_SRC" 2>/dev/null; then
   write_metrics false false false "" "" "" \
-    "判分基准缺失(get_input_groups 需同名 .json): $JSON_SRC —— judge 侧 input/ 未就位,非算子问题"
+    "判分基准缺失(get_input_groups 需同名 .json): $JSON_SRC —— 评测基准未就位,非算子问题"
   echo "[ascendc-eval] case spec missing"; fail_hint; exit 1
 fi
 
 inject_baseline() {
-  # Replace submission-owned files/links before installing trusted references.
+  # Replace implementation-side aliases before installing the selected reference.
   rm -f -- "$TASK_DIR/model.py" "$TASK_DIR/${OP_NAME}.json" "$TASK_DIR/model.json" || return 1
   cp -f "$TASK_SRC" "$TASK_DIR/model.py" || return 1
   if [[ -f "$JSON_SRC" ]]; then

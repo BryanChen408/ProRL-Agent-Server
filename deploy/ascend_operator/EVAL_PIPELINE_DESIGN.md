@@ -27,20 +27,19 @@
 (只收到 tarball + `input/` 基准)。agent 侧额外做:自动打包 → 预算计数 → 内容哈希短路 →
 退出时更新 `.best`;judge 侧一律跳过(一个 session 只判一次)。
 
-## 三、判分基准无条件以数据集为准
+## 三、pipeline 与 Judge 复用包内基准
 
-golden(`model.py`)和用例(`{op}.json`)从 `input/` 覆盖 tarball 里的同名文件,防三件事:
+固定入口打包时，从 `input/{op}.py`（或 `--task` 指定的 reference）及同名 JSON
+生成 `__polar_reference/model.py` 与 `__polar_reference/cases.json`，与 `{op}/` 一同提交。
+历史 best 保留实际评测的整包，包含当时的基准快照。
 
-- agent 改 golden 让参考实现迁就自己的错 kernel;
-- agent 只交精简后的用例(被 abort 时交上来的就是砍过的),判分仍跑全量;
-- agent 根本不需要把这两个文件打进 tarball。
+pipeline 和 Judge 解包后直接使用快照，不比较外部 input。只有旧包没有该目录时
+才使用 input；新包损坏或 reference 缺失会报错。工程内注入 `model.py`、`{op}.json`
+与 `model.json`，兼容固定文件名和按 `__file__` 推导 JSON 的 reference。
+编译前后仍重新注入并设置只读权限。
 
-31/31 个数据集算子的 `get_input_groups()` 都硬编码同名 json(无 `__file__` 推导),
-所以改名成 `model.py` 后仍能读到同目录的 `{op}.json`。
-
-**注入做两次**:第一次解包后,第二次在编译/安装之后、对拍之前。因为 Step2 会执行 agent
-提供的代码(`setup.py`、`pip install` 触发的 import、编译期脚本),它完全可以在那时把基准
-改回自己那份。第二次注入后立即 `chmod 444`。
+信任边界已改变：Judge 不再用外部数据集验证包内基准，包内 reference 是判分依据。
+Agent 仍被要求不得修改 reference/cases；只读权限和重复注入不等于对快照来源的认证。
 
 ## 四、解包后的两道清理
 

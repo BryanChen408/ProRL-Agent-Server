@@ -169,7 +169,7 @@ def apply_deltas(text: str) -> str:
     text = _sub(
         text,
         "├── <op_name>.json               # 测试用例 (JSON Lines, 精简后)",
-        "├── <op_name>.json               # 可选测试用例 (仅原数据集提供时存在;判分时被数据集原件覆盖,改它无效)",
+        "├── <op_name>.json               # 可选测试用例（禁止修改；评测时由提交包内快照注入，旧包回退 input/）",
     )
     text = _sub(text, "├── <op_name>.json.bak           # 原始用例备份\n", "")
     # d) Phase 2 整节(连同节前的 --- 分隔线一起去掉,避免残留双分隔线)

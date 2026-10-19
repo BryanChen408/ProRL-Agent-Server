@@ -428,3 +428,37 @@ def test_banded_zero_ties_and_correct_speedup_order(tmp_path):
         proc = _promote(tmp_path, candidate, _metrics(tmp_path, name, candidate, **values), env)
         assert proc.returncode == 0, proc.stderr
         assert f"marker:{expected}\n" in _marker(_best(tmp_path))
+
+
+def test_reference_bundle_roundtrip_without_external_input(tmp_path):
+    _make_workspace(tmp_path)
+    inputs = tmp_path / 'input'
+    inputs.mkdir()
+    source = inputs / f'{OP}.py'
+    source.write_text('def get_input_groups(): return []\n')
+    cases = inputs / f'{OP}.json'
+    cases.write_text('{"cases": []}\n')
+    packed = _run_pack(tmp_path)
+    assert packed.returncode == 0, packed.stderr
+    unpacked = tmp_path / 'unpacked'
+    unpacked.mkdir()
+    archive = tmp_path / 'output/submission' / f'{OP}_impl.tar.gz'
+    with tarfile.open(archive) as tf:
+        assert tf.extractfile('__polar_reference/model.py').read() == source.read_bytes()
+        assert tf.extractfile('__polar_reference/cases.json').read() == cases.read_bytes()
+        tf.extractall(unpacked, filter='data')
+    script = (ROOT / 'operator_runtime_t2a/tools/ascendc_eval_pipeline.sh').read_text()
+    check = script.split('BUNDLED_REFERENCE="$WORK/__polar_reference"', 1)[1].split('inject_baseline() {', 1)[0]
+    check = 'BUNDLED_REFERENCE="$WORK/__polar_reference"' + check
+    env = dict(os.environ, WORK=str(unpacked), TASK_SRC=str(source), JSON_SRC=str(cases))
+    command = 'write_metrics() { :; }; fail_hint() { :; };\n' + check
+    assert subprocess.run(['bash', '-c', command], env=env).returncode == 0
+    # External inputs may differ or be absent: the pipeline snapshot is authoritative.
+    source.write_text('different external reference')
+    cases.write_text('{}')
+    assert subprocess.run(['bash', '-c', command], env=env).returncode == 0
+    source.unlink()
+    cases.unlink()
+    assert subprocess.run(['bash', '-c', command], env=env).returncode == 0
+    (unpacked / '__polar_reference/model.py').unlink()
+    assert subprocess.run(['bash', '-c', command], env=env).returncode != 0

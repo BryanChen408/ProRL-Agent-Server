@@ -5,6 +5,12 @@ description: 基于固定评测入口产出的真实逐 case 性能证据，定�
 
 # AscendC 性能诊断与优化
 
+## Polar 提交基准
+
+固定 pipeline 自动将 reference 和 JSON 放入提交包的 `__polar_reference/`。
+自检与最终 Judge 都使用该快照，不比较外部 `input/`；旧包无快照时才回退。
+本 skill 只修改实现，不修改输入、reference、快照或手工重打提交包。
+
 ## 职责边界
 
 本 skill 负责“读证据、改实现”，不负责另起一套计时流程。

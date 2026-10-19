@@ -169,16 +169,19 @@ Stop feedback 要求继续时，下一轮执行一个新的诊断或实质修改
 
 ## 用例精简已移除(原 Phase 2 / Phase 6)
 
-判分**恒用数据集原版用例**:`{op_name}/{op_name}.json` 在每次评测(含你的自检)时都会被
-`input/` 里的数据集原件覆盖,改它、精简它、备份它都**无效**。上游的 Phase 2(用例精简)与
-Phase 6(全量恢复)因此已从工作流移除。不要自行精简、修改或备份任何 `.json` 用例文件,
-把轮次留给实现与修复迭代。
+固定入口打包时从 `input/{op_name}.py` 和同名 JSON（或显式 `--task` 指定的 reference）
+复制本次基准到包内 `__polar_reference/model.py`、`__polar_reference/cases.json`。
+pipeline 自检和最终 Judge 均优先使用该包内快照，不再与外部 `input/` 比较；旧包没有
+`__polar_reference/` 时才回退到 `input/`。包内基准缺失或路径无效时直接报错，不静默回退。
+上游 Phase 2(用例精简)和 Phase 6(全量恢复)仍不执行。禁止修改 reference、输入 JSON
+或包内基准；把轮次留给实现与修复迭代。
 
 ## 提交物
 
 - 唯一提交物:`output/submission/{op_name}_impl.tar.gz`,由固定入口自动打包。
 - 工程目录必须是工作目录顶层的 `{op_name}/`,不要另建别名或带时间戳的目录。
-- `{op_name}/model.py` 与 `{op_name}/{op_name}.json` 判分时会被数据集原版覆盖,改它们无效。
+- 包由 `{op_name}/` 实现工程和 `__polar_reference/` 基准快照组成，由固定入口维护，禁止手工改包。
+- 评测将快照注入工程为 `model.py`、`{op_name}.json` 和 `model.json`；后两者内容相同，兼容两种 JSON 路径写法。
 - 不要删除或移动 `output/submission/` 下的任何文件。
 
 ## 性能目标
