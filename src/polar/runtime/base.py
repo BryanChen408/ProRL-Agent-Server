@@ -6,6 +6,7 @@ import asyncio
 import os
 import shutil
 from abc import ABC, abstractmethod
+from contextlib import suppress
 from pathlib import Path
 from typing import Final
 
@@ -78,13 +79,18 @@ class BaseRuntime(ABC):
     async def cancel(self) -> None:
         """Stop any in-flight command and tear the runtime down."""
         process = self._active_process
-        if process is not None and process.returncode is None:
-            process.kill()
-            try:
-                await process.wait()
-            except ProcessLookupError:
-                pass
+        if process is not None:
+            await self._kill_and_wait(process)
         await self.stop()
+
+    @staticmethod
+    async def _kill_and_wait(process: asyncio.subprocess.Process) -> None:
+        if process.returncode is None:
+            # The process can exit between the returncode check and kill().
+            with suppress(ProcessLookupError):
+                process.kill()
+        with suppress(ProcessLookupError):
+            await process.wait()
 
     @abstractmethod
     async def exec(
@@ -184,11 +190,7 @@ class BaseRuntime(ABC):
                         process.communicate(), timeout=timeout
                     )
                 except asyncio.TimeoutError:
-                    process.kill()
-                    try:
-                        await process.wait()
-                    except ProcessLookupError:
-                        pass
+                    await self._kill_and_wait(process)
                     return -1, None, None
         finally:
             self._active_process = None
