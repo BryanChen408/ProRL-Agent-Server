@@ -39,6 +39,7 @@ import glob
 import math
 import os
 import re
+import selectors
 import shutil
 import sqlite3
 import statistics
@@ -1194,6 +1195,35 @@ def _extract_app_crash(stdout: str, stderr: str):
     return "app raised an exception during profiling"
 
 
+def _capture_profiler(cmd, env):
+    # Preserve PID/timestamps so the lease guard can correlate live driver failures.
+    diagnostic = re.compile(rb"^\[ERROR\]\s+(?:RUNTIME|DRV|ASCENDCL)\(")
+    with subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                          text=True, env=env) as proc, selectors.DefaultSelector() as selector:
+        captured = {proc.stdout: bytearray(), proc.stderr: bytearray()}
+        pending = {stream: b"" for stream in captured}
+        for stream in captured:
+            selector.register(stream, selectors.EVENT_READ)
+        while selector.get_map():
+            for key, _ in selector.select():
+                stream = key.fileobj
+                chunk = os.read(stream.fileno(), 65536)
+                if not chunk:
+                    selector.unregister(stream)
+                    continue
+                captured[stream].extend(chunk)
+                lines = (pending[stream] + chunk).split(b"\n")
+                pending[stream] = lines.pop()[-65536:]
+                for line in lines:
+                    if diagnostic.match(line):
+                        print(line.decode(errors="replace"), file=sys.stderr, flush=True)
+        stdout, stderr = (
+            data.decode(stream.encoding, stream.errors).replace("\r\n", "\n").replace("\r", "\n")
+            for stream, data in captured.items()
+        )
+        return subprocess.CompletedProcess(cmd, proc.wait(), stdout, stderr)
+
+
 def _run_msprof_standard(wrapper_script: str, output_dir: str, device_id: int, warmup: int = 3):
     """调用 msprof_profile_run.sh 进行完整采集（7 组 aic-metrics + sample-based）。
 
@@ -1213,7 +1243,7 @@ def _run_msprof_standard(wrapper_script: str, output_dir: str, device_id: int, w
         sys.executable, wrapper_path
     ]
     env = os.environ.copy()
-    result = subprocess.run(cmd, capture_output=True, text=True, env=env)
+    result = _capture_profiler(cmd, env=env)
 
     try:
         os.remove(wrapper_path)
@@ -1256,7 +1286,7 @@ def _run_msprof_quick(wrapper_script: str, output_dir: str, device_id: int):
         "--ascendcl=on",
         sys.executable, wrapper_path
     ]
-    result = subprocess.run(cmd, capture_output=True, text=True, env=env)
+    result = _capture_profiler(cmd, env=env)
 
     try:
         os.remove(wrapper_path)

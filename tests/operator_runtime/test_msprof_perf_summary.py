@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import os
 import pickle
 import sys
 import types
@@ -283,6 +284,59 @@ def test_extract_app_crash_handles_msprof_zero_exit_pattern():
     assert module._extract_app_crash("", output) == "ValueError: invalid generated case"
 
 
+@pytest.mark.parametrize("exit_code", [0, 1])
+def test_profiler_capture_preserves_output_without_forwarding_ordinary_errors(exit_code, capsys):
+    module = load_msprof_summary()
+    code = (
+        "import os,sys; "
+        "sys.stdout.write('normal output\\r\\n' * 10000); sys.stdout.flush(); "
+        "sys.stderr.write('ordinary error\\r' * 10000); sys.stderr.flush(); "
+        "print(os.environ['PROFILER_CAPTURE_TEST']); "
+        f"sys.exit({exit_code})"
+    )
+    result = module._capture_profiler(
+        [sys.executable, "-c", code], env={**os.environ, "PROFILER_CAPTURE_TEST": "passed"},
+    )
+    assert result.returncode == exit_code
+    assert result.stdout == "normal output\n" * 10000 + "passed\n"
+    assert result.stderr == "ordinary error\n" * 10000
+    assert capsys.readouterr() == ("", "")
+
+
+@pytest.mark.parametrize("mode", ["quick", "standard"])
+@pytest.mark.parametrize("exit_code", [0, 1])
+def test_profiler_entry_points_keep_logs_and_exit_handling(tmp_path, monkeypatch, capsys, mode, exit_code):
+    module = load_msprof_summary()
+    fake = tmp_path / "msprof"
+    fake.write_text(
+        f"#!{sys.executable}\n"
+        "import pathlib,sys\n"
+        "output = next(arg.split('=', 1)[1] for arg in sys.argv if arg.startswith('--output='))\n"
+        "(pathlib.Path(output) / 'PROF_test').mkdir(exist_ok=True)\n"
+        "print('profile output', flush=True)\n"
+        "print('ordinary diagnostic', file=sys.stderr, flush=True)\n"
+        f"sys.exit({exit_code})\n"
+    )
+    fake.chmod(0o755)
+    monkeypatch.setenv("PATH", str(tmp_path) + os.pathsep + os.environ["PATH"])
+    output = tmp_path / "profile"
+    kwargs = {"warmup": 0} if mode == "standard" else {}
+    directory, error = getattr(module, f"_run_msprof_{mode}")("pass", str(output), 0, **kwargs)
+    if exit_code:
+        assert directory is None and "msprof failed:" in error
+        assert "ordinary diagnostic" in error
+    else:
+        assert Path(directory).is_dir() and error is None
+    log = (output / "app_output.log").read_text()
+    assert "profile output" in log and "ordinary diagnostic" in log
+    assert not (output / "_wrapper.py").exists()
+    if mode == "standard":
+        logs = list(output.glob("PROF_GROUP_*/PROF_*/msprof.log"))
+        assert len(logs) == (1 if exit_code else 8)
+        assert all(p.read_text() == "profile output\nordinary diagnostic\n" for p in logs)
+    assert capsys.readouterr() == ("", "")
+
+
 def test_quick_warmup_runs_inside_the_profiled_python_process(tmp_path, monkeypatch):
     module = load_msprof_summary()
     calls = []
@@ -295,7 +349,7 @@ def test_quick_warmup_runs_inside_the_profiled_python_process(tmp_path, monkeypa
             (output_dir / "PROF_GROUP_1").mkdir(parents=True)
         return SimpleNamespace(returncode=0, stdout="", stderr="")
 
-    monkeypatch.setattr(module.subprocess, "run", fake_run)
+    monkeypatch.setattr(module, "_capture_profiler", fake_run)
     monkeypatch.setattr(
         module, "_parse_msprof_duration_quick",
         lambda _path, _warmup, _repeats: (8.0, "kernel", None),

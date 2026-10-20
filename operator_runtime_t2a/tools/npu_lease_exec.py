@@ -7,9 +7,12 @@ import argparse
 import fcntl
 import json
 import os
+import re
+import signal
 import subprocess
 import sys
 import time
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -31,13 +34,11 @@ class Lease:
         self.lock_path = lock_path
 
     def release(self) -> None:
+        # A surviving child shares this flock; only close our reference.
         try:
-            fcntl.flock(self.fd, fcntl.LOCK_UN)
-        finally:
-            try:
-                os.close(self.fd)
-            except OSError:
-                pass
+            os.close(self.fd)
+        except OSError:
+            pass
 
 
 def _write_status(status_file: str | None, payload: dict[str, Any]) -> None:
@@ -77,12 +78,127 @@ def acquire_loop(
         time.sleep(poll_interval)
 
 
+_NPU_ERROR = re.compile(rb"(?:ErrCode\s*=|error\s+code\s*(?:is\s*)?[:=]?)\s*(507014|507015|507034|507035)\b", re.I)
+_CANN_ERROR = re.compile(
+    rb"^\[ERROR\]\s+(?:RUNTIME|DRV|ASCENDCL)\((\d+),[^)]+\):"
+    rb"(\d{4}-\d{2}-\d{2}-\d{2}:\d{2}:\d{2})\.(\d{3})\.(\d{3})\s"
+)
+_DEVICE = re.compile(rb"\b(?:dev_id|device_id|devId|devid)\s*=\s*(\d+)\b", re.I)
+_CLEANUP_ERROR = re.compile(
+    rb"(?:halEschedSubmitEventSync[^\n]*[Ff]ailed[^\n]*ret=16\b"
+    rb"|FreeDcacheAddr:Free dcache stack phy failed[^\n]*drvRet=0x10\b)", re.I
+)
+
+
+def _task_identity(pid, group):
+    try:
+        fields = Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()
+        if int(fields[2]) != group or fields[0] in {"Z", "X", "x"}:
+            return None
+        ticks = int(fields[19])
+        born = time.time() - time.clock_gettime(time.CLOCK_BOOTTIME) + ticks / os.sysconf("SC_CLK_TCK")
+        return ticks, born
+    except (OSError, ValueError, IndexError):
+        return None
+
+
+class _NpuFailure:
+    def __init__(self, group, device, started):
+        self.group, self.device, self.started = group, str(device).encode(), started
+        self.processes = {}
+
+    def feed(self, line):
+        header = _CANN_ERROR.match(line)
+        if not header:
+            return None
+        pid = int(header[1])
+        identity = _task_identity(pid, self.group)
+        if identity is None:
+            return None
+        try:
+            stamp = datetime.strptime(
+                (header[2] + b"." + header[3] + header[4]).decode(), "%Y-%m-%d-%H:%M:%S.%f"
+            ).timestamp()
+        except ValueError:
+            return None
+        if stamp < max(self.started, identity[1]) or stamp > time.time() + 1:
+            return None
+        devices = _DEVICE.findall(line)
+        if any(device != self.device for device in devices):
+            return None
+        state = self.processes.setdefault((pid, identity[0]), {"error": None, "responses": {}, "cleanup": None})
+        error = _NPU_ERROR.search(line)
+        if error and state["error"] is None:
+            state["error"] = (error[1].decode(), stamp)
+        if state["error"] is None or stamp < state["error"][1]:
+            return None
+        if (devices and b"Message send finish, no resp" in line
+                and re.search(rb'msg_type="msg_client_(?:tsdrv|devmm)"', line)
+                and b"ret=-38" in line):
+            state["responses"][stamp] = line.decode(errors="replace")[:4096]
+            # Two distinct records suffice; repeated copies of one record do not.
+            if len(state["responses"]) > 2:
+                del state["responses"][min(state["responses"])]
+        if _CLEANUP_ERROR.search(line):
+            state["cleanup"] = line.decode(errors="replace")[:4096]
+        if len(state["responses"]) < 2 or state["cleanup"] is None:
+            return None
+        current = _task_identity(pid, self.group)
+        if current is None or current[0] != identity[0]:
+            return None
+        return {"error_code": state["error"][0], "fault_pid": pid,
+                "reason": "device_unresponsive_and_cleanup_failed",
+                "evidence": [*state["responses"].values(), state["cleanup"]]}
+
+
+def _run_guarded(command, env, lease, failure_path):
+    # Read live CANN diagnostics, including children whose ordinary output is captured by msprof.
+    env = {**env, "ASCEND_SLOG_PRINT_TO_STDOUT": "1", "ASCEND_GLOBAL_LOG_LEVEL": "3"}
+    started = time.time()
+    proc = subprocess.Popen(command, env=env, pass_fds=(lease.fd,), start_new_session=True,
+                            stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    detector = _NpuFailure(proc.pid, lease.device_id, started)
+    pending = b""
+    failure = None
+    try:
+        while data := os.read(proc.stdout.fileno(), 65536):
+            sys.stdout.buffer.write(data)
+            sys.stdout.buffer.flush()
+            lines = (pending + data).split(b"\n")
+            pending = lines.pop()[-65536:]
+            for line in lines:
+                failure = detector.feed(line)
+                if failure:
+                    break
+            if failure:
+                break
+        if failure is None:
+            return proc.wait()
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            return proc.wait()
+        try:
+            proc.wait(timeout=2)
+        except subprocess.TimeoutExpired:
+            pass  # A driver-blocked child still owns the inherited flock.
+        _write_status(str(failure_path), {
+            "error_type": "npu_execution_failed", **failure,
+            "device_id": lease.device_id, "child_pid": proc.pid,
+            "child_reaped": proc.poll() is not None,
+        })
+        return 125
+    finally:
+        proc.stdout.close()
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--pool", required=True, help="Comma/range NPU pool, e.g. 8,9 or 8-11.")
     parser.add_argument("--lock-dir", required=True, help="Directory containing npu{card}.lock files.")
     parser.add_argument("--status-file", help="Optional JSON status file for observer/debug.")
     parser.add_argument("--poll-interval", type=float, default=0.2, help=argparse.SUPPRESS)
+    parser.add_argument("--stop-on-npu-error", action="store_true")
     parser.add_argument("command", nargs=argparse.REMAINDER)
     return parser
 
@@ -103,6 +219,11 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("--poll-interval must be positive")
 
     lock_dir = Path(args.lock_dir)
+    failure_path = Path(os.environ.get("ARTIFACTS_DIR") or
+                        (Path(args.status_file).parent if args.status_file else lock_dir)) / "npu_failure.json"
+    if args.stop_on_npu_error and failure_path.exists():
+        print("npu_lease_exec: this session already has an NPU failure", file=sys.stderr)
+        return 125
     requested_at = time.time()
     status_base: dict[str, Any] = {
         "schema_version": 2,
@@ -134,8 +255,11 @@ def main(argv: list[str] | None = None) -> int:
     return_code = 127
     error: str | None = None
     try:
-        result = subprocess.run(command, env=child_env)
-        return_code = int(result.returncode)
+        if args.stop_on_npu_error:
+            return_code = _run_guarded(command, child_env, lease, failure_path)
+        else:
+            result = subprocess.run(command, env=child_env, pass_fds=(lease.fd,))
+            return_code = int(result.returncode)
     except FileNotFoundError as exc:
         error = str(exc)
         print(f"npu_lease_exec: command not found: {command[0]}", file=sys.stderr)

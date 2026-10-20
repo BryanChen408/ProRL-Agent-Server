@@ -192,7 +192,7 @@ run_standard() {
         echo "--- Warm-up x${WARM_UP} ---"
         for i in $(seq 1 "$WARM_UP"); do
             echo "  warm-up ${i}/${WARM_UP}"
-            "${APP_CMD[@]}" >/dev/null 2>&1 || true
+            "${APP_CMD[@]}" 2>&1 || true
         done
     fi
 
@@ -207,7 +207,7 @@ run_standard() {
                --aic-metrics="$M" \
                --task-time=on \
                --ascendcl=on \
-               "${APP_CMD[@]}" >"${SUB}/msprof.log" 2>&1 || {
+               "${APP_CMD[@]}" 2>&1 | tee "${SUB}/msprof.log" || {
             echo "ERROR: msprof run failed for ${M}. See ${SUB}/msprof.log" >&2
             tail -20 "${SUB}/msprof.log" >&2 || true
             exit 1
@@ -225,7 +225,7 @@ run_standard() {
            --aic-freq=100 \
            --task-time=on \
            --ascendcl=on \
-           "${APP_CMD[@]}" >"${SAMPLE_SUB}/msprof.log" 2>&1 || {
+           "${APP_CMD[@]}" 2>&1 | tee "${SAMPLE_SUB}/msprof.log" || {
         echo "WARN: sample-based run failed, per-core analysis will be skipped. See ${SAMPLE_SUB}/msprof.log" >&2
         tail -20 "${SAMPLE_SUB}/msprof.log" >&2 || true
     }

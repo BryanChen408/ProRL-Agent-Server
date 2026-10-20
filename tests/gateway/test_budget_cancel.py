@@ -45,8 +45,8 @@ def _managed(tmp_path: Path, *, reason: str | None = "pipeline_budget_exceeded")
     )
 
 
-@pytest.mark.parametrize("ending", ["context", "output", "output_not_error", "timeout", "other_400", "502", "policy_cutoff", "judge_failure", "output_judge_failure"])
-def test_budget_prefix_is_judged_and_accepted_without_hiding_other_failures(tmp_path, ending):
+@pytest.mark.parametrize("ending", ["context", "output", "output_not_error", "timeout", "other_400", "502", "policy_cutoff", "judge_failure", "output_judge_failure", "npu"])
+def test_budget_prefix_is_judged_and_accepted_without_hiding_other_failures(tmp_path, ending, monkeypatch):
     command = "bash tools/ascendc_eval_pipeline.sh --op_name OP --out_dir judge_out"
     call = {"id": "p1", "type": "function", "function": {
         "name": "Bash", "arguments": json.dumps({"command": command}),
@@ -79,6 +79,9 @@ def test_budget_prefix_is_judged_and_accepted_without_hiding_other_failures(tmp_
     managed.agent_result = AgentRunResult(
         status="timeout" if ending == "timeout" else "failed", return_code=1, error="agent stopped",
     )
+    if ending == "npu":
+        managed.agent_result.metadata["termination_reason"] = "npu_execution_failed"
+        monkeypatch.setattr("polar.gateway.node.selected_candidate", lambda *args: tmp_path / "best.tar.gz")
     log = tmp_path / "logs/agent/claude-code.txt"
     log.parent.mkdir(parents=True)
     events = [{"type": "user", "message": {"content": [{
@@ -120,7 +123,7 @@ def test_budget_prefix_is_judged_and_accepted_without_hiding_other_failures(tmp_
         assert result.trajectory.metadata["completed_pipeline_prefix"]["tool_call_id"] == "p1"
         return
     assert result.trajectory.traces[0].reward == 0.9
-    if ending in {"context", "output", "timeout"}:
+    if ending in {"context", "output", "timeout", "npu"}:
         assert result.status == "COMPLETED"
         assert result.error is None
         assert result.trajectory.metadata["completed_pipeline_prefix"]["tool_call_id"] == "p1"

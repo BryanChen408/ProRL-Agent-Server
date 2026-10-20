@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import posixpath
@@ -459,6 +460,9 @@ class GatewayNodeManager:
             agent_result = await self._run_exec_inputs(runtime, steps, env, managed)
 
             self._start_postrun_deadline(managed)
+            if agent_result.metadata.get("termination_reason") == "npu_execution_failed":
+                managed.agent_result = agent_result
+                return
             # Postprocess always runs so harnesses can collect artifacts from
             # failed or timed-out agent runs before post-run evaluation.
             await self._await_with_budget(harness.postprocess(runtime, agent_result), managed)
@@ -532,12 +536,39 @@ class GatewayNodeManager:
                 # Kill the command's process group INSIDE the container. Killing
                 # only the host docker-exec client leaves the agent/tools running.
                 command = f"timeout --kill-after=5s {timeout}s bash -lc {shlex.quote(command)}"
-            result = await runtime.exec(
+            execution = runtime.exec(
                 command,
                 cwd=step.cwd,
                 env=merged_env,
                 timeout_sec=timeout + 10.0 if separate_budget else timeout,
             )
+            evaluator = managed.request.evaluator
+            if (evaluator is not None and evaluator.strategy == "operator_judge"
+                    and "ascendc_eval_pipeline.sh" in str(evaluator.config.get("judge_command", ""))):
+                execution = asyncio.create_task(execution)
+                try:
+                    while True:
+                        await asyncio.wait({execution}, timeout=0.5)
+                        failure_path = managed.artifacts_dir / "npu_failure.json"
+                        if failure_path.is_file():
+                            failure = json.loads(failure_path.read_text())
+                            if failure.get("error_type") == "npu_execution_failed":
+                                try:
+                                    await asyncio.wait_for(runtime.cancel(), timeout=5)
+                                except Exception:
+                                    logger.warning("NPU-fault cleanup incomplete for %s", managed.session_id, exc_info=True)
+                                return AgentRunResult(status="failed", return_code=125,
+                                    error="NPU execution failed; session stopped",
+                                    metadata={"termination_reason": "npu_execution_failed", "npu_failure": failure})
+                        if execution.done():
+                            break
+                    result = await execution
+                finally:
+                    if not execution.done():
+                        execution.cancel()
+                    await asyncio.gather(execution, return_exceptions=True)
+            else:
+                result = await execution
             self._write_exec_log(
                 log_dir, f"step.{i:02d}", result.stdout, result.stderr
             )
@@ -893,6 +924,20 @@ class GatewayNodeManager:
                 "session did not produce an agent result",
             )
 
+        if agent_result.metadata.get("termination_reason") == "npu_execution_failed":
+            try:
+                async with managed.operator_best_lock:
+                    best = await asyncio.to_thread(selected_candidate, managed.session_dir,
+                        str(request.evaluator.config.get("op_name") or ""))
+            except Exception:
+                logger.exception("NPU fault: unusable retained best for %s", request.session_id)
+                best = None
+            if best is None:
+                result = self._error_result(request, managed.timer, "NPU execution failed without a usable retained best")
+                result.metadata.update(termination_reason="npu_execution_failed", discarded=True)
+                result.trajectory.metadata.update(termination_reason="npu_execution_failed", discarded=True)
+                return result
+
         self.session_registry.set_status(request.session_id, SessionStatus.BUILDING)
         managed.timer.mark("build", "started")
         try:
@@ -1062,7 +1107,9 @@ class GatewayNodeManager:
                 if request.agent.harness == "claude_code" and session_dir is not None
                 else ({}, {})
             )
-            if agent_result.status == "timeout":
+            if agent_result.metadata.get("termination_reason") == "npu_execution_failed":
+                completion_session.termination_reason = "npu_execution_failed"
+            elif agent_result.status == "timeout":
                 completion_session.termination_reason = "agent_time_budget_exceeded"
             elif (
                 agent_result.return_code == 1
@@ -1752,6 +1799,8 @@ class GatewayNodeManager:
         )
 
     async def _run_postrun_steps(self, managed: ManagedSession) -> None:
+        if managed.agent_result and managed.agent_result.metadata.get("termination_reason") == "npu_execution_failed":
+            return
         if managed.cancel_reason == "policy_cutoff":
             return
         if not managed.postrun_steps or managed.runtime is None:

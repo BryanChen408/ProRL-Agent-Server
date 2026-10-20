@@ -30,6 +30,8 @@ NPU_LEASE_EXEC="${NPU_LEASE_EXEC:-${_SCRIPT_DIR}/npu_lease_exec.py}"
 
 run_npu_phase() {
   local phase="$1"; shift
+  local guard_args=()
+  [[ "${AGENT_SIDE:-0}" == "1" ]] && guard_args+=(--stop-on-npu-error)
   if [[ -n "${POLAR_NPU_LEASE_POOL:-}" ]]; then
     local status_file="$OUT_DIR/npu_lease_status.${phase}.json"
     if [[ -n "${ARTIFACTS_DIR:-}" ]] && mkdir -p "$ARTIFACTS_DIR" 2>/dev/null \
@@ -37,6 +39,7 @@ run_npu_phase() {
       status_file="$ARTIFACTS_DIR/npu_lease_status.${phase}.${PIPELINE_PHASE:-unknown}.${PIPELINE_ATTEMPT:-0}.json"
     fi
     "$AST_CHECK_PYTHON" "$NPU_LEASE_EXEC" \
+      "${guard_args[@]}" \
       --pool "$POLAR_NPU_LEASE_POOL" \
       --lock-dir "$POLAR_NPU_LOCK_DIR" \
       --status-file "$status_file" \
@@ -622,6 +625,7 @@ fi
 _on_exit() {
   local rc=$?
   [[ "$AGENT_SIDE" == "1" ]] || return 0
+  [[ ! -f "${ARTIFACTS_DIR:-$OUT_DIR}/npu_failure.json" ]] || return 0
   if [[ "$PIPELINE_ATTEMPT" =~ ^[0-9]+$ ]] && ! pipeline_over_limit; then
     promote_candidate
   fi
