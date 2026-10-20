@@ -37,6 +37,15 @@ GUIDE 中的 `references/xxx.md` 相对 `.claude/skills/ascendc-code-gen/`，裸
 | 池化，先核对 NDHWC 布局 | [pooling](../skills/ascendc-design-doc-generator/references/pooling-tiling.md) | [host](../skills/ascendc-code-gen/templates/pool_ndhwc_op_host.cpp) / [kernel](../skills/ascendc-code-gen/templates/pool_ndhwc_op_kernel.cpp) |
 | 排序/TopK | [sort](../skills/ascendc-design-doc-generator/references/sort-tiling.md) | [host](../skills/ascendc-code-gen/templates/sort_op_host.cpp) / [kernel](../skills/ascendc-code-gen/templates/sort_op_kernel.cpp) |
 
+## 新增算子实现知识（按需读取）
+
+这份资料补充归约、Norm 融合、重排/索引、Sort/TopK、量化和 Pooling 的实现模式。
+它只提供实现知识，不改变 reference、case、prompt、容差、评测入口或训练流程。
+
+- [实现模式总览](ascendc_implementation_knowledge/operator_patterns.md)
+- [使用边界与来源](ascendc_implementation_knowledge/README.md)
+
+
 ## 已有工程的真实文件名
 
 先读工程 model.py 与 host 的分发条件，再选 device 变体；不要从目录名猜 `_kernel.cpp`。
