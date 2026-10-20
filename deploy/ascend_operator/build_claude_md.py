@@ -635,6 +635,24 @@ AST 通过时的有效产物是 block-level、tile-level 与 `model_new_tilelang
         "如果是其他写法（已硬编码文件名或使用绝对路径），则不修改。",
         "如果是其他写法（已硬编码文件名或使用绝对路径），则不修改；没有此入口或不依赖 JSON 时跳过，不新增输入函数或用例文件。",
     )
+    # 环境事实：固定入口的 AST 检查已覆盖 helper/别名，提示须与判据一致。
+    text = _sub(
+        text,
+        "| Type2 | 有扩展加载但 forward() 未调用 kernel | 在 forward() 中通过 torch.ops.npu.<op_name>(...) 调用 |",
+        "| Type2 | 有扩展加载但 forward() 及其 helper 调用链未调用 kernel | 直接或通过可静态解析的 helper / kernel 别名调用 torch.ops.npu.<op_name>(...) |",
+    )
+    text = _sub(
+        text,
+        "| Type3 | forward() 调用了 kernel 但部分计算仍用 PyTorch | 将 torch.*/F.* 计算移入 AscendC kernel |",
+        "| Type3 | forward() 或其 helper 中仍用 PyTorch 完成部分计算 | 将 torch.*/F.* 计算移入 AscendC kernel；helper 封装不豁免检查 |",
+    )
+    text = _sub(
+        text,
+        "| Type4 | forward() 中存在逐元素 Python for 循环 | 消除 for 循环，使用 AscendC kernel 的向量化/块级操作 |\n",
+        "| Type4 | forward() 中存在逐元素 Python for 循环 | 消除 for 循环，使用 AscendC kernel 的向量化/块级操作 |\n\n"
+        "允许 `sum(x.numel() for x in xs)`、`sum(x.shape)` 等明确的 shape 元信息求和；\n"
+        "`sum(xs)` 对张量数据求和不在此范围。helper 和别名仅用于组织调用，不得承担框架代算。\n",
+    )
     return text
 
 

@@ -583,9 +583,12 @@ bash /opt/workspace/agent_workdir/tools/ascendc_eval_pipeline.sh --op_name {op_n
 | 子类型 | 含义 | 修复建议 |
 |--------|------|---------|
 | Type1 | 无 AscendC 扩展加载（纯 PyTorch / 未注册 torch.ops.npu.*） | 保留预生成双路径 loader：先尝试 `import <op_name>_ext`，失败后从 `kernel/build/` 用 `torch.ops.load_library()` 加载 |
-| Type2 | 有扩展加载但 forward() 未调用 kernel | 在 forward() 中通过 torch.ops.npu.<op_name>(...) 调用 |
-| Type3 | forward() 调用了 kernel 但部分计算仍用 PyTorch | 将 torch.*/F.* 计算移入 AscendC kernel |
+| Type2 | 有扩展加载但 forward() 及其 helper 调用链未调用 kernel | 直接或通过可静态解析的 helper / kernel 别名调用 torch.ops.npu.<op_name>(...) |
+| Type3 | forward() 或其 helper 中仍用 PyTorch 完成部分计算 | 将 torch.*/F.* 计算移入 AscendC kernel；helper 封装不豁免检查 |
 | Type4 | forward() 中存在逐元素 Python for 循环 | 消除 for 循环，使用 AscendC kernel 的向量化/块级操作 |
+
+允许 `sum(x.numel() for x in xs)`、`sum(x.shape)` 等明确的 shape 元信息求和；
+`sum(xs)` 对张量数据求和不在此范围。helper 和别名仅用于组织调用，不得承担框架代算。
 
 ### kernel 编译 + whl 安装
 

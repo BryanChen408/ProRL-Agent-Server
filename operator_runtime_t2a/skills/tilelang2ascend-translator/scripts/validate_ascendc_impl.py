@@ -334,58 +334,126 @@ def find_ascendc_extension_imports(tree):
     return extensions
 
 
-def _node_calls_ext(node, ext_names):
-    """Return True if the AST node (a function) contains a call to any ext_name."""
-    for child in ast.walk(node):
-        if isinstance(child, ast.Call):
-            resolved = _resolve_call_name(child)
-            if resolved and resolved[0] in ext_names:
-                return True
-    return False
+def _walk_function(node):
+    """Inspect executable body nodes; nested definitions are checked only if called."""
+    yield node
+    for child in ast.iter_child_nodes(node):
+        if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            for expr in [*child.decorator_list, *child.args.defaults, *child.args.kw_defaults]:
+                if expr is not None:
+                    yield from _walk_function(expr)
+        elif not isinstance(child, ast.ClassDef):
+            yield from _walk_function(child)
 
 
-def find_wrapper_functions(tree, ext_names):
-    """找到模块级别的辅助函数，这些函数内部调用了扩展模块。
+def _kernel_aliases(nodes, ext_names, inherited=None):
+    aliases = dict(inherited or {})
+    assigned = set()
+    for node in nodes:
+        if not isinstance(node, ast.Assign):
+            continue
+        target = _resolve_call_name(node.value)
+        is_kernel = target and (
+            target[0] in ext_names or
+            target[0] == "torch.ops.npu" or
+            (target[0] and target[0].startswith("torch.ops.npu."))
+        )
+        for lhs in node.targets:
+            key = _resolve_call_name(lhs)
+            if key is None:
+                continue
+            aliases.pop(key, None)
+            # Multiple assignments are ambiguous without control-flow analysis.
+            if key not in assigned and is_kernel:
+                aliases[key] = ".".join(part for part in target if part)
+            assigned.add(key)
+    return aliases
 
-    返回函数名集合。
+
+def _call_chain(tree, forward_node, class_node, ext_names):
+    """Resolve module/local helpers and methods of the selected ModelNew only.
+
+    shortcut: dynamic dispatch and imported helpers are not resolved; extend the
+    resolver when supporting those wrapper forms, rather than trusting leaf names.
     """
-    wrappers = set()
-    for node in ast.iter_child_nodes(tree):
-        if isinstance(node, ast.FunctionDef) and _node_calls_ext(node, ext_names):
-            wrappers.add(node.name)
-    return wrappers
+    functions = {(None, n.name): n for n in tree.body if isinstance(n, ast.FunctionDef)}
+    functions.update({("self", n.name): n for n in class_node.body
+                      if isinstance(n, ast.FunctionDef)})
+    aliases = _kernel_aliases(tree.body, ext_names)
+    init = functions.get(("self", "__init__"))
+    if init:
+        aliases.update({key: value for key, value in
+                        _kernel_aliases(_walk_function(init), ext_names).items()
+                        if key[0] == "self"})
+    contexts, seen = [], set()
+    stack = [("forward", forward_node, functions, aliases)]
+    while stack:
+        name, fn, visible, inherited_aliases = stack.pop()
+        if fn in seen:
+            continue
+        seen.add(fn)
+        visible = dict(visible)
+        local_aliases = dict(inherited_aliases)
+        for arg in [*fn.args.posonlyargs, *fn.args.args, *fn.args.kwonlyargs]:
+            visible.pop((None, arg.arg), None)
+            local_aliases.pop((None, arg.arg), None)
+        nodes = list(_walk_function(fn))
+        for node in nodes:
+            if isinstance(node, ast.Assign):
+                for target in node.targets:
+                    visible.pop(_resolve_call_name(target), None)
+        visible.update({(None, n.name): n for n in fn.body if isinstance(n, ast.FunctionDef)})
+        local_aliases = _kernel_aliases(nodes, ext_names, local_aliases)
+        contexts.append((name, fn, visible, local_aliases))
+        for node in nodes:
+            if isinstance(node, ast.Call):
+                key = _resolve_call_name(node)
+                if key in visible:
+                    callee = visible[key]
+                    # Nested functions capture this scope; module/class functions do not.
+                    nested = callee in fn.body
+                    stack.append((callee.name, callee,
+                                  visible if nested else functions,
+                                  local_aliases if nested else aliases))
+    return contexts
 
 
-def check_kernel_calls_in_forward(forward_node, ext_names, wrapper_names):
-    """检查 forward 中是否调用了 AscendC 扩展模块的函数。
-
-    检测模式：
-    1. ext_module.function_name(...)  — 直接调用扩展模块方法
-    2. wrapper_func(...)              — 通过 wrapper 函数调用
-    3. self.wrapper_name(...)         — 通过类方法调用
-
-    返回被调用信息列表 [{"call": str, "line": int}, ...]
-    """
+def check_kernel_calls_in_forward(forward_node, ext_names, aliases=None):
     called = []
-    if forward_node is None:
-        return called
-    for node in ast.walk(forward_node):
+    aliases = aliases or {}
+    for node in _walk_function(forward_node):
         if not isinstance(node, ast.Call):
             continue
-        resolved = _resolve_call_name(node)
-        if resolved is None:
+        key = _resolve_call_name(node)
+        if key is None:
             continue
-        qual, attr = resolved
-
+        qual, attr = key
         if qual in ext_names:
             called.append({"call": f"{qual}.{attr}", "line": node.lineno})
-
-        if qual is None and attr in wrapper_names:
-            called.append({"call": attr, "line": node.lineno})
-
-        if qual == "self" and attr in wrapper_names:
-            called.append({"call": f"self.{attr}", "line": node.lineno})
+        elif key in aliases:
+            called.append({"call": f"{attr} -> {aliases[key]}", "line": node.lineno})
     return called
+
+
+def _is_metadata_value(node):
+    if isinstance(node, ast.Constant):
+        return isinstance(node.value, int)
+    if isinstance(node, ast.Attribute):
+        return node.attr in ("shape", "ndim")
+    if isinstance(node, ast.Subscript):
+        return _is_metadata_value(node.value) and _is_metadata_value(node.slice)
+    if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
+        return node.func.attr in ("numel", "size", "dim", "stride", "element_size") and all(
+            _is_metadata_value(arg) for arg in node.args) and not node.keywords
+    if isinstance(node, (ast.Tuple, ast.List)):
+        return all(_is_metadata_value(item) for item in node.elts)
+    if isinstance(node, ast.BinOp):
+        return _is_metadata_value(node.left) and _is_metadata_value(node.right)
+    if isinstance(node, ast.UnaryOp):
+        return _is_metadata_value(node.operand)
+    if isinstance(node, (ast.GeneratorExp, ast.ListComp)):
+        return _is_metadata_value(node.elt)
+    return False
 
 
 # ---------------------------------------------------------------------------
@@ -415,6 +483,10 @@ def _check_call_violation(node, qual, attr):
     if qual is None and attr in ALLOWED_BUILTIN_FUNCS:
         return None
 
+    if qual is None and attr == "sum" and node.args and not node.keywords:
+        if all(_is_metadata_value(arg) for arg in node.args):
+            return None
+
     if attr in FORBIDDEN_TENSOR_METHODS:
         if qual not in ("torch", "F", "functional", "torch.nn.functional", "nn.functional"):
             return {"line": node.lineno,
@@ -429,7 +501,7 @@ def _check_call_violation(node, qual, attr):
     return None
 
 
-def check_forbidden_torch_ops(forward_node):
+def check_forbidden_torch_ops(forward_node, functions=None, aliases=None):
     """检查 forward 中是否使用了禁止的 torch 计算操作。
 
     返回违规列表 [{"line": N, "call": str, "reason": str}, ...]
@@ -438,7 +510,8 @@ def check_forbidden_torch_ops(forward_node):
     if forward_node is None:
         return violations
 
-    for node in ast.walk(forward_node):
+    functions, aliases = functions or {}, aliases or {}
+    for node in _walk_function(forward_node):
         if isinstance(node, ast.BinOp) and isinstance(node.op, ast.MatMult):
             violations.append({
                 "line": node.lineno, "call": "@",
@@ -448,6 +521,10 @@ def check_forbidden_torch_ops(forward_node):
         if not isinstance(node, ast.Call):
             continue
         resolved = _resolve_call_name(node)
+        if resolved in functions or resolved in aliases:
+            continue
+        if resolved is None and isinstance(node.func, ast.Attribute):
+            resolved = ("<expression>", node.func.attr)
         if resolved is None:
             continue
         violation = _check_call_violation(node, resolved[0], resolved[1])
@@ -660,7 +737,7 @@ def _check_ext_imported(result, tree):
     return {k for k, v in extensions.items() if not v["is_placeholder"]}
 
 
-def _check_kernel_called(result, tree, valid_ext_names):
+def _check_kernel_called(result, tree, valid_ext_names, contexts):
     """Check 2: forward() calls kernel. Returns (forward_node, class_name) or (None, None)."""
     forward_node, class_name, _class_node = find_model_forward(tree)
     if forward_node is None:
@@ -671,8 +748,11 @@ def _check_kernel_called(result, tree, valid_ext_names):
         result["suggestion"] = "代码缺少 ModelNew（或 Model）类或 forward 方法。"
         return None, None
 
-    wrapper_names = find_wrapper_functions(tree, valid_ext_names)
-    called = check_kernel_calls_in_forward(forward_node, valid_ext_names, wrapper_names)
+    called = []
+    for name, fn, _functions, aliases in contexts:
+        for hit in check_kernel_calls_in_forward(fn, valid_ext_names, aliases):
+            hit["via"] = name
+            called.append(hit)
     result["checks"]["kernel_called_from_forward"]["called"] = called
 
     if not called:
@@ -683,10 +763,9 @@ def _check_kernel_called(result, tree, valid_ext_names):
         result["regression_type"] = 2
         result["suggestion"] = (
             f"已加载 AscendC kernel 扩展 {list(valid_ext_names)} 但 "
-            f"{class_name}.forward() 中未调用。"
+            f"{class_name}.forward() 及其调用链中未调用。"
             "forward() 必须通过 torch.ops.npu.<op_name>(...) 形式调用 kernel，"
             "或通过 ext_module.function_name(...) 调用。"
-            f"{'也存在 wrapper 函数 ' + str(list(wrapper_names)) + ' 但 forward 也未调用它们。' if wrapper_names else ''}"
         )
         return None, None
 
@@ -694,9 +773,13 @@ def _check_kernel_called(result, tree, valid_ext_names):
     return forward_node, class_name
 
 
-def _check_forbidden_ops(result, forward_node):
+def _check_forbidden_ops(result, contexts):
     """Check 3: no forbidden torch ops. Returns True to continue."""
-    violations = check_forbidden_torch_ops(forward_node)
+    violations = []
+    for name, fn, functions, aliases in contexts:
+        for violation in check_forbidden_torch_ops(fn, functions, aliases):
+            violation["call"] = f"{name}() -> {violation['call']}"
+            violations.append(violation)
     result["checks"]["no_forbidden_torch_ops"]["violations"] = violations
 
     if violations:
@@ -757,15 +840,18 @@ def validate(code, filepath="<unknown>"):
     if valid_ext_names is None:
         return result
 
-    forward_node, _class_name = _check_kernel_called(result, tree, valid_ext_names)
+    forward_node, _class_name, class_node = find_model_forward(tree)
+    contexts = _call_chain(tree, forward_node, class_node, valid_ext_names) if forward_node else []
+    forward_node, _class_name = _check_kernel_called(result, tree, valid_ext_names, contexts)
     if forward_node is None:
         return result
 
-    if not _check_forbidden_ops(result, forward_node):
+    if not _check_forbidden_ops(result, contexts):
         return result
 
-    if not _check_scalar_loops(result, forward_node):
-        return result
+    for _name, fn, _functions, _aliases in contexts:
+        if not _check_scalar_loops(result, fn):
+            return result
 
     result["valid"] = True
     return result
