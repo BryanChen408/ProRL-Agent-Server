@@ -974,13 +974,22 @@ def _execute_models(ref_model, cand_model, input_groups, device):
     ref_fallback_error: str | None = None
 
     def _run_ref(dev):
-        outs = []
-        for inputs in input_groups:
-            ref_inputs = _move_to_device(_clone_value(inputs), dev)
-            call_args, call_kwargs = _bind_case(ref_model, ref_inputs)
-            with torch.no_grad():
-                outs.append(ref_model(*call_args, **call_kwargs))
-        return outs
+        conv_backend = torch.npu.conv if dev.type == "npu" else None
+        previous_hf32 = conv_backend.allow_hf32 if conv_backend is not None else None
+        try:
+            # Match FP32 judging tolerances without changing the candidate's precision mode.
+            if conv_backend is not None:
+                conv_backend.allow_hf32 = False
+            outs = []
+            for inputs in input_groups:
+                ref_inputs = _move_to_device(_clone_value(inputs), dev)
+                call_args, call_kwargs = _bind_case(ref_model, ref_inputs)
+                with torch.no_grad():
+                    outs.append(ref_model(*call_args, **call_kwargs))
+            return outs
+        finally:
+            if conv_backend is not None:
+                conv_backend.allow_hf32 = previous_hf32
 
     for index, inputs in enumerate(input_groups):
         ref_inputs = _move_to_device(_clone_value(inputs), device)
