@@ -42,8 +42,11 @@ GUIDE 中的 `references/xxx.md` 相对 `.claude/skills/ascendc-code-gen/`，裸
 这份资料补充归约、Norm 融合、重排/索引、Sort/TopK、量化和 Pooling 的实现模式。
 它只提供实现知识，不改变 reference、case、prompt、容差、评测入口或训练流程。
 
-- [实现模式总览](ascendc_implementation_knowledge/operator_patterns.md)
-- [使用边界与来源](ascendc_implementation_knowledge/README.md)
+- [实现模式总览](../skills/tilelang2ascend-translator/references/polar_operator_patterns.md)
+- [使用边界与来源](../skills/tilelang2ascend-translator/references/polar_knowledge_scope.md)
+- [精度与运行错误排查](../skills/ascendc-precision-debug/references/polar_precision_debug_patterns.md)
+- [API 与同步安全要点](../skills/ascendc-api-best-practices/references/polar_api_safety_notes.md)
+- [性能实现模式](../skills/ops-profiling/references/polar_performance_patterns.md)
 
 
 ## 已有工程的真实文件名

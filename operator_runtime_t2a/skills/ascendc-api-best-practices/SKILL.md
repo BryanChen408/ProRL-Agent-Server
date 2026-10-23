@@ -5,6 +5,11 @@ description: Ascend C API 使用最佳实践。提供算术、归约、数据搬
 
 # Ascend C API 最佳实践
 
+## Polar 补充安全要点
+
+遇到 DataCopy/LoadData 参数单位、UB/TPipe 生命周期、事件同步、Cast alias 或 SoC 差异时，
+按需读取 `references/polar_api_safety_notes.md`。具体签名和硬件限制仍以当前工具链为准。
+
 ---
 
 ## API 类别索引

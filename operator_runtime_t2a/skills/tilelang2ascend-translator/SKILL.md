@@ -83,6 +83,8 @@ argument-hint: >
 - `.claude/skills/tilelang2ascend-translator/references/dsl2Ascendc.md` — TileLang 转 AscendC 指南
 - `.claude/skills/tilelang2ascend-translator/references/TileLang-AscendC-API-Mapping.md` — TileLang 与 AscendC API 映射表
 - `.claude/skills/tilelang2ascend-translator/references/AscendCVerification.md` — AscendC 验证指南
+- `.claude/skills/tilelang2ascend-translator/references/polar_operator_patterns.md` — 归约、Norm、重排/索引、Sort/TopK、量化和 Pooling 的实现路由；按算子结构按需读取
+- `.claude/skills/tilelang2ascend-translator/references/polar_knowledge_scope.md` — 当前 Polar 的资料边界与 reference/评测约束
 - `.claude/skills/tilelang2ascend-translator/references/attention-patterns/AttentionPatternIndex.md` — Attention / FlashAttention 类算子的模式路由索引（TND、paged KV cache、mask/causal、GQA/MQA、MLA、topk sparse KV、sink attention）
 - `tools/ascendc_eval_pipeline.sh` — Polar RL 唯一允许执行的 AscendC 验证入口；禁止直接运行本 skill 的上游评测脚本
 - `.claude/workflows/templates/archive_tasks/` — 历史成功任务，host/kernel 完整参考实现（**编译/运行时错误时优先查阅**）

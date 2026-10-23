@@ -146,6 +146,7 @@ Phase 0 必须读取原始 `input/{op_name}.py` 的 `Model.__init__()`、`forwar
 - `ascendc-api-best-practices/references/api-repeat-limits.md`
 - `ascendc-api-best-practices/references/api-restrictions.md`
 - `ascendc-api-best-practices/references/api-transpose.md`
+- `ascendc-api-best-practices/references/polar_api_safety_notes.md`
 - `ascendc-code-gen/templates/(整棵目录)`
 - `ascendc-code-gen/references/GUIDE.md`
 - `ascendc-code-gen/references/basic-data-structures-api.md`
@@ -192,6 +193,7 @@ Phase 0 必须读取原始 `input/{op_name}.py` 的 `Model.__init__()`、`forwar
 - `ascendc-precision-debug/references/data-comparison.md`
 - `ascendc-precision-debug/references/debug-summary-template.md`
 - `ascendc-precision-debug/references/diagnosis-workflow.md`
+- `ascendc-precision-debug/references/polar_precision_debug_patterns.md`
 - `ascendc-precision-debug/references/printf-debug.md`
 - `ascendc-precision-debug/references/simt-precision-debug.md`
 - `ascendc-precision-debug/references/tools-reference.md`
@@ -249,6 +251,7 @@ Phase 0 必须读取原始 `input/{op_name}.py` 的 `Model.__init__()`、`forwar
 - `ops-profiling/references/msprof-guide.md`
 - `ops-profiling/references/msprof-op-guide.md`
 - `ops-profiling/references/optimization_quickref.md`
+- `ops-profiling/references/polar_performance_patterns.md`
 - `ops-profiling/scripts/msprof_perf_summary.py`
 - `ops-profiling/scripts/msprof_profile_run.sh`
 - `ops-profiling/scripts/perf_summary.py`
@@ -292,10 +295,11 @@ Phase 0 必须读取原始 `input/{op_name}.py` 的 `Model.__init__()`、`forwar
 - `tilelang2ascend-translator/references/dsl2Ascendc_compute_vector.md`
 - `tilelang2ascend-translator/references/dsl2Ascendc_cross_core_sync.md`
 - `tilelang2ascend-translator/references/dsl2Ascendc_host.md`
+- `tilelang2ascend-translator/references/polar_knowledge_scope.md`
+- `tilelang2ascend-translator/references/polar_operator_patterns.md`
 - `tilelang2ascend-translator/scripts/build_ascendc.py`
 - `tilelang2ascend-translator/scripts/evaluate_ascendc.sh`
-- `tilelang2ascend-translator/scripts/validate_ascendc_impl.py`
-- `tilelang2ascend-translator/scripts/verification_ascendc.py`
+- `tilelang2ascend-translator/` …(另有 2 项)
 
 <!-- END skill-reference -->
 

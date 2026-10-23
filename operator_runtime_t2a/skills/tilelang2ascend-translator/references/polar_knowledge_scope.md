@@ -3,7 +3,7 @@
 这是只读知识资料，不是新的 Skill、评测入口或工程初始化流程。实现任务仍按
 `CLAUDE.md`、现有 Skill、预生成骨架和固定评测入口执行。
 
-资料已经整理并固化在本目录；下面的路径只是来源记录，训练或解题时不需要访问 cannbot
+资料已经整理并固化在对应 Skill 的 `references/` 目录；下面的路径只是来源记录，训练或解题时不需要访问 cannbot
 仓库，也不依赖其目录存在。原始来源是本机 cannbot 仓库 `97ee3d81` 的：
 
 - `community/ops/tilelang2ascend-tilelang-designer/references/design-patterns/`
@@ -24,5 +24,5 @@
 
 ## 按算子选择资料
 
-先读 `operator_patterns.md` 的对应章节，再按需要查当前 Skill 中的 API 和调试资料。不要一次
+先读 `polar_operator_patterns.md` 的对应章节，再按需要查当前 Skill 中的 API 和调试资料。不要一次
 通读整个资料包。

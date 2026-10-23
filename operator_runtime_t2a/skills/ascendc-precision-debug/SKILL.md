@@ -17,6 +17,12 @@ description: Ascend C 算子精度调试技能，提供精度问题诊断和解�
 
 **适用**：精度验证失败（rtol/atol 不达标）、输出全为0或随机值、FP16差于FP32、特定数值范围误差大、流水线同步问题、DataCopy对齐问题。
 
+## Polar 补充排错模式
+
+遇到尾块、未初始化内存、跨 pipe 同步、FP16/BF16 累加、Cast 或重复运行不稳定时，按需读取
+`references/polar_precision_debug_patterns.md`。它只补充定位顺序和症状到根因的映射，不改变
+reference、case、比较阈值或固定评测入口。
+
 ---
 
 ## 调试前置要求 ⭐⭐⭐

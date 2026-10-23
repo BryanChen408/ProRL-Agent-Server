@@ -15,6 +15,9 @@ description: 基于固定评测入口产出的真实逐 case 性能证据，定�
 
 本 skill 负责“读证据、改实现”，不负责另起一套计时流程。
 
+- 性能结构分析可按需读取 `references/polar_performance_patterns.md`；它只提供瓶颈、tiling 和
+  流水知识，不新增 profiler、计时口径、优化轮次或性能门禁。
+
 - 唯一有效测速入口是工作目录 `CLAUDE.md` 规定的
   `/opt/workspace/agent_workdir/tools/ascendc_eval_pipeline.sh`。
 - 不直接运行仓库底层 benchmark、msprof 或自建计时脚本。
