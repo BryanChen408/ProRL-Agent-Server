@@ -425,6 +425,112 @@ def test_grouped_wrapper_contains_every_block_and_compiles(tmp_path):
     assert "end_event.record()" in wrapper
 
 
+def test_grouped_parser_joins_csv_slices_before_matching_markers(tmp_path):
+    module = load_msprof_summary()
+    directory = tmp_path / "mindstudio_profiler_output"
+    directory.mkdir()
+    header = "kernel_type,task_time(us),kernel_name,task_start(us)\n"
+    (directory / "task_time_slice_0.csv").write_text(
+        header + "EVENT_RECORD,0,N/A,1\nAI_CORE,12,kernel_a,2\n"
+    )
+    (directory / "task_time_slice_1.csv").write_text(
+        header + "AI_CORE,8,kernel_b,3\nEVENT_RECORD,0,N/A,4\n"
+    )
+    manifest = tmp_path / "manifest.json"
+    manifest.write_text(
+        '{"blocks":[{"case":0,"impl":"reference","ok":true,'
+        '"has_markers":true,"wall_us":999}]}'
+    )
+    measurements, error = module._parse_msprof_grouped(str(tmp_path), manifest, 1)
+    assert error is None
+    assert measurements[(0, "reference")] == {"duration_us": 20.0, "error": None}
+
+
+def test_extra_grouped_events_preserve_wall_clock_fallback(tmp_path):
+    module = load_msprof_summary()
+    directory = tmp_path / "mindstudio_profiler_output"
+    directory.mkdir()
+    (directory / "task_time_1.csv").write_text(
+        "kernel_type,task_time(us),kernel_name,task_start(us)\n"
+        "EVENT_RECORD,0,N/A,1\nEVENT_RECORD,0,N/A,2\n"
+        "AI_CORE,12,kernel,3\nEVENT_RECORD,0,N/A,4\n"
+    )
+    manifest = tmp_path / "manifest.json"
+    manifest.write_text(
+        '{"blocks":[{"case":0,"impl":"reference","ok":true,'
+        '"has_markers":true,"wall_us":999}]}'
+    )
+    measurements, error = module._parse_msprof_grouped(str(tmp_path), manifest, 1)
+    assert error is None
+    assert measurements[(0, "reference")]["duration_us"] == 999
+    assert measurements[(0, "reference")]["timing"] == "wall_clock"
+
+
+def test_quick_mode_retries_failed_grouped_profile_per_case(tmp_path, monkeypatch):
+    module = load_msprof_summary()
+    monkeypatch.setattr(module, "_select_device_id", lambda args: (0, "test"))
+    monkeypatch.setattr(module, "_materialize_compare_cases",
+                        lambda *args: ([{}], [tmp_path / "case.pt"], "test"))
+    monkeypatch.setattr(module, "_log_compare_header", lambda *args: None)
+    monkeypatch.setattr(module, "_run_quick_grouped_loop",
+                        lambda *args: (None, "grouped marker mismatch", None))
+    called = []
+
+    def per_case(*args):
+        called.append(True)
+        return [], [], [], []
+
+    monkeypatch.setattr(module, "_run_quick_loop", per_case)
+    monkeypatch.setattr(module, "_compute_compare_summary", lambda args: {})
+    reports = []
+    monkeypatch.setattr(module, "_log_and_save_compare_reports",
+                        lambda summary, *args: reports.append(summary))
+    module.run_quick_mode(SimpleNamespace(output_dir=str(tmp_path), seed=0,
+                                         warmup=3, repeats=1, quick_engine="grouped"))
+    assert called == [True]
+    assert reports[0]["profiling_engine"] == "per_case_fallback"
+
+
+def test_per_case_quick_parser_includes_all_csv_slices(tmp_path):
+    module = load_msprof_summary()
+    directory = tmp_path / "mindstudio_profiler_output"
+    directory.mkdir()
+    header = "kernel_type,task_time(us),kernel_name,task_start(us)\n"
+    for index, duration in enumerate([12, 8]):
+        (directory / f"task_time_slice_{index}.csv").write_text(
+            header + f"AI_CORE,{duration},kernel_{index},{index}\n"
+        )
+    duration, _, error = module._parse_msprof_duration_quick(str(tmp_path))
+    assert error is None
+    assert duration == 20.0
+
+
+def test_both_generated_cache_loaders_preserve_numpy_scalars(tmp_path):
+    import ast
+    import numpy as np
+    import torch
+
+    module = load_msprof_summary()
+    cache = tmp_path / "case.pt"
+    torch.save([torch.tensor([2.0]), np.int64(7)], cache)
+    scripts = [
+        module._cached_inputs_code(cache),
+        module._generate_grouped_wrapper_script(
+            tmp_path, [(0, "reference", cache)], 0, 0, 3, 1,
+            tmp_path / "manifest.json",
+        ),
+    ]
+    for script in scripts:
+        call = next(
+            node for node in ast.walk(ast.parse(script))
+            if isinstance(node, ast.Call) and ast.unparse(node.func) == "torch.load"
+        )
+        loaded = eval(compile(ast.Expression(call), "generated_cache_load", "eval"),
+                      {"torch": torch, "block": {"case_path": str(cache)}})
+        assert torch.equal(loaded[0], torch.tensor([2.0]))
+        assert type(loaded[1]) is np.int64 and loaded[1] == 7
+
+
 def test_performance_target_is_uniformly_1_1x():
     module = load_msprof_summary()
     assert module.PERF_TARGET_SPEEDUP == 1.1

@@ -1052,6 +1052,8 @@ for _ in range({repeats}):
     _one_iter()
 torch.npu.synchronize()
 print("POLAR_WALL_US=" + repr((time.perf_counter() - _wall_t0) * 1e6 / max(1, {repeats})))
+if getattr(_ref_mod, "REFERENCE_TIMING", None) == "wall_clock":
+    print("POLAR_TIMING_METHOD=wall_clock")
 """
 
 
@@ -1137,7 +1139,8 @@ def _cached_inputs_code(case_cache_path: Path):
     return f'''\
 _ref_mod = _load(out_dir / "model.py", "ref_for_inputs")
 _contract_cls = getattr(_ref_mod, "Model")
-input_case = torch.load({str(case_cache_path)!r}, map_location="cpu")
+# This private cache was generated from the trusted reference provider in this run.
+input_case = torch.load({str(case_cache_path)!r}, map_location="cpu", weights_only=False)
 '''
 
 
@@ -1420,9 +1423,7 @@ def _parse_msprof_duration_quick(prof_group_dir: str, warmup: int = 0, repeats: 
     task_time_files = sorted(glob.glob(task_time_pattern))
     if task_time_files:
         try:
-            with open(task_time_files[0], "r", encoding="utf-8", errors="replace") as f:
-                reader = csv.DictReader(f)
-                rows = list(reader)
+            rows = [row for path in task_time_files for row in read_csv_rows(path)]
             runs = _split_task_time_runs(rows, max(0, warmup) + max(1, repeats))
             if runs is not None:
                 active = runs[max(0, warmup):]
@@ -1617,9 +1618,10 @@ def _report_compare_to_markdown(report: Dict[str, Any]) -> str:
 def _report_compare_to_text(report: Dict[str, Any]) -> str:
     lines = []
     lines.append("=" * 100)
-    lines.append(f"Kernel-level Performance (msprof): {report['task']}  "
+    lines.append(f"Operator Performance (msprof): {report['task']}  "
                  f"(warmup={report['warmup']}, repeats={report['repeats']}, seed={report['seed']})")
     lines.append("=" * 100)
+    lines.append(f"Timing basis: {report.get('timing_method', 'unspecified')}")
     lines.append(f"{'Case':<5} {'Shape':<35} {'dtype':<10} {'Ref(us)':>12} {'Asc(us)':>12} {'Speedup':>10}")
     lines.append("-" * 100)
 
@@ -1738,6 +1740,14 @@ def _wall_us_from_app_log(output_dir: str):
     return value if value > 0 else None
 
 
+def _reference_requests_wall(output_dir: str):
+    try:
+        return "POLAR_TIMING_METHOD=wall_clock" in Path(output_dir, "app_output.log").read_text(
+            encoding="utf-8", errors="replace")
+    except OSError:
+        return False
+
+
 def _measure_one_impl_quick(mi: _MeasureInput):
     """快速模式：Measure one implementation with retries and repeats.
 
@@ -1760,6 +1770,13 @@ def _measure_one_impl_quick(mi: _MeasureInput):
         _cleanup_prof_dirs(tmpdir)
         prof_dir, err = _run_msprof_quick(wrapper, tmpdir, mi.device_id)
         if not prof_dir:
+            continue
+
+        if _reference_requests_wall(tmpdir):
+            wall_us = _wall_us_from_app_log(tmpdir)
+            if wall_us is not None:
+                return wall_us, None, prof_dir, "wall_clock"
+            err = "reference requested wall-clock timing but no valid wall time was recorded"
             continue
 
         duration, _op_name, parse_err = _parse_msprof_duration_quick(
@@ -1852,6 +1869,7 @@ for block_no, block in enumerate(blocks):
     entry = {{
         "case": block["case"], "impl": block["impl"],
         "ok": False, "has_markers": False, "error": None,
+        "timing": getattr(contract_mod, "REFERENCE_TIMING", None),
     }}
     try:
         torch.manual_seed(seed)
@@ -1865,7 +1883,8 @@ for block_no, block in enumerate(blocks):
         cls_name = "Model" if impl == "reference" else "ModelNew"
         module = _load(out_dir / model_file, f"grouped_{{impl}}_{{block_no}}")
         cls = getattr(module, cls_name)
-        input_case = torch.load(block["case_path"], map_location="cpu")
+        # Pipeline-owned provider cache, including original NumPy scalar attributes.
+        input_case = torch.load(block["case_path"], map_location="cpu", weights_only=False)
         input_case = _move(input_case, device)
         call_args, call_kwargs = _bind_case(contract_cls, input_case)
 
@@ -1946,6 +1965,13 @@ def _parse_msprof_grouped(prof_dir: str, manifest_path: Path, repeats: int):
     if manifest is None:
         return None, manifest_error
 
+    if any(block.get("timing") == "wall_clock" for block in manifest):
+        # A CPU/hybrid reference requires end-to-end timing for both implementations.
+        wall = _wall_measurements(manifest)
+        if wall is not None:
+            return wall, None
+        return None, "reference requested wall-clock timing but wall measurements are incomplete"
+
     task_time_files = sorted(glob.glob(os.path.join(
         prof_dir, "mindstudio_profiler_output", "task_time_*.csv"
     )))
@@ -1955,8 +1981,7 @@ def _parse_msprof_grouped(prof_dir: str, manifest_path: Path, repeats: int):
             return wall, None
         return None, "no task_time csv found"
     try:
-        with open(task_time_files[0], "r", encoding="utf-8", errors="replace") as stream:
-            rows = list(csv.DictReader(stream))
+        rows = [row for path in task_time_files for row in read_csv_rows(path)]
         rows.sort(key=lambda row: safe_float(row.get("task_start(us)")))
     except (OSError, ValueError, TypeError) as exc:
         return None, f"read task_time csv error: {exc}"
@@ -2339,7 +2364,7 @@ def _materialize_compare_cases(out_dir: Path, cache_dir: Path, seed: int):
 def _log_compare_header(out_dir, args):
     """Log the compare mode header."""
     LOGGER.info("=" * 100)
-    LOGGER.info(f"Kernel-level Performance (msprof): {out_dir.name}  "
+    LOGGER.info(f"Operator Performance (msprof): {out_dir.name}  "
           f"(warmup={args.warmup}, repeats={args.repeats}, seed={args.seed})")
     LOGGER.info("=" * 100)
     LOGGER.info(f"{'Case':<5} {'Shape':<35} {'dtype':<10} {'Ref(us)':>12} {'Asc(us)':>12} {'Speedup':>10}")
@@ -2474,6 +2499,8 @@ def _run_quick_loop(out_dir, cases, case_cache_paths, n_cases, args, device_id):
             "asc_error": asc_err,
             "ref_prof_dir": ref_prof_dir,
             "asc_prof_dir": asc_prof_dir,
+            "ref_timing": ref_method,
+            "asc_timing": asc_method,
         })
 
         if not args.keep_prof:
@@ -2552,6 +2579,8 @@ def _run_quick_grouped_loop(out_dir, cases, case_cache_paths, n_cases, args, dev
             "ref_us": ref_us, "asc_us": asc_us, "speedup": speedup,
             "ref_error": ref_err, "asc_error": asc_err,
             "ref_prof_dir": prof_dir, "asc_prof_dir": prof_dir,
+            "ref_timing": ref_result.get("timing", "task_time") if ref_us is not None else None,
+            "asc_timing": asc_result.get("timing", "task_time") if asc_us is not None else None,
         })
 
     if prof_dir and not args.keep_prof:
@@ -2635,6 +2664,10 @@ def run_quick_mode(args):
         out_dir, rows, speedups, ref_times, asc_times, n_cases, args, device_id, device_src)
     summary = _compute_compare_summary(csi)
     summary["timing_method"] = "msprof.quick.Task_Duration"
+    methods = {row.get(key) for row in rows for key in ("ref_timing", "asc_timing")}
+    methods.discard(None)
+    if "wall_clock" in methods:
+        summary["timing_method"] = "wall_clock" if methods == {"wall_clock"} else "mixed_per_case"
     summary["profiling_mode"] = "quick"
     summary["profiling_engine"] = profiling_engine
     summary["msprof_invocations"] = msprof_invocations

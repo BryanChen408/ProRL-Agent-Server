@@ -8,6 +8,7 @@ import importlib.util
 import json
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 SCRIPT = (Path(__file__).resolve().parents[2]
           / "operator_runtime_t2a/skills/ops-profiling/scripts/msprof_perf_summary.py")
@@ -112,3 +113,52 @@ def test_wall_marker_parsed_from_app_log(tmp_path):
     assert m._wall_us_from_app_log(str(tmp_path)) == 123.456
     (tmp_path / "app_output.log").write_text("nothing here", encoding="utf-8")
     assert m._wall_us_from_app_log(str(tmp_path)) is None
+
+
+def test_hybrid_reference_uses_wall_even_with_device_tasks(tmp_path):
+    _write_csv(tmp_path, [
+        (1, 0.5, "EVENT_RECORD", ""), (2, 10, "AI_CORE", "cast"),
+        (3, 0.5, "EVENT_RECORD", ""), (4, 0.5, "EVENT_RECORD", ""),
+        (5, 20, "AI_CORE", "candidate"), (6, 0.5, "EVENT_RECORD", ""),
+    ])
+    reference = _block(0, "reference", 500.0)
+    reference["timing"] = "wall_clock"
+    _write_manifest(tmp_path / "m.json", [reference, _block(0, "ascendc", 250.0)])
+    got, err = m._parse_msprof_grouped(str(tmp_path), tmp_path / "m.json", 1)
+    assert err is None
+    assert got[(0, "reference")]["duration_us"] == 500.0
+    assert got[(0, "ascendc")]["duration_us"] == 250.0
+    assert all(v["timing"] == "wall_clock" for v in got.values())
+
+
+def test_per_case_honors_reference_wall_request(tmp_path, monkeypatch):
+    monkeypatch.setattr(m, "_generate_wrapper_script", lambda *args: "")
+    monkeypatch.setattr(m, "_cleanup_prof_dirs", lambda *args: None)
+    monkeypatch.setattr(m, "_run_msprof_quick", lambda *args: (str(tmp_path), None))
+    monkeypatch.setattr(m, "_reference_requests_wall", lambda *args: True)
+    monkeypatch.setattr(m, "_wall_us_from_app_log", lambda *args: 123.0)
+
+    def unexpected_device_parse(*args):
+        raise AssertionError("must not use partial device time for a hybrid reference")
+
+    monkeypatch.setattr(m, "_parse_msprof_duration_quick", unexpected_device_parse)
+    args = SimpleNamespace(seed=0, retry=0, warmup=3, repeats=1)
+    got = m._measure_one_impl_quick(m._MeasureInput(tmp_path, 0, "reference", args, 0))
+    assert got == (123.0, None, str(tmp_path), "wall_clock")
+
+
+def test_grouped_report_retains_timing_basis(tmp_path, monkeypatch):
+    measurements = {
+        (0, "reference"): {"duration_us": 500.0, "timing": "wall_clock"},
+        (0, "ascendc"): {"duration_us": 250.0, "timing": "wall_clock"},
+    }
+    monkeypatch.setattr(m, "_measure_all_impls_grouped",
+                        lambda *args: (measurements, None, str(tmp_path)))
+    monkeypatch.setattr(m, "_extract_shape_dtype_from_jsonl", lambda *args: ("[1]", "float32"))
+    monkeypatch.setattr(m, "_case_has_empty_tensor", lambda *args: False)
+    result, error, _ = m._run_quick_grouped_loop(
+        tmp_path, [{}], [tmp_path / "case.pt"], 1, SimpleNamespace(keep_prof=True), 0)
+    assert error is None
+    row = result[0][0]
+    assert row["ref_timing"] == row["asc_timing"] == "wall_clock"
+    assert row["speedup"] == 2.0
