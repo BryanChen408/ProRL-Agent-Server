@@ -18,7 +18,11 @@ description: Ascend C 算子 Tiling 设计指南。提供算子分类体系和 T
 | MatMul 矩阵乘类 | 矩阵乘法，高计算密度，用Cube单元 | MatMul, BatchMatMul, MatMulBias, GroupedMatmul | ✅ [场景路由](references/matmul/patterns.md)（⚠️ 必须先读平台路由） |
 | Convolution 卷积类 | 空间卷积，滑动窗口计算 | Conv2D, DepthwiseConv | 📋 规划中 |
 | FlashAttention 类 | 注意力计算 | FlashAttention, GQA, MHA, MLA（可叠加量化/稀疏 trait） | ✅ [场景路由](references/flashattention/patterns.md)（⚠️ 必须先读） |
+| Index / Scatter 索引类（A2/A3） | 索引取数、重复展开、覆盖写或累加 | Gather, IndexSelect, IndexAdd, Scatter, RepeatInterleave | [按需场景索引](references/index/patterns.md) |
 | NN 神经网络类(其它)| 神经网络专用，多种操作组合 | GroupNorm 等非 attention | 📋 规划中 |
+
+Index/Scatter 资料描述 A2/A3 场景，按目标芯片核对 API 与 UB 容量；案例数值不是当前硬件配置。
+这些是按需实现参考，不新增评测阶段，不修改 reference、用例或容差。
 
 ## 通用设计要素（所有类别必须）
 

@@ -1,5 +1,8 @@
 # DataCopy / DataCopyPad 使用指南
 
+> 使用范围：实现知识参考，按本题需要查阅，不新增执行阶段或验收门禁。原文中的架构、shape、性能数据与参数仅适用于所述场景；以当前 SDK、reference 和固定评测入口为准。不得据此修改 reference/case、容差、标杆、计时参数，或另起评测。
+
+
 GM ↔ UB 数据搬运的完整指南。
 
 ---
@@ -310,6 +313,49 @@ copyParams.srcStride = paddedColsT * sizeof(T) / 32;  // 这会导致输出错�
 
 // ✅ 正确：srcStride 是间隔
 copyParams.srcStride = (paddedColsT - cols) * sizeof(T) / 32;
+```
+
+---
+
+## 性能规则：64B pitch 与 2D 合并搬运
+
+多行搬运场景（如批量归约把 GM 的分片数据搬入 UB）的两条性能规则：
+
+1. **行 pitch 对齐到 64B（而非最小 32B）**：UB 侧行宽 padding 到 64B 的整数倍，GM 侧目标地址同样按 64B 对齐——DMA 突发粒度对齐后 GM 访存/MTE2/MTE3 带宽利用率显著提升。UB 预算必须按 **pitch 后**元素数核算（不是按有效列数）
+2. **非连续行用一次 2D DataCopyPad（blockCount + srcStride/dstStride），禁止逐行多次 1D 调用**：每次 DataCopyPad 调用都有固定下发开销，逐行调用会把搬运变成同步点密集的串行序列；2D 模式一次调用完成全部行，且便于与双缓冲/事件流水配合
+3. **累加/归约循环内 blockCount 必须 > 1**：归约/累加循环搬运多行数据时，`blockCount` 必须等于本批行数（多行一次搬运）。`blockCount=1` 逐行搬运 = **性能反模式**——flag/同步次数 = 行数 × 段数 × 来源数 爆炸（生产踩坑：归约逐行搬运曾是某多行归约实现的性能缺陷根因之一）
+
+> ⚠️ **硬件隐式上限（DAV_3510 实测）**：2D DataCopyPad 当 `srcStride > 0` 或 `dstStride > 0`（行间跳步）时，`blockCount` 存在 **~29-32 行隐式上限**，超出行**静默丢弃为零**（无报错、无异常，输出呈周期性零值分布，period=blockCount）。防御三法（可并用）：① host 侧钳制单批行数 ≤ 32（strided 场景）；② strided 场景退化 1D 逐行 DataCopyPad（blockCount=1 无 stride，绕开限制——非 strided 场景仍保留 2D 批量）；③ 用例必须覆盖 strided 边界场景（隐式上限类缺陷只在边界用例下暴露，常规用例无法发现）。
+
+```cpp
+// ✅ 2D 合并搬运：tileM 行一次完成，行 pitch 64B 对齐
+// GM 侧：行间隔 dstStride/srcStride（字节）；UB 侧：paddedCols = round_up(cols*sizeof(T), 64)/sizeof(T)
+copyParams.blockCount = tileM;
+copyParams.blockLen   = cols * sizeof(T);
+copyParams.srcStride  = gmRowPitchBytes - cols * sizeof(T);        // GM 行间隔（字节）
+copyParams.dstStride  = (paddedCols - cols) * sizeof(T) / 32;      // UB 行间隔（32B 块）
+```
+
+> 连带纪律：批量（多行）处理后**一批数据一次 SetFlag/WaitFlag**（MTE2/V/MTE3 FIFO 特性），不要逐行配对事件——flag 次数是搬运-计算流水的主要隐藏开销。
+
+## 逐 chunk 循环中的 DataCopy 快路径（DataCopyPad 开销规避）
+
+逐块循环处理的算子（scatter/归约/前缀类）中，全量使用 `DataCopyPad` 会把 pad 逻辑
+固定开销逐 chunk 放大（实测整类算子 geomean 差 ~32%）：
+
+- **全对齐 chunk 用 `DataCopy`，仅尾部残差用 `DataCopyPad`**：保持 `CHUNK` 为 32 的
+  倍数、`offset` 为 `CHUNK` 倍数 → 源/目的地址天然 32B 对齐，主体循环走无 pad 开销
+  的快路径；仅最后一chunk 任意长度走 `DataCopyPad`
+- **`DataCopy` 3 参重载仅 `__NPU_ARCH__ == 3510`（950PR/910C）可用**：源案例编译目标为
+  `ascend950pr_9579`（npu-smi Chip Name 精确拼接；setup.py 默认
+  回退 `Ascend910B2` 不适用于该示例；当前不得覆盖注入的 SOC_VERSION，应选当前平台支持的重载）
+
+```cpp
+if (nRaw == CHUNK) {   // 全 chunk：天然 32B 对齐
+    DataCopy(local_, gm_[offset], CHUNK);
+} else {               // 仅尾部残差
+    DataCopyPad(local_, gm_[offset], cp, pp);
+}
 ```
 
 ---

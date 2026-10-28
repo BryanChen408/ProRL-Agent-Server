@@ -41,7 +41,7 @@ argument-hint: >
   `.claude/workflows/cannbot-reference-index.md` 定位 CANN headers/OPP；禁止读取其他工作区外路径。
 - 禁止读取 `.claude/skills/tilelang2ascend-translator/references/TileLangAscendProgrammingGuide.md`；该文档是 TileLang 编程指南，仅供 TileLang 阶段使用，与本阶段无关。
 - 预生成骨架是唯一工程起点，不是算子语义契约。禁止调用项目初始化 skill、复制其他任务或模板重建整个工程。
-- `empty_like`、dtype/连续性检查、单输出与恒等拷贝均是占位；输出、分支、参数与布局以原始 reference 为准，不能只补 Compute 而保留不适用的 host/kernel 假设。
+- 工程仅预接签名和构建/加载；host 默认明确报未实现，device 只有入口占位。根据完整 reference 设计输出分配、dtype 分派、tiling、buffer 与计算，同步 host 启动参数和 device 入口；不能只移除报错或提交空 kernel。
 - `kernel/CMakeLists.txt`、`kernel/setup.py`、`kernel/utils/` 和 `model_new_ascendc.py` 的双路径 loader 属于机制件，默认原样保留。
 - 如果 reference 的真实接口要求变化，允许同步修改 `model_new_ascendc.py` 调用、`register.cpp` schema、`ops.h` 声明和 `op_host` 实现；禁止只改其中一处造成签名断链。
 - 严格按照算子描述生成kernel，ascend c kernel的功能应该和标杆完全一致，不能出现部分功能使用ascend c，部分使用torch算子的情况
@@ -75,6 +75,19 @@ argument-hint: >
 ```
 
 ## Skill 参考资料
+
+以下资料按当前算子的计算特征查阅，不新增强制阶段；已读且未变化的内容不重复加载。
+这里只参考实现方法，仍以当前 reference、固定评测入口、预算和目标芯片为准。
+
+| 需要解决的问题 | 实现参考 |
+| --- | --- |
+| 归约轴、分块归约、尾块与精度 | [归约模式](references/ascendc_reduce_patterns.md) |
+| Norm 与激活融合、统计量和 buffer 复用 | [Norm 融合模式](references/ascendc_norm_fusion_patterns.md) |
+| 重排、交织、索引和广播访存 | [重排模式](references/ascendc_shuffle_patterns.md) |
+| Sort/TopK、并列值和采样边界 | [排序与 TopK 模式](references/ascendc_sort_topk_patterns.md) |
+| 量化舍入、饱和、scale 和索引写回 | [量化模式](references/ascendc_quantization_patterns.md) |
+| Pooling 前后向、布局、buffer 和非对齐输入 | [Pooling 实现索引](references/pooling-patterns/PoolingPatternIndex.md) |
+
 本 skill 提供以下参考资料：
 - `.claude/workflows/cannbot-reference-index.md` — 首次设计先读；按实际计算结构选择 cannbot 原版设计/代码模板，及 archive 的真实 host/kernel 路径。没有 SKILL.md 的旧资料目录直接 Read references/templates，不调用旧工作流。
 - `.claude/workflows/templates/design-template.md` — cannbot 原有设计模板，按下方「内嵌设计与审查」读取相关章节，不要求填写整份文档
@@ -356,6 +369,13 @@ WALKTHROUGH / REVIEW 文件，也不执行模板中的用例生成、独立构�
 - `{output_dir}/kernel/register.cpp` — 预生成注册，接口变化时才同步修改
 - `{output_dir}/model_new_ascendc.py` — 预生成 wrapper，接口变化时才同步修改调用
 
+首次实现按前面的六项设计结论补全 host 和 device，不需要重新搭建工程：
+- 先明确全部输出的 shape、dtype、数量及 in-place 语义，再实现输出分配和回写；不能默认返回首个输入或 `empty_like`。
+- 按完整 reference 契约选择实际需要的 kernel 实例，分别确认输入、计算和输出 dtype；不要额外展开所有类型，也不能仅因精选 case 未覆盖就拒绝合法输入。
+- 核对每个实例所用 API 的类型支持。运行时 `if/switch` 不会免除其他模板实例的编译检查；标量转换和标量算术也必须符合当前编译器限制。
+- 按算子依赖、平台核数和 UB 预算设计 tiling、buffer、尾块及同步，参考已有 tiling/API 资料；下列模式是示例，不是固定算法。
+- 同步 device 入口与 host 启动参数，完成真实计算后再替换 host 的未实现报错并运行固定评测入口；不提交空 kernel。
+
 下列机制件默认不得改写：
 - `{output_dir}/kernel/setup.py`
 - `{output_dir}/kernel/CMakeLists.txt`
@@ -381,15 +401,15 @@ WALKTHROUGH / REVIEW 文件，也不执行模板中的用例生成、独立构�
          sliceNum, platform->GetCoreNumAic(), platform->GetCoreNumAiv());
      ```
 - 使用平台 API 获取 `GetCoreMemSize(UB)`
-- Block 级 tiling: Cache Line 512B 对齐，formerNum/formerLength/tailNum/tailLength
-- UB 级 tiling: bufferCoefficient 推导，32B 对齐 tileLength
+- Block 级 tiling 按本题划分；`formerNum/formerLength/tailNum/tailLength` 是逐元素场景的一种写法，512B cache-line 对齐仅作优化参考
+- UB 级 tiling 按全部同时存活 buffer 推导容量；搬运对齐要求以实际 API 为准，区分有效长度与 padding 长度
 - **🛑 EXEC_KERNEL_CMD 传参铁律**: 所有 tiling 参数必须是**独立标量左值**，**禁止传 struct 指针**。参照 `.claude/workflows/templates/archive_tasks/rms_norm/kernel/op_host/rms_norm.cpp` 的正确模式
 - blockDim = usedCoreNum（多核统一分发），kernel 内部通过 `GetBlockIdx()` 计算工作范围
 - `EXEC_KERNEL_CMD` 所有参数必须为**左值**（具名变量），禁止传入临时变量/右值/字面量。`double` 先转 `float` 局部变量，`bool` 用 `int64_t` 替代，表达式先赋给局部变量再传入
 
 **op_kernel/<op_name>_kernel.cpp** 模式：
-- template class `Kernel<OpName>` 含 Init/Process/CopyIn/Compute/CopyOut
-- BUFFER_NUM = 2 (double buffer)；如算子需要在循环中同时持有多个 queue tensor，需相应增大 BUFFER_NUM
+- 可按需组织 Init/Process/CopyIn/Compute/CopyOut；只有需要多类型实例时才使用模板类
+- BUFFER_NUM 按流水和同时存活的 queue tensor 数量确定，双 buffer 是一种选择；须计入 UB 总预算
 - DataCopyPad 用于 GM↔UB 搬运
 - FP16/BF16 按 reference 的计算与舍入语义选择升精度策略，不能一律改为 FP32 累加
 - 整核/尾核偏移和尾块对齐处理

@@ -227,8 +227,8 @@ Phase 0 必须读取原始 `input/{op_name}.py` 的 `Model.__init__()`、`forwar
 - `ascendc-tiling-design/references/flashattention/specialization/sparse_design.md`
 - `ascendc-tiling-design/references/flashattention/subfamilies/base_design.md`
 - `ascendc-tiling-design/references/flashattention/subfamilies/quantization_design.md`
-- `ascendc-tiling-design/references/matmul/ascendc-api-gmm-tiling.md`
-- `ascendc-tiling-design/` …(另有 17 项)
+- `ascendc-tiling-design/references/index/gather.md`
+- `ascendc-tiling-design/` …(另有 23 项)
 - `npu-arch/SKILL.md`
 - `npu-arch/references/npu-arch-guide-triton.md`
 - `npu-arch/references/npu-arch-guide.md`
@@ -280,6 +280,11 @@ Phase 0 必须读取原始 `input/{op_name}.py` 的 `Model.__init__()`、`forwar
 - `tilelang2ascend-translator/references/TileLang-AscendC-API-Mapping.md`
 - `tilelang2ascend-translator/references/ascendc-sync-guide.md`
 - `tilelang2ascend-translator/references/ascendc_dynamic_quant_kb.md`
+- `tilelang2ascend-translator/references/ascendc_norm_fusion_patterns.md`
+- `tilelang2ascend-translator/references/ascendc_quantization_patterns.md`
+- `tilelang2ascend-translator/references/ascendc_reduce_patterns.md`
+- `tilelang2ascend-translator/references/ascendc_shuffle_patterns.md`
+- `tilelang2ascend-translator/references/ascendc_sort_topk_patterns.md`
 - `tilelang2ascend-translator/references/attention-patterns/AttentionPatternIndex.md`
 - `tilelang2ascend-translator/references/attention-patterns/references/head_sharing_pattern.md`
 - `tilelang2ascend-translator/references/attention-patterns/references/mask_causal_pattern.md`
@@ -294,12 +299,7 @@ Phase 0 必须读取原始 `input/{op_name}.py` 的 `Model.__init__()`、`forwar
 - `tilelang2ascend-translator/references/dsl2Ascendc_compute_cv.md`
 - `tilelang2ascend-translator/references/dsl2Ascendc_compute_vector.md`
 - `tilelang2ascend-translator/references/dsl2Ascendc_cross_core_sync.md`
-- `tilelang2ascend-translator/references/dsl2Ascendc_host.md`
-- `tilelang2ascend-translator/references/polar_knowledge_scope.md`
-- `tilelang2ascend-translator/references/polar_operator_patterns.md`
-- `tilelang2ascend-translator/scripts/build_ascendc.py`
-- `tilelang2ascend-translator/scripts/evaluate_ascendc.sh`
-- `tilelang2ascend-translator/` …(另有 2 项)
+- `tilelang2ascend-translator/` …(另有 17 项)
 
 <!-- END skill-reference -->
 
@@ -733,11 +733,13 @@ Polar prepare 在 Agent 启动前已经读取本题 `model.py` 的 `__init__` / 
 `get_inputs/get_input_groups/get_init_inputs` 中实际存在的入口与关联用例；不要把多步计算
 缩减成文件名中的一个操作，也不要忽略子模块参数、返回结构或分支。
 
-骨架中的 `empty_like(首个输入)`、连续性检查、默认类型与输入搬运、
-单输出接线、恒等拷贝与 elementwise tiling 都是**待改写占位**，不保证符合本题。
-按 reference 修正输出 shape/dtype、全部输出、布局、累加精度、buffer 与尾块；BF16/整数
-支持不能只删 host 检查，必须同步修正 kernel 类型与访存。静态签名提取不等于已实现
-`__init__` 中的子模块与参数语义。模板或历史文档中的芯片示例以本环境 `SOC_VERSION` 为准，
+初始化仅提供工程接线，计算实现由本题设计决定。
+生成的 host 明确报“implementation is missing”，device 只有入口占位；没有预设 dtype 分派、
+输出分配、tiling、buffer 或恒等搬运。必须按完整 reference 契约实现这些部分，并同步 host
+启动参数与 device 入口。不要只删除未实现报错或调用空 kernel；必须实现真实计算与全部输出。
+用例用于核对覆盖，不能仅因精简 case 未出现某个合法类型/分支就删掉 reference 要求的支持。
+静态签名提取不等于已实现 `__init__` 中的子模块与参数语义。
+模板或历史文档中的芯片示例以本环境 `SOC_VERSION` 为准，
 其中的子代理、用例精简、独立构建/评测指令不适用，仍服从本节固定入口与预算。
 
 ## 固定入口

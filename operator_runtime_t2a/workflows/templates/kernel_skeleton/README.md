@@ -14,6 +14,11 @@
 保留 CMakeLists.txt / setup.py / utils / wrapper loader；按原始 reference 实现数学、
 输出与布局。接口变化时同步 wrapper 调用、register.cpp、ops.h 和 op_host。
 
+初始化职责参考本机 cannbot 原仓 `97ee3d81` 的
+`plugins-community/tilelang2ascendc-ops-generator/agents/tilelang2ascendc-kernel-generator.md`
+Phase 1/4：保留工程机制，host/kernel 的计算由算子设计填充。Polar 仅额外预接 reference 签名。
+当前 host 默认明确报未实现，device 只留入口；不预生成全类型分派、输出分配、tiling 或搬运。
+
 ## 用法
 
 Polar prepare 已生成工作目录顶层的 `{op_name}/`，直接原位开发，不要再次复制模板或
@@ -58,10 +63,6 @@ Polar prepare 已生成工作目录顶层的 `{op_name}/`，直接原位开发�
     └── utils/torch_kernel_helper.h     # EXEC_KERNEL_CMD 宏(原样,别改)
 ```
 
-kernel 的 `Compute()` 默认只将首输入恒等拷贝到首输出，不代表实现了任务。
-类型分派复用 cannbot `archive_tasks/rms_norm` 的 `scalar_type → dtypeFlag → Kernel<T>` 模式，
-区分 FP32、FP16、BF16，并扩展整数搬运；bool 按 uint8_t 存储搬运。`element_size()` 只用于尺寸计算。
-保留全部普通 Tensor 输入的队列与搬运，host 检查输入类型一致；混合类型需由 agent 按 reference 分别实现类型与 buffer，再调整检查。
-同类型检查参考 cannbot rms_norm；这是当前同类型骨架的限制，不是任务本身禁止混合类型。
-类型转换与计算 API 支持查 translator 的步骤 0-B、官方 Cast 文档和 rms_norm 示例。
-`empty_like`、连续性、单输出、tiling 与尾块仍是占位，实际数学、输出与累加类型由任务决定。
+host 默认拒绝运行；device 空入口没有计算语义。实现真实计算后才能评测通过。
+dtype 分派、输出分配、混合类型、tiling 与尾块由本题设计决定，不从工程骨架推断。
+原仓的 rms_norm 分派仅作具体算子的参考，不自动套用到所有任务。

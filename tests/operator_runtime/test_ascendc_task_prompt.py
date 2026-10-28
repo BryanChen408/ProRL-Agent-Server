@@ -58,7 +58,10 @@ def test_prompt_does_not_embed_obsolete_or_foreign_skill_routes():
 
 def test_prompt_keeps_design_before_first_evaluation_and_reference_as_authority():
     text = _load_generator()._instruction("cudallm_op", "input/cudallm_op.py")
-    assert "placeholders, not the operator specification" in text
+    assert "host explicitly rejects execution until implemented" in text
+    assert "device entry is only a placeholder" in text
+    assert "from the full reference contract" in text
+    assert "do not merely remove the error or submit an empty kernel" in text
     assert "including __init__, forward and relevant helpers" in text
     assert "Skipping TileLang does not skip" in text
     assert "first implementation is ready" in text

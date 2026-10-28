@@ -1,5 +1,8 @@
 # 精度转换与混合精度指南
 
+> 使用范围：实现知识参考，按本题需要查阅，不新增执行阶段或验收门禁。原文中的架构、shape、性能数据与参数仅适用于所述场景；以当前 SDK、reference 和固定评测入口为准。不得据此修改 reference/case、容差、标杆、计时参数，或另起评测。
+
+
 Cast API 使用规范和混合精度计算模式。
 
 ---
@@ -34,6 +37,22 @@ AscendC::Cast<float, half>(xFloat, xHalf, AscendC::RoundMode::CAST_NONE, count);
 AscendC::LocalTensor<half> yHalf = outQueue.AllocTensor<half>();
 AscendC::Cast<half, float>(yHalf, xFloat, AscendC::RoundMode::CAST_ROUND, count);
 ```
+
+> ⚠️ **禁止向更宽类型做 in-place Cast**（如 BF16→FP32 in-place）：目标类型占 2× 空间，Cast 输出会覆盖同 buffer 内**尚未读取的源数据** → 系统性精度错误。向更宽类型 Cast 时必须使用独立目标 buffer（双缓冲场景配双份目标 buffer）。
+
+### Scatter/累加场景补充铁律（950PR 实测）
+
+- **Cast 的 dst/src 不可重叠/别名**：向量指令并行读写竞争 → NaN；`Compare` 的 dst
+  与 src1/src2 重叠同样会损坏输出（需独立零缓冲）
+- **升精度误用 `CAST_RINT` 的症状特征**：T→float 用了 `CAST_RINT` 会导致
+  "有贡献但值错"（matched_ratio≈0.005 级），而非"全零"——注意与越界/未同步类全零
+  症状区分
+- **SIMT 内 `static_cast<float>(bf16)` 不可靠**（可能被编译器折叠回 bf16 运算）；
+  fp16 的 static_cast 可靠。bf16 参与元素级运算前必须在向量阶段先 Cast 到 fp32
+  workspace，SIMT 内只碰 fp32
+- **fp16/bf16 累加的 acc_type 语义**：CPU golden 对重复 index 的 add 在 fp32 精确
+  累加后一次舍入；kernel 若逐次低精度舍入会差 1 ULP——整批向量 Cast 到 fp32 →
+  累加 → 向量 Cast 回（降精度用 CAST_RINT）
 
 ---
 
@@ -107,7 +126,7 @@ MX 类格式的 scale dtype 是 `fp8_e8m0_t`，需要把 fp32 的 biased exponen
 | 路径 | 说明 |
 |------|------|
 | **MemBase Cast API** | 不提供 `fp8_e8m0_t` 重载 |
-| **Reg-API Cast** | 提供 `bfloat16_t ↔ fp8_e8m0_t` 重载（查 `Cast-45.md` 等 Reg-API 变体），但需引入 Regbase 编程范式 |
+| **Reg-API Cast** | 提供 `bfloat16_t ↔ fp8_e8m0_t` 重载（在 `$ASC_DEVKIT_DIR/docs/zh/api/` 查询实际存在的 `Cast*.md` 变体并核对重载；不假定数字后缀固定），但需引入 Regbase 编程范式 |
 | **手写位运算** | 通过 `ReinterpretCast<uint32_t>(fp32_tensor)` 拿到位表示，`ShiftRight + And + Sub + Add` 提取 biased exp 并应用 ceil 偏移 |
 
 主路径选择按算子整体的编程范式决定：纯 MemBase 路径用手写位运算，Reg-API 路径可直接用 Cast。

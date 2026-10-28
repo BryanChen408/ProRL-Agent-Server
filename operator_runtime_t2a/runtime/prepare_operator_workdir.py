@@ -80,8 +80,8 @@ def _camel(name: str) -> str:
 # 骨架签名生成
 #
 # 机制件(CMakeLists/setup.py/utils)从模板目录静态铺;签名件(model_new/register.cpp/
-# ops.h/op_host/op_kernel)按 model.py 的 __init__/forward 静态解析生成 —— 签名本来就是
-# 任务书的一部分,生成只是机械转写,不推断输出 shape/dtype 或实现子模块语义。
+# ops.h/op_host)按 model.py 的 __init__/forward 静态解析生成；device 只留空入口。
+# 生成只负责接口接线，不推断 dtype 分派、输出分配、tiling 或计算。
 #
 # 原则:解析不了的特征一律放宽降级(*args 收纳 / 参数不进 op 签名 + 显式 TODO),
 # 不报错、不排除算子,给 agent 留发挥空间。唯一硬约束是 harness 契约:
@@ -128,18 +128,6 @@ _CPP_TYPE = {
     "int[]": "at::IntArrayRef ", "int[]?": "at::OptionalIntArrayRef ",
     "tensor[]": "at::TensorList ",
 }
-# 能接进 kernel 入口的标量 kind → kernel 形参类型;不在表里的 kind 只到 host(留 TODO)
-_KERNEL_SCALAR = {"int": "int64_t", "float": "float", "bool": "int64_t"}
-
-# CANNBot archive_tasks/rms_norm: scalar_type -> dtypeFlag -> Kernel<T>。
-# 扩展的是恒等搬运占位，不代表任意计算 API 支持这些类型；数学由 agent 按任务实现。
-_SKELETON_DTYPES = (
-    ("Float", "float"), ("Half", "half"), ("BFloat16", "bfloat16_t"),
-    ("Int", "int32_t"), ("Long", "int64_t"), ("Char", "int8_t"),
-    ("Bool", "uint8_t"),  # bool 仅按一字节存储搬运，不转成 half/float
-    ("Byte", "uint8_t"), ("Short", "int16_t"), ("Double", "double"),
-)
-
 
 def _module_consts(tree) -> dict:
     """模块级常量。先做一遍字面量直收,再按引用展开 tuple/list/算术表达式
@@ -635,292 +623,36 @@ namespace ascend_kernel {{
 '''
 
 
-def _render_op_host_cpp(op: str, sig: _OpSig, ordered: list[_Param], cpp_args: str) -> str:
-    tensors = [p for p in ordered if p.kind == "tensor"]
-    tensor_lists = [p for p in ordered if p.kind == "tensor[]"]
-    unwired = [
-        p for p in ordered
-        if p.kind in ("tensor?", "int?", "float?", "str", "str?", "int[]", "int[]?", "tensor[]")
-    ]
-    scalars = [p for p in ordered if p.kind in _KERNEL_SCALAR]
-    lines: list[str] = []
-    a = lines.append
-    a(f"// {op} op_host — 校验 + tiling + EXEC_KERNEL_CMD 启动")
-    a("// 签名由 prepare 按 model.py 生成(与 register.cpp/ops.h/model_new 自洽);")
-    a("// elementwise 占位不是本题语义契约:按原始 reference 核对完整计算、输出与分支。")
-    a("// empty_like、连续性检查、单输出接线与 tiling 均需按本题改写,不只改 Compute。")
-    a("// 要改签名请四处同步;构建/loader 机制不重建,设计复用 CLAUDE.md 指向的 cannbot 资料。")
-    a("#include <algorithm>")
-    a("#include <cstdint>")
-    a("#include <tuple>")
-    a("")
-    a("#include <torch/extension.h>")
-    a("#include <torch/library.h>")
-    a("")
-    a('#include "torch_kernel_helper.h"')
-    a('#include "tiling/platform/platform_ascendc.h"')
-    a("")
-    a(f"// 由 build 从 op_kernel/{op}_kernel.cpp 的 __global__ 入口自动生成。")
-    a(f'#include "aclrtlaunch_{op}_kernel.h"')
-    a("")
-    a("namespace ascend_kernel {")
-    a("")
-    a("constexpr int64_t CACHE_LINE_BYTE_LENGTH = 512;")
-    a("")
-    a(f"{_ret_cpp(sig)} {op}({cpp_args})")
-    a("{")
-    # host 侧局部变量一律下划线开头 —— 与数据集参数名(不会下划线开头)结构性错开,
-    # 防止参数名撞上 tiling 局部变量(比如某输入就叫 y/output/tileLength)。
-    first = None
-    if tensors:
-        first = tensors[0].name
-    elif tensor_lists:
-        p = tensor_lists[0]
-        a(f"    // {p.name} 是 Tensor[];骨架按第 1 个输入接线,其余元素按算子语义自行扩展。")
-        a(f'    TORCH_CHECK({p.name}.size() > 0, "{op}: {p.name} must be non-empty");')
-        a(f"    at::Tensor _x0 = {p.name}[0];")
-        first = "_x0"
-    if first is None:
-        # 纯标量驱动(无 tensor 输入)的算子(如 mask 生成类):elementwise 壳不适用,
-        # 放宽为可编译占位 + TODO,host 逻辑由 agent 按算子语义写。
-        for p in unwired:
-            a(f"    // TODO: {p.name}({_SCHEMA_TYPE[p.kind]})未接入 kernel 入口,按算子语义自行接线")
-        a("    // TODO: 该算子没有 tensor 输入(纯标量驱动),骨架给不出 tiling 壳;")
-        a("    // 输出形状/启动逻辑请按算子语义自行实现(下方仅为可编译占位)。")
-        out_names = []
-        for i in range(max(1, sig.ret_arity)):
-            a(f'    at::Tensor _out{i} = at::empty({{0}}, at::TensorOptions().dtype(at::kFloat));')
-            out_names.append(f"_out{i}")
-        ret_expr = out_names[0] if sig.ret_arity <= 1 else f"std::make_tuple({', '.join(out_names)})"
-        a("")
-        a(f"    return {ret_expr};")
-        a("}")
-        a("")
-        a("}  // namespace ascend_kernel")
-        return "\n".join(lines) + "\n"
-    a(f'    TORCH_CHECK({first}.is_contiguous(), "{op}: {first} must be contiguous");')
-    a("    // CANNBot rms_norm 的显式 dtypeFlag 分派；element_size 只用于字节数计算。")
-    a("    int64_t _dtypeFlag = -1;")
-    a(f"    switch ({first}.scalar_type()) {{")
-    for flag, (torch_type, _) in enumerate(_SKELETON_DTYPES):
-        a(f"        case at::k{torch_type}: _dtypeFlag = {flag}; break;")
-    a(f'        default: TORCH_CHECK(false, "{op}: extend dtype dispatch for ", {first}.scalar_type());')
-    a("    }")
-    for t in tensors[1:]:
-        a(f'    TORCH_CHECK({t.name}.is_contiguous(), "{op}: {t.name} must be contiguous");')
-        a(f'    TORCH_CHECK({t.name}.scalar_type() == {first}.scalar_type(), "{op}: skeleton expects matching input dtypes; implement mixed input types according to reference");')
-    for p in unwired:
-        a(f"    // TODO: {p.name}({_SCHEMA_TYPE[p.kind]})未接入 kernel 入口,按算子语义自行接线")
-    if sig.ret_arity > 1:
-        a(f"    // 多返回值算子:骨架只把第 1 个输出接进 kernel,其余输出请按算子语义接线。")
-    a("")
-    out_names = []
-    if sig.ret_arity <= 1:
-        a(f"    at::Tensor _output = at::empty_like({first});")
-        out_names = ["_output"]
-    else:
-        for i in range(sig.ret_arity):
-            a(f"    at::Tensor _out{i} = at::empty_like({first});")
-        out_names = [f"_out{i}" for i in range(sig.ret_arity)]
-    ret_expr = out_names[0] if sig.ret_arity <= 1 else f"std::make_tuple({', '.join(out_names)})"
-    a("")
-    a(f"    int64_t _totalLength = {first}.numel();")
-    a("    if (_totalLength == 0) {")
-    a(f"        return {ret_expr};")
-    a("    }")
-    a(f"    int64_t _dtypeSize = {first}.element_size();")
-    a("")
-    a("    auto _ascendc_platform = platform_ascendc::PlatformAscendCManager::GetInstance();")
-    a("    int64_t _coreNum = static_cast<int64_t>(_ascendc_platform->GetCoreNumAiv());")
-    a("    if (_coreNum <= 0) { _coreNum = 1; }")
-    a("    uint64_t _ubSize = 0;")
-    a("    _ascendc_platform->GetCoreMemSize(platform_ascendc::CoreMemType::UB, _ubSize);")
-    a("")
-    a("    int64_t _totalLengthCore = (_totalLength + _coreNum - 1) / _coreNum;")
-    a("    int64_t _totalLengthCoreAlign = (_totalLengthCore + CACHE_LINE_BYTE_LENGTH - 1) /")
-    a("                                   CACHE_LINE_BYTE_LENGTH * CACHE_LINE_BYTE_LENGTH;")
-    a("")
-    a("    int64_t _usedCoreNum = (_totalLength + _totalLengthCoreAlign - 1) / _totalLengthCoreAlign;")
-    a("    int64_t _formerNum = _usedCoreNum - 1;")
-    a("    int64_t _formerLength = _totalLengthCoreAlign;")
-    a("    int64_t _tailLength = _totalLength - _formerNum * _formerLength;")
-    a("")
-    a(f"    int64_t _bufferCoefficient = _dtypeSize * {2 * (max(1, len(tensors)) + 1)};  // 全部输入 queue + 输出 queue，各双 buffer")
-    a("    if (_bufferCoefficient <= 0) { _bufferCoefficient = 1; }")
-    a("    int64_t _maxTileElements = static_cast<int64_t>(_ubSize) / _bufferCoefficient;")
-    a("    int64_t _alignElements = 32 / (_dtypeSize > 0 ? _dtypeSize : 1);")
-    a("    if (_alignElements <= 0) { _alignElements = 1; }")
-    a("    int64_t _tileLength = (_maxTileElements / _alignElements) * _alignElements;")
-    a("    if (_tileLength <= 0) { _tileLength = _alignElements; }")
-    a("")
-    a("    uint32_t _blockDim = static_cast<uint32_t>(_usedCoreNum);")
-    a("")
-    # EXEC_KERNEL_CMD 的位置实参与 kernel 入口按位置对应(输入 in0..inN → 输出 → tiling → 标量)
-    exec_args = [t.name for t in tensors] or [first]
-    exec_args += [out_names[0], "_formerNum", "_formerLength", "_tailLength", "_tileLength", "_dtypeFlag"]
-    for p in scalars:
-        if p.kind == "float":
-            a(f"    float _{p.name}_l = static_cast<float>({p.name});  // EXEC_KERNEL_CMD 需要左值")
-            exec_args.append(f"_{p.name}_l")
-        elif p.kind == "bool":
-            a(f"    int64_t _{p.name}_l = {p.name} ? 1 : 0;  // bool 用 int64_t 左值替代")
-            exec_args.append(f"_{p.name}_l")
-        else:
-            exec_args.append(p.name)   # int64_t 形参本身是左值,直接传
-    if scalars:
-        a("")
-    a(f"    EXEC_KERNEL_CMD({op}_kernel, _blockDim,")
-    a(f"                    {', '.join(exec_args)});")
-    a("")
-    a(f"    return {ret_expr};")
-    a("}")
-    a("")
-    a("}  // namespace ascend_kernel")
-    return "\n".join(lines) + "\n"
+def _render_op_host_cpp(op: str, sig: _OpSig, cpp_args: str) -> str:
+    # Keep the registered contract; computation belongs to the per-operator design.
+    return f'''// {op}: implement the reference contract before evaluation.
+#include "ops.h"
+#include "torch_kernel_helper.h"
+#include "aclrtlaunch_{op}_kernel.h"
+
+namespace ascend_kernel {{
+
+{_ret_cpp(sig)} {op}({cpp_args})
+{{
+    // Design outputs, dtype dispatch, tiling and kernel launch for this operator.
+    TORCH_CHECK(false, "{op}: host/kernel implementation is missing; implement the reference contract");
+}}
+
+}} // namespace ascend_kernel
+'''
 
 
-def _render_op_kernel_cpp(op: str, camel: str, sig: _OpSig, ordered: list[_Param]) -> str:
-    n_inputs = sum(1 for p in ordered if p.kind == "tensor")
-    if n_inputs == 0:
-        n_inputs = 1   # tensor[] 接管/纯标量兜底:单输入占位,由 agent 按算子语义重写
-    scalars = [p for p in ordered if p.kind in _KERNEL_SCALAR]
-    # kernel 内部名字一律按位置合成(in0/in1...、inQueue0、in0Gm),不取数据集参数名 ——
-    # 否则某输入叫 y 时会撞上输出 y/成员 yGm(C 函数按位置传参,名字本来就无需对应)。
-    inputs = [(f"in{i}", f"inQueue{i}", f"in{i}Gm") for i in range(n_inputs)]
-    scalar_decls = [(p, _KERNEL_SCALAR[p.kind]) for p in scalars]
+def _render_op_kernel_cpp(op: str) -> str:
+    return f'''// {op}: device entry placeholder, not an implementation.
+// Choose arguments, dtypes, buffers and computation from the reference.
+// Update the host launch arguments together with this entry.
+#include "kernel_operator.h"
 
-    lines: list[str] = []
-    a = lines.append
-    a(f"// {op} device kernel — elementwise 骨架({n_inputs} 输入;dtype 分发 + 尾块 + 32B 对齐 + 双 buffer)")
-    a("// 数学在 Compute() 里,默认把第 1 个输入恒等拷贝到输出(能编过、能注册、跑通打包链路,")
-    a("// 不代表实现了 reference)。全部普通 Tensor 输入按相同类型搬运，host 检查类型一致。")
-    a("// 必须按本题改写 tiling、buffer、尾块有效长度和全部输出,不能只替换 Compute。")
-    a("// dtypeFlag 按实际 scalar_type 分派，区分 FP16/BF16/整数；bool 占位仅按 uint8_t 搬运。")
-    a("// 类型/API/转换参考 .claude/skills/tilelang2ascend-translator/SKILL.md 与 archive_tasks/rms_norm/。")
-    a('#include "kernel_operator.h"')
-    a("")
-    a("constexpr int32_t BUFFER_NUM = 2;")
-    a("")
-    a("template <typename T>")
-    a(f"class Kernel{camel} {{")
-    a("public:")
-    a(f"    __aicore__ inline Kernel{camel}() {{}}")
-    a("")
-    init_params = [f"GM_ADDR {n}" for n, _, _ in inputs] + ["GM_ADDR y"]
-    init_params += ["int64_t formerNum", "int64_t formerLength", "int64_t tailLength", "int64_t tileLength"]
-    init_params += [f"{kt} {p.name}" for p, kt in scalar_decls]
-    a(f"    __aicore__ inline void Init({', '.join(init_params[:4])},")
-    a(f"                                {', '.join(init_params[4:])})")
-    a("    {")
-    a("        int64_t blockIdx = AscendC::GetBlockIdx();")
-    a("")
-    a("        if (blockIdx < formerNum) {")
-    a("            this->blockLength = formerLength;")
-    a("            int64_t offset = formerLength * blockIdx;")
-    for n, _, gm in inputs:
-        a(f"            {gm}.SetGlobalBuffer((__gm__ T *){n} + offset, formerLength);")
-    a("            yGm.SetGlobalBuffer((__gm__ T *)y + offset, formerLength);")
-    a("        } else {")
-    a("            this->blockLength = tailLength;")
-    a("            int64_t tailIdx = blockIdx - formerNum;")
-    a("            int64_t offset = formerLength * formerNum + tailLength * tailIdx;")
-    for n, _, gm in inputs:
-        a(f"            {gm}.SetGlobalBuffer((__gm__ T *){n} + offset, tailLength);")
-    a("            yGm.SetGlobalBuffer((__gm__ T *)y + offset, tailLength);")
-    a("        }")
-    a("        this->tileLength = tileLength;")
-    for p, _ in scalar_decls:
-        a(f"        this->{p.name} = {p.name};")
-    a("")
-    for _, q, _ in inputs:
-        a(f"        pipe.InitBuffer({q}, BUFFER_NUM, tileLength * sizeof(T));")
-    a("        pipe.InitBuffer(outQueueY, BUFFER_NUM, tileLength * sizeof(T));")
-    a("    }")
-    a("")
-    a("    __aicore__ inline void Process()")
-    a("    {")
-    a("        int64_t tileNum = (this->blockLength + this->tileLength - 1) / this->tileLength;")
-    a("        int64_t tailTileLength = this->blockLength - (tileNum - 1) * this->tileLength;")
-    a("")
-    a("        int64_t alignNum = 32 / static_cast<int64_t>(sizeof(T));")
-    a("        int64_t alignedTailLen = ((tailTileLength + alignNum - 1) / alignNum) * alignNum;")
-    a("")
-    a("        for (int64_t i = 0; i < tileNum - 1; ++i) {")
-    a("            CopyIn(i, this->tileLength);")
-    a("            Compute(i, this->tileLength);")
-    a("            CopyOut(i, this->tileLength);")
-    a("        }")
-    a("        if (tileNum > 0) {")
-    a("            CopyIn(tileNum - 1, alignedTailLen);")
-    a("            Compute(tileNum - 1, alignedTailLen);")
-    a("            CopyOut(tileNum - 1, alignedTailLen);")
-    a("        }")
-    a("    }")
-    a("")
-    a("private:")
-    a("    __aicore__ inline void CopyIn(int64_t progress, int64_t curTileLength)")
-    a("    {")
-    for n, q, gm in inputs:
-        a(f"        AscendC::LocalTensor<T> {n}Local = {q}.AllocTensor<T>();")
-        a(f"        AscendC::DataCopy({n}Local, {gm}[progress * this->tileLength], curTileLength);")
-        a(f"        {q}.EnQue({n}Local);")
-    a("    }")
-    a("")
-    a("    __aicore__ inline void Compute(int64_t progress, int64_t curTileLength)")
-    a("    {")
-    for n, q, _ in inputs:
-        a(f"        AscendC::LocalTensor<T> {n}Local = {q}.DeQue<T>();")
-    a("        AscendC::LocalTensor<T> yLocal = outQueueY.AllocTensor<T>();")
-    a("")
-    a(f"        // TODO: 换成你的算子数学。默认恒等拷贝 y = in0(只为打通打包/注册链路)。")
-    a(f"        // 例: AscendC::Abs(yLocal, in0Local, curTileLength);       // |x|")
-    a("        // 混合类型输入需按 reference 分别实现类型与 buffer，并调整 host 检查。")
-    a(f"        AscendC::DataCopy(yLocal, in0Local, curTileLength);")
-    a("")
-    a("        outQueueY.EnQue<T>(yLocal);")
-    for n, q, _ in inputs:
-        a(f"        {q}.FreeTensor({n}Local);")
-    a("    }")
-    a("")
-    a("    __aicore__ inline void CopyOut(int64_t progress, int64_t curTileLength)")
-    a("    {")
-    a("        AscendC::LocalTensor<T> yLocal = outQueueY.DeQue<T>();")
-    a("        AscendC::DataCopy(yGm[progress * this->tileLength], yLocal, curTileLength);")
-    a("        outQueueY.FreeTensor(yLocal);")
-    a("    }")
-    a("")
-    a("private:")
-    a("    AscendC::TPipe pipe;")
-    for _, q, _ in inputs:
-        a(f"    AscendC::TQue<AscendC::TPosition::VECIN, BUFFER_NUM> {q};")
-    a("    AscendC::TQue<AscendC::TPosition::VECOUT, BUFFER_NUM> outQueueY;")
-    for _, _, gm in inputs:
-        a(f"    AscendC::GlobalTensor<T> {gm};")
-    a("    AscendC::GlobalTensor<T> yGm;")
-    a("    int64_t blockLength;")
-    a("    int64_t tileLength;")
-    for p, kt in scalar_decls:
-        a(f"    {kt} {p.name};")
-    a("};")
-    a("")
-    gparams = [f"GM_ADDR {n}" for n, _, _ in inputs] + ["GM_ADDR y"]
-    gparams += ["int64_t formerNum", "int64_t formerLength",
-              "int64_t tailLength", "int64_t tileLength", "int64_t dtypeFlag"]
-    gparams += [f"{kt} {p.name}" for p, kt in scalar_decls]
-    a(f'extern "C" __global__ __aicore__ void {op}_kernel(')
-    a(f"    {', '.join(gparams[:2])},")
-    a(f"    {', '.join(gparams[2:])})")
-    a("{")
-    init_call = [n for n, _, _ in inputs] + ["y", "formerNum", "formerLength",
-                                             "tailLength", "tileLength"] + [p.name for p, _ in scalar_decls]
-    for flag, (_, kernel_type) in enumerate(_SKELETON_DTYPES):
-        a(f"    {'if' if flag == 0 else 'else if'} (dtypeFlag == {flag}) {{")
-        a(f"        Kernel{camel}<{kernel_type}> op;")
-        a(f"        op.Init({', '.join(init_call)});")
-        a("        op.Process();")
-        a("    }")
-    a("}")
-    return "\n".join(lines) + "\n"
+extern "C" __global__ __aicore__ void {op}_kernel()
+{{
+    // TODO: implement the operator. The generated host rejects execution until implemented.
+}}
+'''
 
 
 # 模板目录里会被生成器取代的签名件(相对模板根的路径,占位符未替换前)
@@ -968,8 +700,8 @@ def _instantiate_kernel_skeleton(canonical: Path, workdir: Path, op: str,
         "model_new_ascendc.py": _render_model_new(op, sig),
         "kernel/register.cpp": _render_register_cpp(op, sig, ordered, schema_args),
         "kernel/ops.h": _render_ops_h(op, sig, cpp_args),
-        f"kernel/op_host/{op}.cpp": _render_op_host_cpp(op, sig, ordered, cpp_args),
-        f"kernel/op_kernel/{op}_kernel.cpp": _render_op_kernel_cpp(op, camel, sig, ordered),
+        f"kernel/op_host/{op}.cpp": _render_op_host_cpp(op, sig, cpp_args),
+        f"kernel/op_kernel/{op}_kernel.cpp": _render_op_kernel_cpp(op),
     }
     for rel, text in outputs.items():
         dst = workdir / op / rel

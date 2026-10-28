@@ -111,10 +111,10 @@ class Model(torch.nn.Module):
     for k,s in [(2,None),([2,2,2],[1,1,1]),(3,2)]:
         model(torch.ones(1),torch.ones(1),k,s)
     assert seen == [([2],None),([2,2,2],[1,1,1]),([3],[2])]
-    host = prep._render_op_host_cpp(op,sig,ordered,cpp_args)
-    kernel = prep._render_op_kernel_cpp(op,'Mixed',sig,ordered)
-    assert '_dtypeSize * 6;' in host
-    assert kernel.count('pipe.InitBuffer(') == 3
+    host = prep._render_op_host_cpp(op,sig,cpp_args)
+    kernel = prep._render_op_kernel_cpp(op)
+    assert 'implementation is missing' in host
+    assert 'InitBuffer' not in kernel and 'dtypeFlag' not in kernel
 
 
 def test_benchmark_wrappers_use_same_reference_initialization(tmp_path):

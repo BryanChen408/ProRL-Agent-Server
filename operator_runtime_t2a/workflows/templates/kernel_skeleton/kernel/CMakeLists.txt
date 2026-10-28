@@ -38,6 +38,9 @@ add_library({op_name}_ext SHARED
 target_link_libraries({op_name}_ext PRIVATE
     kernels
     torch_npu
+    # Registration must resolve PyTorch symbols even before a kernel launch exists.
+    torch_cpu
+    c10
     m
     dl
 )
