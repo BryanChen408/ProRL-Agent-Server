@@ -165,12 +165,18 @@ def acquire_card(pool: list[str], lock_dir: str) -> CardLock:
         raise ValueError("ascend.pool is empty — no NPU cards to allocate")
     os.makedirs(lock_dir, exist_ok=True)
     for dev in pool:
+        quarantine = Path(lock_dir) / f"npu{dev}.quarantine.json"
+        if quarantine.exists():
+            continue
         path = os.path.join(lock_dir, f"npu{dev}.lock")
         fd = os.open(path, os.O_CREAT | os.O_RDWR, 0o644)
         try:
             fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            if quarantine.exists():
+                os.close(fd)
+                continue
             return CardLock(fd, dev)
         except (BlockingIOError, OSError):
             os.close(fd)
             continue
-    raise RuntimeError(f"no free NPU card in pool {pool} (all {len(pool)} locked)")
+    raise RuntimeError(f"no free NPU card in pool {pool} (locked or quarantined)")

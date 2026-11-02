@@ -23,6 +23,26 @@
 
 ## 二、agent 侧 / judge 侧同一条命令
 
+### 故障卡隔离
+
+共享锁目录中的 `npu{card}.quarantine.json` 表示该卡禁止新的租用。
+T2A 的 pipeline 租卡和 runtime 的 `acquire_card()` 都在加锁前、成功加锁后检查它；
+标记不撤销已取得的租约，不删除或替换 `npu{card}.lock`。
+
+现有 agent 侧故障检测同时确认当前进程/卡的执行错误、两条不同时间的设备无响应、
+清理失败后，在释放租约前原子发布隔离记录（含错误证据和 session/task 标识）。
+单次 `npu-smi` 超时、普通精度失败、单独的 507 错误码都不足以触发隔离。
+Judge 仍沿用原有执行方式，但租卡同样跳过标记。全部候选卡被占用或隔离时，
+pipeline 继续等待，由原有外层超时约束；不回退到坏卡。
+
+隔离在同一宿主共享锁目录下跨 session 生效，不自动过期。`/dev/shm` 在宿主重启后
+会重建，重启后的卡池仍须经运维确认。隔离不是设备恢复；恢复并独立验证后，先保存
+隔离记录，再由管理员只删除对应 `.quarantine.json`，不得删除 `.lock` 文件。
+例如确认 6 号卡恢复后：`rm -- /dev/shm/npu-locks/npu6.quarantine.json`。
+
+已启动的租卡 Python 进程不会热加载源码；新启动的 helper 使用新规则。
+当前 T2A tools 为只读目录挂载，因此无需重启 agent 容器即可让后续评测阶段采用新规则。
+
 判据:workdir 顶层有没有 `{op}/`。agent 容器有(它在那儿写代码),judge 容器没有
 (只收到 tarball + `input/` 基准)。agent 侧额外做:自动打包 → 预算计数 → 内容哈希短路 →
 退出时更新 `.best`;judge 侧一律跳过(一个 session 只判一次)。

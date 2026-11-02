@@ -54,10 +54,16 @@ def _write_status(status_file: str | None, payload: dict[str, Any]) -> None:
 
 def _try_acquire(pool: list[str], lock_dir: Path) -> Lease | None:
     for device_id in pool:
+        quarantine = lock_dir / f"npu{device_id}.quarantine.json"
+        if quarantine.exists():
+            continue
         lock_path = lock_dir / f"npu{device_id}.lock"
         fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o644)
         try:
             fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            if quarantine.exists():
+                os.close(fd)
+                continue
             return Lease(fd, device_id, lock_path)
         except (BlockingIOError, OSError):
             os.close(fd)
@@ -174,6 +180,13 @@ def _run_guarded(command, env, lease, failure_path):
                 break
         if failure is None:
             return proc.wait()
+        # Publish before releasing the lease, so other sessions cannot reuse a
+        # device whose driver stopped responding. Recovery requires explicit clearance.
+        _write_status(str(lease.lock_path.with_name(f"npu{lease.device_id}.quarantine.json")), {
+            "schema_version": 1, "error_type": "npu_execution_failed", **failure,
+            "device_id": lease.device_id, "source": "npu_lease_exec",
+            "session_id": env.get("SESSION_ID"), "task_id": env.get("TASK_ID"),
+        })
         try:
             os.killpg(proc.pid, signal.SIGKILL)
         except ProcessLookupError:

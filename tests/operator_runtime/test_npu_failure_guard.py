@@ -36,6 +36,7 @@ def test_ordinary_outcomes_do_not_stop_session(tmp_path, exit_code):
     assert result.returncode == exit_code
     assert result.stdout == "accuracy mismatch\n"
     assert not (tmp_path / "artifacts/npu_failure.json").exists()
+    assert not list((tmp_path / "locks").glob("*.quarantine.json"))
     lease = acquire_card(["0"], str(tmp_path / "locks"))
     lease.release()
 
@@ -65,6 +66,7 @@ def test_error_code_alone_allows_failed_attempt_to_exit_and_retry(tmp_path, diag
     result = run_guard(tmp_path, code)
     assert result.returncode == 1
     assert not (tmp_path / "artifacts/npu_failure.json").exists()
+    assert not list((tmp_path / "locks").glob("*.quarantine.json"))
     assert run_guard(tmp_path, "print('next attempt succeeds')").returncode == 0
 
 
@@ -76,8 +78,16 @@ def test_driver_failure_stops_only_its_session(tmp_path):
     assert failure["error_code"] == "507035" and failure["device_id"] == "0"
     assert failure["fault_pid"] == failure["child_pid"] and failure["child_reaped"]
     assert len(failure["evidence"]) == 3
+    quarantine = tmp_path / "locks/npu0.quarantine.json"
+    record = json.loads(quarantine.read_text())
+    assert record["device_id"] == "0" and record["evidence"] == failure["evidence"]
     assert run_guard(tmp_path, "raise AssertionError('must not run')").returncode == 125
-    assert run_guard(tmp_path, "print('other session')", artifacts="other").returncode == 0
+    other = run_guard(tmp_path, "import os; print(os.environ['ASCEND_RT_VISIBLE_DEVICES'])", artifacts="other")
+    assert other.returncode == 0 and other.stdout == "1\n"
+    lease = acquire_card(["0", "1"], str(tmp_path / "locks"))
+    assert lease.device_id == "1"
+    lease.release()
+    quarantine.unlink()  # Explicit operator clearance restores eligibility.
     lease = acquire_card(["0"], str(tmp_path / "locks"))
     lease.release()
 
@@ -100,6 +110,58 @@ sys.exit(1)
     finally:
         other.kill()
         other.wait(timeout=3)
+
+
+def test_quarantine_does_not_revoke_existing_lease(tmp_path):
+    module = runpy.run_path(str(GUARD))
+    held = acquire_card(["0"], str(tmp_path))
+    marker = tmp_path / "npu0.quarantine.json"
+    marker.write_text("{}")
+    try:
+        # Even a malformed marker is fail-closed; the live owner keeps its lock.
+        marker.write_text("not json")
+        with (tmp_path / "npu0.lock").open("a+") as f:
+            with pytest.raises(BlockingIOError):
+                fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        assert module["_try_acquire"](["0"], tmp_path) is None
+        with pytest.raises(RuntimeError, match="quarantined"):
+            acquire_card(["0"], str(tmp_path))
+        for acquire in [module["_try_acquire"], acquire_card]:
+            lease = acquire(["0", "1"], tmp_path)
+            assert lease.device_id == "1"
+            lease.release()
+    finally:
+        held.release()
+    assert module["_try_acquire"](["0"], tmp_path) is None
+    marker.unlink()
+    lease = module["_try_acquire"](["0"], tmp_path)
+    assert lease.device_id == "0"
+    lease.release()
+
+
+@pytest.mark.parametrize("runtime_allocator", [False, True])
+def test_quarantine_published_during_acquisition_is_rechecked(tmp_path, monkeypatch, runtime_allocator):
+    module = runpy.run_path(str(GUARD))
+    original = fcntl.flock
+    calls = 0
+
+    def publish_after_lock(fd, operation):
+        nonlocal calls
+        result = original(fd, operation)
+        if operation == fcntl.LOCK_EX | fcntl.LOCK_NB:
+            calls += 1
+            if calls == 1:
+                (tmp_path / "npu0.quarantine.json").write_text("{}")
+        return result
+
+    monkeypatch.setattr(fcntl, "flock", publish_after_lock)
+    acquire = acquire_card if runtime_allocator else module["_try_acquire"]
+    lease = acquire(["0", "1"], tmp_path)
+    assert lease.device_id == "1"
+    lease.release()
+    # Skipping a quarantined card must not leak the just-acquired lock.
+    with (tmp_path / "npu0.lock").open("a+") as f:
+        original(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
 
 
 @pytest.mark.parametrize("mode,stage", [
