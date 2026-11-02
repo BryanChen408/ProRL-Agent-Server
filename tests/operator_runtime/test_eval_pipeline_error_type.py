@@ -77,14 +77,52 @@ def _decide(log_text: str, tmp_path: Path) -> str:
     """执行实际 Bash 分类分支，不在测试里复制规则。"""
     (tmp_path / "verify.log").write_text(log_text)
     source = PIPELINE.read_text()
-    start = source.index('  if grep -qEi "')
+    start = source.index('  if grep -Ei "')
     end = source.index('\n  extract_case_stats', start)
     result = subprocess.run(
-        ["bash", "-c", 'OUT_DIR="$1"\n' + source[start:end]
+        ["bash", "-c", 'set -o pipefail\nOUT_DIR="$1"\n' + source[start:end]
          + '\nprintf "%s" "$_VER_TYPE"', "classify", str(tmp_path)],
         text=True, capture_output=True, check=True,
     )
     return result.stdout
+
+
+def _fallback_decide(log_text: str) -> str:
+    import ast
+    source = PIPELINE.read_text().split("python3 - <<'PY'", 1)[1].split("\nPY", 1)[0]
+    node = next(n for n in ast.parse(source).body if isinstance(n, ast.FunctionDef) and n.name == "classify")
+    namespace = {"re": re}
+    exec(compile(ast.Module(body=[node], type_ignores=[]), "classify", "exec"), namespace)
+    return namespace["classify"](log_text)
+
+
+_AICPU_WARNING = (
+    "[WARNING] TDT(8063,python): GetHostFilePath cannot get package file:"
+    "/usr/local/Ascend/cann-9.0.0/opp/Ascend/aicpu/Ascend910-aicpu_legacy.tar.gz, "
+    "reason:No such file or directory\n"
+)
+
+
+@pytest.mark.parametrize(("log", "expected"), [
+    (LOG_PRECISION, "correctness_failed"),
+    (LOG_SHAPE_MISMATCH, "output_precheck_failed"),
+    (LOG_LOAD, "ascendc_load_failed"),
+    (LOG_TIMEOUT, "ascendc_run_timeout"),
+    (LOG_CRASH, "ascendc_run_crashed"),
+    (LOG_PRECISION + "/bin/sh: helper.sh: No such file or directory\n", "ascendc_run_crashed"),
+    (LOG_PRECISION + _AICPU_WARNING.replace("[WARNING]", "[ERROR]"), "ascendc_run_crashed"),
+    (LOG_PRECISION + _AICPU_WARNING.replace("aicpu_legacy.tar.gz", "required.so"), "ascendc_run_crashed"),
+])
+def test_optional_aicpu_warning_preserves_real_verdict(tmp_path, log, expected):
+    text = _AICPU_WARNING + log
+    assert _decide(text, tmp_path) == expected
+    assert _fallback_decide(text) == expected
+
+
+def test_many_aicpu_warnings_do_not_hide_a_real_missing_file(tmp_path):
+    text = _AICPU_WARNING * 1024 + LOG_PRECISION + "/bin/sh: helper.sh: No such file or directory\n"
+    assert _decide(text, tmp_path) == "ascendc_run_crashed"
+    assert _fallback_decide(text) == "ascendc_run_crashed"
 
 
 @pytest.mark.parametrize("signal", [
@@ -95,12 +133,7 @@ def _decide(log_text: str, tmp_path: Path) -> str:
 def test_cannbot_a_signals_precede_numeric_diff(tmp_path, signal):
     log = LOG_PRECISION + signal + "\n"
     assert _decide(log, tmp_path) == "ascendc_run_crashed"
-    import ast
-    source = PIPELINE.read_text().split("python3 - <<'PY'", 1)[1].split("\nPY", 1)[0]
-    node = next(n for n in ast.parse(source).body if isinstance(n, ast.FunctionDef) and n.name == "classify")
-    namespace = {"re": re}
-    exec(compile(ast.Module(body=[node], type_ignores=[]), "classify", "exec"), namespace)
-    assert namespace["classify"](log) == "ascendc_run_crashed"
+    assert _fallback_decide(log) == "ascendc_run_crashed"
 
 
 def test_matched_case_does_not_override_numeric_failure(tmp_path):
