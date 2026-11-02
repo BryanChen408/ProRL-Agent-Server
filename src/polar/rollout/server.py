@@ -9,6 +9,7 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
 import time
+from urllib.parse import urlparse
 
 import httpx
 from fastapi import FastAPI, HTTPException, Query, Request
@@ -38,6 +39,7 @@ from polar.rollout.models import (
 )
 from polar.rollout.operator_profile import expand_operator_sample_request
 from polar.rollout.pipeline import Pipeline
+from polar.runtime.npu_recovery import NpuRecovery
 from polar.rollout.policy_transition import (
     PolicyTransitionError,
     PolicyTransitionKind,
@@ -67,6 +69,7 @@ class RolloutState:
     event_bus: EventBus
     policy_transitions: PolicyTransitionStore
     policy_transition_lock: asyncio.Lock
+    npu_recovery: NpuRecovery | None = None
 
 
 _state: RolloutState | None = None
@@ -118,6 +121,13 @@ def _build_state(topology: TopologyConfig) -> RolloutState:
             closed=closed,
             transition_id=snapshot.current.transition_id,
         )
+    recovery = None
+    if rollout.npu_recovery is not None:
+        nodes = topology.gateway.nodes
+        if (transition_path is None or len(nodes) != 1
+                or urlparse(nodes[0].public_url).hostname != urlparse(rollout.public_url).hostname):
+            raise ValueError("NPU recovery requires one colocated Gateway and durable control state")
+        recovery = NpuRecovery(rollout.npu_recovery, transition_path.parent, nodes[0].public_url)
     return RolloutState(
         topology=topology,
         rollout=rollout,
@@ -127,6 +137,7 @@ def _build_state(topology: TopologyConfig) -> RolloutState:
         event_bus=event_bus,
         policy_transitions=policy_transitions,
         policy_transition_lock=asyncio.Lock(),
+        npu_recovery=recovery,
     )
 
 
@@ -223,7 +234,11 @@ async def rollout_status():
 
 
 def _transition_response(state: RolloutState, record: PolicyTransitionRecord) -> dict[str, object]:
+    # GET reconciliation can also be the first observer of READY.
+    if getattr(state, "npu_recovery", None):
+        state.npu_recovery.start(record.model_dump(mode="json"))
     return {
+        **({"npu_recovery": state.npu_recovery.snapshot()} if getattr(state, "npu_recovery", None) else {}),
         **record.model_dump(mode="json"),
         "active_epoch": state.policy_transitions.snapshot().active_epoch,
         "active_namespace": state.policy_transitions.snapshot().active_namespace,
@@ -585,6 +600,8 @@ async def _drive_commit(
     state: RolloutState,
     record: PolicyTransitionRecord,
 ) -> PolicyTransitionRecord:
+    if getattr(state, "npu_recovery", None) and (error := state.npu_recovery.resume_error()):
+        return state.policy_transitions.update(record.transition_id, last_error=error)
     if record.verified_policy_epoch != record.to_epoch:
         return state.policy_transitions.update(
             record.transition_id,
@@ -687,6 +704,8 @@ async def _drive_abort(
     state: RolloutState,
     record: PolicyTransitionRecord,
 ) -> PolicyTransitionRecord:
+    if getattr(state, "npu_recovery", None) and (error := state.npu_recovery.resume_error()):
+        return state.policy_transitions.update(record.transition_id, last_error=error)
     if record.verified_policy_epoch != record.from_epoch:
         return state.policy_transitions.update(
             record.transition_id,
@@ -1228,6 +1247,9 @@ async def pause_gateway_generation(
 
 @app.post("/rollout/admin/inference/resume")
 async def resume_gateway_generation():
+    recovery = getattr(get_state(), "npu_recovery", None)
+    if recovery is not None and (error := recovery.resume_error()):
+        raise HTTPException(status_code=409, detail=error)
     fence = await get_state().manager.wait_for_policy_cutoff_fences(
         timeout_seconds=_POLICY_CUTOFF_RESUME_FENCE_TIMEOUT_SECONDS,
     )

@@ -48,6 +48,8 @@ operator_runtime:
     enabled: true
     pool: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
     lock_dir: /dev/shm/npu-locks
+  npu_recovery:
+    enabled: true  # Only quarantined cards trigger whole-Box16 maintenance at an update boundary.
 
 observer:
   host: 0.0.0.0

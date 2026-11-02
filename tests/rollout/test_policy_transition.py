@@ -425,3 +425,46 @@ def test_ambiguous_engine_failure_stays_fail_closed(monkeypatch, tmp_path: Path)
     assert failed["phase"] == "recovery_required"
     assert failed["active_epoch"] == 0
     assert state.manager.status()["policy_admission"]["closed"] is True
+
+
+def test_npu_maintenance_blocks_commit_abort_and_legacy_resume(monkeypatch, tmp_path):
+    from unittest.mock import AsyncMock
+    import pytest
+    from fastapi import HTTPException
+    server.configure_server(str(_topology(tmp_path)))
+    state = server.get_state()
+    state.npu_recovery = SimpleNamespace(resume_error=lambda: "maintenance pending")
+    record = state.policy_transitions.start(transition_id="maintenance", from_epoch=0, to_epoch=1)
+    gateway = AsyncMock(side_effect=AssertionError("must not resume gateway"))
+    monkeypatch.setattr(server, "_apply_gateway_control", gateway)
+    assert asyncio.run(server._drive_commit(state, record)).last_error == "maintenance pending"
+    assert asyncio.run(server._drive_abort(state, record)).last_error == "maintenance pending"
+    with pytest.raises(HTTPException) as error:
+        asyncio.run(server.resume_gateway_generation())
+    assert error.value.status_code == 409
+    gateway.assert_not_called()
+
+
+def test_confirm_drained_starts_recovery_for_existing_ready_transition(tmp_path):
+    from unittest.mock import Mock
+    server.configure_server(str(_topology(tmp_path)))
+    state = server.get_state()
+    start = Mock()
+    state.npu_recovery = SimpleNamespace(start=start, snapshot=lambda: {"state": "pending"})
+    state.policy_transitions.start(transition_id="maintenance", from_epoch=0, to_epoch=1)
+    state.policy_transitions.update("maintenance", phase=PolicyTransitionPhase.READY_FOR_TRAINING)
+    result = asyncio.run(server.confirm_policy_transition_drained("maintenance", PolicyTransitionDrainRequest()))
+    assert result["phase"] == "ready_for_training"
+    assert start.call_args.args[0]["transition_id"] == "maintenance"
+
+
+def test_get_reconciliation_also_triggers_recovery(tmp_path):
+    from unittest.mock import Mock
+    server.configure_server(str(_topology(tmp_path)))
+    state = server.get_state()
+    start = Mock()
+    state.npu_recovery = SimpleNamespace(start=start, snapshot=lambda: {"state": "pending"})
+    state.policy_transitions.start(transition_id="reconciled", from_epoch=0, to_epoch=1)
+    record = state.policy_transitions.update("reconciled", phase=PolicyTransitionPhase.READY_FOR_TRAINING)
+    server._transition_response(state, record)
+    assert start.call_args.args[0]["phase"] == "ready_for_training"

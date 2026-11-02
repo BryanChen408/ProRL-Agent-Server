@@ -360,6 +360,14 @@ def main() -> int:
         "public_url": rollout_url,
         "save_dir": str(rollout_results_dir),
     }
+    if _mapping(operator_runtime.get("npu_recovery")).get("enabled") is True:
+        if not npu_lease.get("enabled") or runtime_spec["backend"] != "docker":
+            raise ValueError("NPU recovery requires Docker and the existing NPU lease pool")
+        rollout_cfg["npu_recovery"] = {
+            "image": runtime_spec["image"],
+            "lock_dir": str(npu_lease.get("lock_dir", "/dev/shm/npu-locks")),
+            "pool": npu_lease.get("pool", []),
+        }
     # skills_path:polar 的 claude_code harness 把它拷进 agent HOME($CLAUDE_CONFIG_DIR/skills)
     # = **用户级**安装点。ascendc 的 prepare 已把同一份拷进 workdir/.claude/skills(**项目级**,
     # CLAUDE.md 与任务 prompt 里的命令走相对路径 `.claude/skills/...`,必须有这份)。两处都装

@@ -192,3 +192,61 @@ Agent 仍只需要知道公开路径 `output/submission/{op}_impl.tar.gz`。预�
 `.best.tar.gz`、meta 和 session mirror 的外部路径均不变。比较与替换持文件锁；meta 记录
 candidate 绝对路径与哈希。若进程在 meta/best 两次原子替换之间被杀，下次提升先从该不可变
 candidate 完成事务，不会把未评测源码或旧 metrics 拼成一个“伪 best”。
+
+### Training-window NPU recovery (Box16)
+
+`operator_runtime.npu_recovery.enabled` renders the colocated Rollout
+`npu_recovery` configuration. After the existing `confirm-drained` path reaches
+`ready_for_training`, an update transition with quarantined cards starts one
+background maintenance job. Existing task cancellation and lease release are
+unchanged. The worker checks the durable transition and paused Gateway again
+immediately before reset, fences all 16 cards, and waits at most 60 seconds for
+healthy-card leases. Fault-card leases do not block the reset attempt.
+Gateway status reads retry transient failures for up to approximately 60 seconds,
+rechecking the durable training window between attempts. Reset confirmation may
+take up to 120 seconds; the confirmed operation has a 600-second overall deadline.
+
+On this Box16 platform, native `npu-smi set -t reset -i N -c 0` resets the whole
+NPU domain, even though N names one quarantined card. The worker pauses only the
+idle Polar query collector, runs the native interactive command in a private
+runtime, waits 150 seconds after completion, then checks each card using fresh
+PyTorch processes (copy, add, matmul, copy back). A card returns to allocation only
+when the check succeeds and its old lease is free. Newer quarantine markers are
+preserved; lease files are never deleted. No service or old evaluation process is
+killed by this worker.
+
+A failure before reset confirmation restores the original healthy pool. An
+ambiguous reset keeps the domain isolated and the query collector paused, records
+`resume_allowed=false`, and requires inspection rather than an automatic retry.
+Updated Rollout commit/abort/resume paths respect that flag. This is a recovery
+attempt, not a guarantee that a driver-blocked device can recover without a host
+restart.
+
+For an already running Rollout, launch the same implementation on the host:
+
+```bash
+PYTHONPATH=/home/docker/polar_can/ProRL-Agent-Server/src \
+/root/polar-venv/bin/python -u -m polar.runtime.npu_recovery \
+  --profile /home/docker/polar_can/ProRL-Agent-Server/deploy/ascend_operator/profile.t2a.yaml \
+  --control-dir /home/docker/polar_can/ProRL-Agent-Server/output/ascend_operator/control \
+  --once
+```
+
+The temporary monitor binds to the current trainer namespace and exits after one
+training window. It shares `npu-recovery.lock` and the durable transition job ID
+with the built-in hook. Progress and per-card logs live under
+`control/npu-recovery/`. A pre-existing Rollout does not acquire the new Python
+resume guard without restart; quarantine markers still prevent its new NPU
+leases while maintenance is in progress. Keep the training window long enough
+for maintenance; the next normal service start enables the built-in hook.
+
+Validation limits: the automatic round trip passed on node 66, including all 16
+compute probes and lease reuse. On node 64, initialization took about 48 seconds
+to reach the confirmation prompt; after increasing the initial timeout, the
+native tool returned `Failed to reset server` (exit code 210). This does not
+establish the reason for the native failure. The worker pauses only Polar's own
+query collector, not the host platform's exporters. A 90-second compute-probe
+timeout retains quarantine but does not prove permanent device failure. A
+successful basic probe likewise does not establish full operator-evaluation
+health. Original fault markers remain after an unsuccessful reset even when a
+basic probe passes; manual clearance is a separate operator decision.

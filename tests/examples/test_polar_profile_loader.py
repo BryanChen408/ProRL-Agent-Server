@@ -57,6 +57,7 @@ def test_real_profiles_separate_attempt_credit_from_call_limits(tmp_path, name):
         assert "max_turns" not in op["agent"]["settings"]
         assert "--max-turns" not in command
     else:
+        assert topology["rollout"]["npu_recovery"] == {"image": profile["operator"]["runtime"]["image"], "lock_dir": profile["operator_runtime"]["npu_lease"]["lock_dir"], "pool": list(range(16))}
         assert op["evaluator"]["config"]["reward_scheme"] == "correctness_banded"
         for runtime in (op["runtime"], op["evaluator"]["runtime"]):
             assert runtime["env"]["POLAR_OPERATOR_REWARD_SCHEME"] == "correctness_banded"

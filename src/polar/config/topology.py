@@ -125,6 +125,22 @@ class GatewayConfig(_StrictModel):
         return self
 
 
+class NpuRecoveryConfig(_StrictModel):
+    """Opt-in maintenance for the entire local Box16 reset domain."""
+
+    image: str = Field(min_length=1)
+    lock_dir: str = "/dev/shm/npu-locks"
+    pool: tuple[int, ...] = tuple(range(16))
+
+    @model_validator(mode="after")
+    def _validate_reset_domain(self):
+        if sorted(self.pool) != list(range(16)):
+            raise ValueError("Box16 recovery requires the full 0..15 reset domain")
+        if not Path(self.lock_dir).is_absolute():
+            raise ValueError("NPU recovery lock_dir must be absolute")
+        return self
+
+
 class RolloutServiceConfig(_StrictModel):
     host: str = "0.0.0.0"
     port: int = Field(default=8080, ge=1, le=65535)
@@ -134,6 +150,7 @@ class RolloutServiceConfig(_StrictModel):
     callback_grace_seconds: float = Field(default=120.0, ge=0)
     default_operator_profile: str | None = None
     operator_profiles: dict[str, OperatorProfileConfig] = Field(default_factory=dict)
+    npu_recovery: NpuRecoveryConfig | None = None
 
     @model_validator(mode="before")
     @classmethod
