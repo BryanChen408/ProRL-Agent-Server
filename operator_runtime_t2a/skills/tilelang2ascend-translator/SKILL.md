@@ -87,6 +87,7 @@ argument-hint: >
 | Sort/TopK、并列值和采样边界 | [排序与 TopK 模式](references/ascendc_sort_topk_patterns.md) |
 | 量化舍入、饱和、scale 和索引写回 | [量化模式](references/ascendc_quantization_patterns.md) |
 | Pooling 前后向、布局、buffer 和非对齐输入 | [Pooling 实现索引](references/pooling-patterns/PoolingPatternIndex.md) |
+| Cube 宽 NZ 子块错位、CO1 缓冲回绕与事件复用 | [宽 NZ 子块诊断](/opt/workspace/agent_workdir/.claude/skills/tilelang2ascend-translator/references/wide_nz_b_subtile_base_plane_stride_diagnostic.md)、[CO1 事件诊断](/opt/workspace/agent_workdir/.claude/skills/tilelang2ascend-translator/references/co1_ready_reuse_event_diagnostic.md) |
 
 本 skill 提供以下参考资料：
 - `.claude/workflows/cannbot-reference-index.md` — 首次设计先读；按实际计算结构选择 cannbot 原版设计/代码模板，及 archive 的真实 host/kernel 路径。没有 SKILL.md 的旧资料目录直接 Read references/templates，不调用旧工作流。

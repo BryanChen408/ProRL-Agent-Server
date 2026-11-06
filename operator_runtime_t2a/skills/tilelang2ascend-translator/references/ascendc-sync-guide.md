@@ -252,6 +252,10 @@ CrossCoreWaitFlag<0x2, PIPE_MTE2>(flagId);   // AIV 侧 Wait
 
 ### TPosition 选择
 
+CO1 双缓冲回绕或 Fixpipe 前后屏障难以归因时，按需读
+[CO1 就绪与回收事件诊断](/opt/workspace/agent_workdir/.claude/skills/tilelang2ascend-translator/references/co1_ready_reuse_event_diagnostic.md)，
+区分生产完成与物理 buffer 可复用两条依赖；不因单次探针通过而删改当前同步。
+
 | TPosition | 物理存储 | 用途 | depth | API 形式 |
 |:---|:---|:---|:---|:---|
 | `VECIN` | Unified Buffer | 向量输入（GM→UB） | 0 | **引用形式** |

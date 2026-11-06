@@ -155,6 +155,10 @@ WITH_LOOP 模式下 NDDMA config 不变，只有 GM/UB 偏移随外层循环变�
 
 ## 跨场景参考
 
+DAV_2201/910B 上出现大尾维退化、同源行重复展开或中间维大量小块写回时，按需读
+[Broadcast 完整性能资料](/opt/workspace/agent_workdir/.claude/skills/ascendc-tiling-design/references/broadcast/broadcast-perf-optimization.md)。复用已有分块与 API 说明，
+只选择符合当前数据流的优化，不新增评测阶段。
+
 | 主题 | 文档 |
 |------|------|
 | OneDim 分支（合轴后单维） | [onedim.md](onedim.md) |

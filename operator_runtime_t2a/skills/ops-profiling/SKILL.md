@@ -65,6 +65,11 @@ Matmul、FlashAttention 和 MC² 案例。当前算子看似简单也不跳过�
 - Cube 利用率或矩阵分块不合理：Cube；
 - 流水重叠不足：双缓冲与流水。
 
+若慢 case 涉及广播，且源码显示大尾维退成逐元素处理、同源行反复展开或中间维大量小块搬运，
+修改前 Read [Broadcast 完整性能资料](/opt/workspace/agent_workdir/.claude/skills/ascendc-tiling-design/references/broadcast/broadcast-perf-optimization.md)
+中对应场景；已读内容可复用。按当前平台核对适用性，仍只改候选实现并由固定入口验证，
+不执行资料中的独立 bench、输出缓存或其他与本 Skill 职责边界冲突的流程。
+
 如果工作区已经存在由受控评测流程产出的深度 profiling 结果，再按数据类型读取对应资料：
 
 - 已有 `PROF_GROUP_*`、`op_summary_*.csv` 或 `task_time.csv`：读取

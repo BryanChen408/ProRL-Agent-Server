@@ -50,6 +50,11 @@
 - 单核与多核结果差异明显时，区分真实写冲突和浮点加法顺序差异。
 - 若只是合法的多核舍入差异，仍以固定评测比较器和题目契约为准，不修改评测标准。
 
+## 完整数值反例
+
+- [BF16 固定偏置反例](/opt/workspace/agent_workdir/.claude/skills/ascendc-precision-debug/references/fixed_negative_bias_breaks_bf16_midpoint_rounding.md)
+- [4097 拆分反例](/opt/workspace/agent_workdir/.claude/skills/ascendc-precision-debug/references/veltkamp_split_not_unconditional_rne11_quantizer.md)
+
 ## 证据边界
 
 - 修复目标是候选 kernel、host tiling、buffer 生命周期、同步和 dtype 路径。

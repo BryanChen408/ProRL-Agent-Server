@@ -23,6 +23,16 @@ description: Ascend C 算子精度调试技能，提供精度问题诊断和解�
 `references/polar_precision_debug_patterns.md`。它只补充定位顺序和症状到根因的映射，不改变
 reference、case、比较阈值或固定评测入口。
 
+固定入口报精度错误后，若失败输入、日志或源码匹配以下情况，修改对应实现前 Read 命中的资料；
+已读且未变化的内容可复用，不要求遍历所有案例。原文中的探针命令不替代当前固定评测入口。
+
+| 当前问题或拟采用的修复 | 完整案例（容器绝对路径） |
+| --- | --- |
+| BF16 归约/Cast 在舍入中点附近差一档，或准备统一加减小常量补偿 | [固定偏置反例](/opt/workspace/agent_workdir/.claude/skills/ascendc-precision-debug/references/fixed_negative_bias_breaks_bf16_midpoint_rounding.md) |
+| 准备用 `4097*x` 的分离乘减链模拟固定精度舍入，或该链在极小/极大输入失败 | [4097 拆分反例](/opt/workspace/agent_workdir/.claude/skills/ascendc-precision-debug/references/veltkamp_split_not_unconditional_rne11_quantizer.md) |
+| Cube 单片正确、宽 L1/NZ 缓存的后续子块错位，改基址后仍有部分列错误 | [NZ 子块基址与平面跨度](/opt/workspace/agent_workdir/.claude/skills/tilelang2ascend-translator/references/wide_nz_b_subtile_base_plane_stride_diagnostic.md) |
+| CO1 双缓冲回绕后数值异常，或无法解释 Fixpipe 前后屏障是否必要 | [CO1 就绪与回收事件](/opt/workspace/agent_workdir/.claude/skills/tilelang2ascend-translator/references/co1_ready_reuse_event_diagnostic.md) |
+
 ---
 
 ## 调试前置要求 ⭐⭐⭐

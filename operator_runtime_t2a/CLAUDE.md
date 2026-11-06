@@ -193,10 +193,12 @@ Phase 0 必须读取原始 `input/{op_name}.py` 的 `Model.__init__()`、`forwar
 - `ascendc-precision-debug/references/data-comparison.md`
 - `ascendc-precision-debug/references/debug-summary-template.md`
 - `ascendc-precision-debug/references/diagnosis-workflow.md`
+- `ascendc-precision-debug/references/fixed_negative_bias_breaks_bf16_midpoint_rounding.md`
 - `ascendc-precision-debug/references/polar_precision_debug_patterns.md`
 - `ascendc-precision-debug/references/printf-debug.md`
 - `ascendc-precision-debug/references/simt-precision-debug.md`
 - `ascendc-precision-debug/references/tools-reference.md`
+- `ascendc-precision-debug/references/veltkamp_split_not_unconditional_rne11_quantizer.md`
 - `ascendc-precision-debug/scripts/error_analysis.py`
 - `ascendc-precision-debug/scripts/gen_boundary_test.py`
 - `ascendc-runtime-debug/SKILL.md`
@@ -205,6 +207,7 @@ Phase 0 必须读取原始 `input/{op_name}.py` 的 `Model.__init__()`、`forwar
 - `ascendc-runtime-debug/references/kernel_binary_debug.md`
 - `ascendc-runtime-debug/scripts/parse_plog.py`
 - `ascendc-tiling-design/SKILL.md`
+- `ascendc-tiling-design/references/broadcast/broadcast-perf-optimization.md`
 - `ascendc-tiling-design/references/broadcast/dynamic-ub-broadcast.md`
 - `ascendc-tiling-design/references/broadcast/nddma-broadcast.md`
 - `ascendc-tiling-design/references/broadcast/onedim.md`
@@ -227,8 +230,7 @@ Phase 0 必须读取原始 `input/{op_name}.py` 的 `Model.__init__()`、`forwar
 - `ascendc-tiling-design/references/flashattention/specialization/sparse_design.md`
 - `ascendc-tiling-design/references/flashattention/subfamilies/base_design.md`
 - `ascendc-tiling-design/references/flashattention/subfamilies/quantization_design.md`
-- `ascendc-tiling-design/references/index/gather.md`
-- `ascendc-tiling-design/` …(另有 23 项)
+- `ascendc-tiling-design/` …(另有 24 项)
 - `npu-arch/SKILL.md`
 - `npu-arch/references/npu-arch-guide-triton.md`
 - `npu-arch/references/npu-arch-guide.md`
@@ -293,13 +295,13 @@ Phase 0 必须读取原始 `input/{op_name}.py` 的 `Model.__init__()`、`forwar
 - `tilelang2ascend-translator/references/attention-patterns/references/sink_pattern.md`
 - `tilelang2ascend-translator/references/attention-patterns/references/tnd_pattern.md`
 - `tilelang2ascend-translator/references/attention-patterns/references/topk_kv_sparse_pattern.md`
+- `tilelang2ascend-translator/references/co1_ready_reuse_event_diagnostic.md`
 - `tilelang2ascend-translator/references/dequant_kernel_patterns.md`
 - `tilelang2ascend-translator/references/dsl2Ascendc.md`
 - `tilelang2ascend-translator/references/dsl2Ascendc_compute_cube.md`
 - `tilelang2ascend-translator/references/dsl2Ascendc_compute_cv.md`
 - `tilelang2ascend-translator/references/dsl2Ascendc_compute_vector.md`
-- `tilelang2ascend-translator/references/dsl2Ascendc_cross_core_sync.md`
-- `tilelang2ascend-translator/` …(另有 17 项)
+- `tilelang2ascend-translator/` …(另有 19 项)
 
 <!-- END skill-reference -->
 
