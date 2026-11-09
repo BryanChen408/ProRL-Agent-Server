@@ -77,6 +77,10 @@ python3 src/polar/runtime/npu_smi_cached.py info -t board -i 0 -c 0
 ```
 
 Polar 启动脚本和 `start_all_telemetry.sh` 均会启动 owner。
+采集由 Polar 脚本管理，不依赖 systemd 开机自启。`stop_polar.sh` 在主服务退出后停止
+同一缓存目录的采集器；仍有其他 Polar 主服务时保留共享采集器。启停操作应串行执行，
+并在主服务所在的宿主机执行。维护暂停中的采集器或无法退出的驱动查询不会被强制清理。
+仅结束训练客户端、直接 kill 主服务或容器退出，不等价于执行 `stop_polar.sh`。
 从旧版升级时，先确认旧 collector 的 PID/命令行并停止**仅该采集器**，再启动新版；
 不要因此重启训练、Gateway 或评测。旧 owner 没有 query.sock，新版检测后报错，
 不能把“already running”误当作参数查询可用。读取快照的裸 info 在切换期间仍可用。

@@ -70,3 +70,8 @@ done
 # 每个 run 的 topology 是 run 专属的绝对路径，天然唯一。                                                                                               
 stop_by_pattern "gateway" "serve_gateway.*${TOPOLOGY}"
 stop_by_pattern "rollout" "serve_rollout.*${TOPOLOGY}"
+
+# Keep the shared collector while another Polar instance still needs it.
+"${POLAR_PYTHON:-python3}" "${POLAR_DEPLOY_DIR}/telemetry/npu_smi_snapshot.py" \
+  --stop-if-unused \
+  --directory "${POLAR_NPU_SMI_CACHE_DIR:-${POLAR_NPU_LOCK_DIR:-/dev/shm/npu-locks}/npu-smi-snapshot}"

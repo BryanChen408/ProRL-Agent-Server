@@ -6,6 +6,8 @@ import fcntl
 import json
 import os
 import runpy
+import select
+import signal
 import socket
 import socketserver
 import subprocess
@@ -16,6 +18,54 @@ from pathlib import Path
 _CLIENT = runpy.run_path(str(Path(__file__).resolve().parents[3] / "src/polar/runtime/npu_smi_cached.py"))
 validate_args = _CLIENT["validate_args"]
 MAX_MESSAGE = _CLIENT["MAX_MESSAGE"]
+
+
+def stop_if_unused(directory):
+    """Stop this collector only after all visible Polar main services have exited."""
+    processes = []
+    for proc in Path("/proc").iterdir():
+        if not proc.name.isdigit():
+            continue
+        try:
+            args = (proc / "cmdline").read_bytes().split(b"\0")
+        except FileNotFoundError:
+            continue
+        except PermissionError:
+            print("npu-smi collector: cannot inspect all processes; keeping collector", flush=True)
+            return 1
+        if ({b"serve_gateway", b"serve_rollout"} & set(args)
+                and (any(b"from polar.cli import main" in a for a in args)
+                     or Path(os.fsdecode(args[0])).name == "polar")):
+            print("npu-smi collector: Polar services still running; keeping collector", flush=True)
+            return 0
+        if (int(proc.name) != os.getpid() and os.fsencode(Path(__file__).resolve()) in args
+                and b"--stop-if-unused" not in args and b"--check" not in args):
+            if b"--directory" not in args:
+                continue  # Only stop explicitly scoped collectors started by our launchers.
+            index = args.index(b"--directory") + 1
+            if index < len(args) and Path(os.fsdecode(args[index])).resolve() == directory.resolve():
+                processes.append((proc, args))
+    for proc, expected in processes:
+        try:
+            fd = os.pidfd_open(int(proc.name))
+        except ProcessLookupError:
+            continue
+        try:
+            if (proc / "cmdline").read_bytes().split(b"\0") != expected:
+                continue
+            if (proc / "stat").read_text().rsplit(")", 1)[1].split()[0] in ("T", "t"):
+                print("npu-smi collector: paused for maintenance; keeping collector", flush=True)
+                return 1
+            signal.pidfd_send_signal(fd, signal.SIGTERM)
+            if not select.select([fd], [], [], 5)[0]:
+                print("npu-smi collector: exit pending; not forcing driver cleanup", flush=True)
+                return 1
+            print(f"npu-smi collector: stopped pid={proc.name}", flush=True)
+        except (FileNotFoundError, ProcessLookupError):
+            pass
+        finally:
+            os.close(fd)
+    return 0
 
 
 def socket_ready(directory):
@@ -125,9 +175,12 @@ def main() -> int:
     parser.add_argument("--timeout", type=float, default=5)
     parser.add_argument("--failure-interval", type=float, default=300)
     parser.add_argument("--check", action="store_true", help="Check the reader socket without probing NPU devices.")
+    parser.add_argument("--stop-if-unused", action="store_true", help="Stop the collector after the last Polar service exits.")
     args = parser.parse_args()
     if min(args.interval, args.timeout, args.failure_interval) <= 0:
         parser.error("intervals and timeout must be positive")
+    if args.stop_if_unused:
+        return stop_if_unused(args.directory)
     if args.check:
         return 0 if socket_ready(args.directory) else 1
     args.directory.mkdir(parents=True, exist_ok=True)
