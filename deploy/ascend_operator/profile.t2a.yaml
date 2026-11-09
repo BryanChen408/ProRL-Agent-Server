@@ -75,7 +75,7 @@ operator:
   #   加上 Phase 0-3 探索，保留 21600s 会话上限。
   timeout_seconds: 21600.0
   runtime:
-    image: ascendc-tilelang:v1                          # ← delta 2
+    image: ascendc-tilelang:v2                          # ← delta 2
     cache_npu_smi_info: true
     network: host
     workdir: /opt/workspace/agent_workdir
