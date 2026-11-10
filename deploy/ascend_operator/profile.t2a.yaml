@@ -104,7 +104,7 @@ operator:
     # ← delta 14:generation 8 次与 optimization 4 次独立计数，每次都可能需要
     #   「读日志→调用对应 Skill→改代码→重跑」；
     #   加 Phase 0-3 探索和长算子实现，保留 200 轮会话上限。
-    max_turns: 350
+    max_turns: 5
     # ← delta 8:规则 —— 只保留本项目(canonical/skills)提供的 skill,CLI 自带的一律关掉
     #   (每个 session 白占 4,327 字符 prompt,还可能被误调白烧 turn)。
     #   prepare 按 canonical/skills 的实际内容取补集,写 .claude/settings.json 的
