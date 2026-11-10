@@ -67,7 +67,8 @@ def test_rollout_manager_policy_cutoff_cancels_all_owned_sessions() -> None:
     asyncio.run(scenario())
 
 
-def test_rollout_manager_policy_cutoff_fences_submit_that_arrives_late() -> None:
+@pytest.mark.parametrize("reason", ["policy_cutoff", "group_unacceptable"])
+def test_rollout_manager_policy_cutoff_fences_submit_that_arrives_late(reason) -> None:
     async def scenario() -> None:
         pipeline = _BlockingPipeline()
         manager = RolloutManager(
@@ -77,7 +78,7 @@ def test_rollout_manager_policy_cutoff_fences_submit_that_arrives_late() -> None
 
         result = await manager.cancel_tasks(
             ["task-old-policy"],
-            reason="policy_cutoff",
+            reason=reason,
         )
         assert result["all_acknowledged"] is True
         assert result["cancelled_before_submit"] == 1
@@ -425,7 +426,8 @@ def test_pipeline_policy_cutoff_waits_for_gateway_delete_ack() -> None:
     asyncio.run(scenario())
 
 
-def test_policy_cutoff_tombstone_prevents_late_dispatch_enqueue(tmp_path: Path) -> None:
+@pytest.mark.parametrize("reason", ["policy_cutoff", "group_unacceptable"])
+def test_policy_cutoff_tombstone_prevents_late_dispatch_enqueue(tmp_path: Path, reason) -> None:
     async def scenario() -> None:
         dispatcher = SessionDispatcher(
             max_init_workers=1,
@@ -436,7 +438,7 @@ def test_policy_cutoff_tombstone_prevents_late_dispatch_enqueue(tmp_path: Path) 
         try:
             assert await dispatcher.cancel(
                 "session-race",
-                reason="policy_cutoff",
+                reason=reason,
             ) is None
             request = SessionDispatchRequest(
                 session_id="session-race",

@@ -483,10 +483,15 @@ class Pipeline:
         reason: str | None = None,
         strict: bool = False,
     ) -> None:
+        ack_field, error_field = (
+            ("group_cleanup_acknowledged", "group_cleanup_error")
+            if reason == "group_unacceptable"
+            else ("cancel_acknowledged", "cancel_error")
+        )
         if session.gateway_url is None:
             if reason:
-                session.cancel_acknowledged = True
-                session.cancel_error = None
+                setattr(session, ack_field, True)
+                setattr(session, error_field, None)
             return
 
         try:
@@ -497,14 +502,19 @@ class Pipeline:
                     f"{session.gateway_url}/sessions/{session.session_id}",
                     params={"reason": reason} if reason else None,
                 )
+                if reason == "group_unacceptable" and response.status_code == 202:
+                    raise RuntimeError("group cancellation cleanup is still pending")
+                if reason == "group_unacceptable" and response.status_code == 404:
+                    # A restarted gateway cannot prove that an old runtime was removed.
+                    raise RuntimeError("gateway lost session; discard cleanup requires reconciliation")
                 if response.status_code not in {200, 404}:
                     response.raise_for_status()
             if reason:
-                session.cancel_acknowledged = True
-                session.cancel_error = None
+                setattr(session, ack_field, True)
+                setattr(session, error_field, None)
         except Exception as exc:
             if reason:
-                session.cancel_error = f"{type(exc).__name__}: {exc}"
+                setattr(session, error_field, f"{type(exc).__name__}: {exc}")
             if strict:
                 raise
             logger.warning(

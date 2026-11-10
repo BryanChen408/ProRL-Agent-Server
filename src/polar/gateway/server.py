@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from contextlib import asynccontextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import json
 import logging
 import os
@@ -71,6 +71,7 @@ class GatewayState:
     completion_writer: CompletionWriter
     event_bus: EventBus
     control: GatewayControlStore
+    discarded_sessions: set[str] = field(default_factory=set)
 
 
 _state: GatewayState | None = None
@@ -969,10 +970,34 @@ async def delete_session(session_id: str, reason: str | None = Query(default=Non
         raise HTTPException(status_code=400, detail="Session ID cannot be empty")
 
     cancel_reason = reason.strip() if isinstance(reason, str) and reason.strip() else None
+    if cancel_reason == "group_unacceptable" and safe_session_id in state.discarded_sessions:
+        return SessionDeleteResponse(session_id=safe_session_id, deleted=True, messages_deleted=0)
     cancelled_active = await state.node_manager.cancel(
         safe_session_id,
         reason=cancel_reason,
     )
+    managed = (await state.node_manager._dispatcher.get_session(safe_session_id)
+               if cancel_reason in {"policy_cutoff", "group_unacceptable"} else None)
+    if (cancel_reason == "policy_cutoff" and managed is not None
+            and managed.cancel_reason == "group_unacceptable"):
+        # The policy fence must not erase the outstanding group-cleanup acknowledgement.
+        await state.inflight.close_session(safe_session_id, reason=cancel_reason)
+        state.storage.mark_session_closed(safe_session_id, reason="group_unacceptable")
+        return SessionDeleteResponse(session_id=safe_session_id, deleted=True, messages_deleted=0)
+    group_cleanup_completed = False
+    if cancel_reason == "group_unacceptable":
+        group_cleanup_completed = safe_session_id in getattr(
+            state.node_manager, "_completed_runtime_cleanups", set()
+        )
+        cleanup = managed.discard_cleanup_task if managed is not None else None
+        inflight = any(item["session_id"] == safe_session_id
+                       for item in state.inflight.status()["entries"])
+        if inflight or (cleanup is not None and not cleanup.done()):
+            return JSONResponse(status_code=202, content={"session_id": safe_session_id, "cleanup_pending": True})
+        if cleanup is not None:
+            if cleanup.cancelled() or cleanup.exception() is not None:
+                return JSONResponse(status_code=503, content={"session_id": safe_session_id, "cleanup_failed": True})
+            group_cleanup_completed = True
     info = state.session_registry.get(safe_session_id)
     preserve_for_postrun = (
         cancelled_active
@@ -992,12 +1017,18 @@ async def delete_session(session_id: str, reason: str | None = Query(default=Non
             reason=cancel_reason or "delete_session",
         )
         deleted_count = state.storage.delete_session(safe_session_id)
-    if info is None and deleted_count == 0:
+    # A prior policy DELETE may remove registry data before this owned cleanup ends.
+    # Unknown sessions (including lost state after restart) still cannot confirm release.
+    if info is None and deleted_count == 0 and not group_cleanup_completed:
         raise HTTPException(status_code=404, detail="Session not found")
 
     if not preserve_for_postrun:
-        await state.node_manager.release_session_affinity_best_effort(safe_session_id)
+        affinity_released = await state.node_manager.release_session_affinity_best_effort(safe_session_id)
+        if cancel_reason == "group_unacceptable" and not affinity_released:
+            return JSONResponse(status_code=202, content={"session_id": safe_session_id, "affinity_release_pending": True})
         state.session_registry.remove(safe_session_id)
+    if cancel_reason == "group_unacceptable":
+        state.discarded_sessions.add(safe_session_id)
     return SessionDeleteResponse(
         session_id=safe_session_id,
         deleted=True,

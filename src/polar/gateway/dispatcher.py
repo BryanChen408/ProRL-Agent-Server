@@ -74,6 +74,9 @@ class ManagedSession:
     cancel_requested: bool = False
     cancel_reason: str | None = None
     cancel_event: asyncio.Event = field(default_factory=asyncio.Event)
+    discard_event: asyncio.Event = field(default_factory=asyncio.Event)
+    discard_cleanup_task: asyncio.Task | None = None
+    discard_work: set[asyncio.Future] = field(default_factory=set)
     operator_best_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     execution_deadline: float | None = None
     postrun_deadline: float | None = None
@@ -169,15 +172,17 @@ class SessionDispatcher:
         async with self._lock:
             managed = self._sessions.get(session_id)
             if managed is None:
-                if reason == "policy_cutoff":
+                if reason in {"policy_cutoff", "group_unacceptable"}:
                     # DELETE may race the dispatch coroutine between registry creation
                     # and dispatcher enqueue. Keep a tombstone under the same lock used
                     # by enqueue so that a successfully acknowledged cutoff cannot be
                     # followed by a newly live session/container.
                     self._cancelled_before_enqueue.add(session_id)
                 return None
+            if reason == "group_unacceptable":
+                managed.discard_event.set()
             if managed.cancel_requested:
-                if reason == "policy_cutoff":
+                if reason in {"policy_cutoff", "group_unacceptable"} and managed.cancel_reason != "group_unacceptable":
                     managed.cancel_reason = reason
                 return managed
             managed.cancel_requested = True
@@ -196,7 +201,7 @@ class SessionDispatcher:
                 managed.stage = SessionStage.POSTRUN
                 managed.inflight = False
                 should_enqueue_postrun = True
-        if managed.runtime is not None and reason != "policy_cutoff":
+        if managed.runtime is not None and reason not in {"policy_cutoff", "group_unacceptable"}:
             await managed.runtime.cancel()
         if should_enqueue_postrun:
             self._notify_stage_change(managed)

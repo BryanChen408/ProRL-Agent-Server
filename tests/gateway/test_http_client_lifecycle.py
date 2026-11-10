@@ -196,6 +196,7 @@ def test_affinity_released_only_after_evaluation_and_teardown(monkeypatch, tmp_p
         manager._session_affinity_release_url = 'http://router/release'
         request = SimpleNamespace(session_id='s', callback_url='http://rollout/callback')
         managed = SimpleNamespace(request=request, final_result=None, cancel_requested=False,
+                                  cancel_reason=None,
                                   runtime=object(), eval_runtime=None, timer=StageTimer(), session_dir=tmp_path)
         result = SessionResult(session_id='s', task_id='t', status=SessionStatus.COMPLETED,
                                trajectory=Trajectory(status='COMPLETED', traces=[]))

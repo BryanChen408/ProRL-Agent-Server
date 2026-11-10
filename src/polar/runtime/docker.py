@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 from pathlib import Path
@@ -143,37 +144,32 @@ class DockerRuntime(BaseRuntime):
     _STOP_TIMEOUT = 30.0  # seconds per cleanup command
 
     async def stop(self) -> None:
-        if self._destroyed:
-            return
-        self._destroyed = True
-        # chmod is best-effort so the host can reclaim bind-mounted files.
-        # Skip when UIDs match (no permission mismatch to resolve).
-        if self._chmod_needed is not False:
-            try:
-                await self._run_local_command(
-                    "docker", "exec", "--user", "root",
-                    self._container_name, "chmod", "-R", "a+rwX",
-                    self.runtime_session_dir,
-                    timeout=self._STOP_TIMEOUT,
-                )
-            except Exception:
-                logger.warning("chmod cleanup failed for %s", self._container_name)
-        # kill first (instant SIGKILL), then rm to remove metadata.
-        await self._run_local_command(
-            "docker", "kill", self._container_name,
-            timeout=self._STOP_TIMEOUT,
-        )
-        rc, _, stderr = await self._run_local_command(
-            "docker", "rm", "-f", self._container_name,
-            timeout=self._STOP_TIMEOUT, capture=True,
-        )
-        if rc != 0:
-            logger.warning(
-                "docker rm -f failed for %s (rc=%s): %s",
-                self._container_name, rc, stderr,
+        # Cancellation and POSTRUN can race; a failed teardown must remain retryable.
+        if not hasattr(self, "_stop_lock"):
+            self._stop_lock = asyncio.Lock()
+        async with self._stop_lock:
+            if self._destroyed:
+                return
+            if self._chmod_needed is not False:
+                try:
+                    await self._run_local_command(
+                        "docker", "exec", "--user", "root", self._container_name,
+                        "chmod", "-R", "a+rwX", self.runtime_session_dir,
+                        timeout=self._STOP_TIMEOUT,
+                    )
+                except Exception:
+                    logger.warning("chmod cleanup failed for %s", self._container_name)
+            await self._run_local_command(
+                "docker", "kill", self._container_name, timeout=self._STOP_TIMEOUT,
             )
-        # Release the held NPU card (after the container is gone) so the pool frees up.
-        self._release_npu_lock()
+            rc, _, stderr = await self._run_local_command(
+                "docker", "rm", "-f", self._container_name,
+                timeout=self._STOP_TIMEOUT, capture=True,
+            )
+            if rc != 0 and "No such container" not in stderr:
+                raise RuntimeError(f"docker rm failed for {self._container_name}: {stderr}")
+            self._release_npu_lock()
+            self._destroyed = True
 
     def _release_npu_lock(self) -> None:
         if self._npu_lock is not None:

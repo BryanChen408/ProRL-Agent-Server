@@ -426,7 +426,7 @@ class RolloutManager:
             for task_id in requested:
                 record = self._tasks.get(task_id)
                 if record is None:
-                    if reason == "policy_cutoff":
+                    if reason in {"policy_cutoff", "group_unacceptable"}:
                         # The VIME asyncio worker can publish its local task ID just
                         # before the HTTP submit reaches us. Fence that single-use ID
                         # now so a late submit cannot create an orphan session after
@@ -438,6 +438,12 @@ class RolloutManager:
                     continue
                 if record.status in {"completed", "failed", "cancelled"}:
                     already_terminal.append(task_id)
+                    if reason == "group_unacceptable" and record.status == "cancelled":
+                        # A policy fence may be terminal before teardown finishes.
+                        # Upgrade cleanup ownership without cancelling its coroutine again.
+                        record.cancel_reason = reason
+                        for session in record.sessions.values():
+                            session.cancel_reason = reason
                     continue
 
                 record.cancel_requested = True
@@ -464,6 +470,27 @@ class RolloutManager:
             fence_pending = True
             self._ensure_policy_cutoff_reaper()
             cancel_errors: dict[str, str] = {}
+        elif reason == "group_unacceptable":
+            if tasks_to_cancel:
+                await asyncio.wait(tasks_to_cancel, timeout=0.1)
+            with self._lock:
+                group_tasks = [tid for tid in requested if tid in self._tasks
+                               and self._tasks[tid].cancel_reason == "group_unacceptable"]
+            retry_sessions = self._policy_cutoff_sessions_needing_retry(group_tasks, require_cleanup=True)
+            if retry_sessions:
+                try:
+                    await asyncio.wait_for(asyncio.gather(*(
+                        self.pipeline._cleanup_session(session, reason=reason, strict=True)
+                        for session in retry_sessions
+                    ), return_exceptions=True), timeout=5.0)
+                except asyncio.TimeoutError:
+                    pass
+            cancel_errors = self._cancel_errors(group_tasks, require_cleanup=True)
+            with self._lock:
+                for tid in group_tasks:
+                    background = self._tasks[tid].background_task
+                    if background is not None and not background.done():
+                        cancel_errors[tid] = "task cancellation is still unwinding"
         elif tasks_to_cancel:
             await asyncio.gather(*tasks_to_cancel, return_exceptions=True)
             cancel_errors = self._cancel_errors(cancelled)
@@ -485,6 +512,7 @@ class RolloutManager:
             all_acknowledged = all_acknowledged and all_fenced
 
         return {
+            "cleanup_confirmed": reason == "group_unacceptable" and all_acknowledged and all_fenced,
             "requested": len(requested),
             "cancelled": len(cancelled),
             "already_terminal": len(already_terminal),
@@ -535,13 +563,21 @@ class RolloutManager:
             await asyncio.sleep(retry_delay)
             retry_delay = min(5.0, retry_delay * 2)
 
-    def _cancel_errors(self, task_ids: list[str]) -> dict[str, str]:
+    def _cancel_errors(self, task_ids: list[str], *, require_cleanup: bool = False) -> dict[str, str]:
         """Return session-fence failures after cancelled task coroutines have stopped."""
         cancel_errors: dict[str, str] = {}
         with self._lock:
             for task_id in task_ids:
                 record = self._tasks[task_id]
                 for session in record.sessions.values():
+                    if require_cleanup:
+                        if session.gateway_url is None:
+                            session.group_cleanup_acknowledged = True
+                        if session.group_cleanup_error:
+                            cancel_errors[session.session_id] = session.group_cleanup_error
+                        elif not session.group_cleanup_acknowledged:
+                            cancel_errors[session.session_id] = "gateway resource cleanup was not acknowledged"
+                        continue
                     if (
                         not session.cancel_acknowledged
                         and (
@@ -564,6 +600,8 @@ class RolloutManager:
     def _policy_cutoff_sessions_needing_retry(
         self,
         task_ids: list[str],
+        *,
+        require_cleanup: bool = False,
     ) -> list[SessionContext]:
         with self._lock:
             return [
@@ -571,7 +609,11 @@ class RolloutManager:
                 for task_id in task_ids
                 for session in self._tasks[task_id].sessions.values()
                 if session.gateway_url is not None
-                and (session.cancel_error is not None or not session.cancel_acknowledged)
+                and (
+                    (session.group_cleanup_error is not None or not session.group_cleanup_acknowledged)
+                    if require_cleanup
+                    else (session.cancel_error is not None or not session.cancel_acknowledged)
+                )
             ]
 
     async def wait_for_policy_cutoff_fences(

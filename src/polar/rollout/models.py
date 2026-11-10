@@ -354,3 +354,6 @@ class SessionContext:
     cancel_reason: str | None = None
     cancel_acknowledged: bool = False
     cancel_error: str | None = None
+    # A policy fence may acknowledge before physical resource teardown finishes.
+    group_cleanup_acknowledged: bool = False
+    group_cleanup_error: str | None = None
