@@ -32,6 +32,9 @@ Design in two stages:
      token (``<|im_end|>`` on Qwen / ChatML; auto-detected or configurable).
    - Interstitial slots get synthesized logprobs and a zero ``loss_mask``;
      sampled assistant slots keep their real logprobs and a one ``loss_mask``.
+   - A proven thinking-only reply deletion starts a new segment if keeping it
+     would change the context of later trainable tokens. Other rewrites retain
+     the existing splitting rules.
 
 """
 
@@ -103,6 +106,33 @@ def _pipeline_call_id(messages: list[dict[str, Any]]) -> str | None:
         if cid:
             return cid
     return None
+
+
+def _dropped_thinking_reply(previous: Trace, current: Trace) -> bool:
+    """Recognize only the observed orphan-thinking deletion, not general rewrites."""
+    if previous.finish_reason != "stop" or len(previous.response_messages) != 1:
+        return False
+    reply = previous.response_messages[0]
+    # Whitespace text is still a text block: Claude retains that message.
+    if (
+        reply.get("role") != "assistant"
+        or reply.get("content")
+        or reply.get("tool_calls")
+        or not reply.get("reasoning_content")
+    ):
+        return False
+    before, after = previous.prompt_messages, current.prompt_messages
+    if not before or len(after) <= len(before):
+        return False
+    fields = ("role", "content", "reasoning_content", "tool_calls", "tool_call_id")
+    if any(
+        any(a.get(key) != b.get(key) for key in fields)
+        for a, b in zip(before, after)
+    ):
+        return False
+    # The old history is intact, but only user feedback was appended; the
+    # sampled assistant reply is absent. Do not infer deletion from tokens alone.
+    return all(message.get("role") == "user" for message in after[len(before):])
 
 
 def _prepare_attempt_span_state(
@@ -606,6 +636,7 @@ class PrefixMergingBuilder(BaseTrajectoryBuilder):
             segment_index = 0
             chain_had_break = False
             chain_role = chain[0].metadata.get("chain_role", "unknown")
+            thinking_continuation = False
             while start < len(chain):
                 finalized = self._finalize_chain(
                     chain[start:],
@@ -614,7 +645,7 @@ class PrefixMergingBuilder(BaseTrajectoryBuilder):
                     segment_index=segment_index,
                     segment_start=start,
                     span_state=span_state,
-                    chain_continues=chain_continues[chain_index],
+                    chain_continues=chain_continues[chain_index] or thinking_continuation,
                     chain_role=chain_role,
                 )
                 # A trace that post-best masking emptied is dropped so
@@ -638,6 +669,8 @@ class PrefixMergingBuilder(BaseTrajectoryBuilder):
                 if finalized.break_reason:
                     chain_had_break = True
                     self._increment_break_reason(stats, finalized.break_reason)
+                    if finalized.break_reason == "discarded_thinking_context":
+                        thinking_continuation = True
                 start += finalized.kept_count
                 segment_index += 1
 
@@ -854,6 +887,7 @@ class PrefixMergingBuilder(BaseTrajectoryBuilder):
         # completion — used for the canonical-vs-canonical prefix check.
         prev_prompt_ids: list[int] = list(first_trace.prompt_ids)
         prev_raw_response: list[int] = list(first_trace.response_ids)
+        previous_trace = first_trace
 
         # Running count of messages consumed = prompt_messages + all response_messages emitted.
         msg_acc = len(first_trace.prompt_messages)
@@ -956,6 +990,22 @@ class PrefixMergingBuilder(BaseTrajectoryBuilder):
                 break_reason = "interstitial_split_failed"
                 break
 
+            if (
+                not _prev_discarded
+                and _dropped_thinking_reply(previous_trace, Ci_trace)
+                and stream_ids + interstitial != Ci_prompt_ids
+                and any(
+                    (_pb is None or j <= _pb)
+                    and (budget_ids is None or chain[j].completion_id in budget_ids)
+                    and any(build_trace_from_completion(chain[j]).loss_mask)
+                    for j in range(i, len(chain))
+                )
+            ):
+                # Preserve the thinking as a target, but restart later targets
+                # from their real prompt. Entirely masked tails stay unchanged.
+                break_reason = "discarded_thinking_context"
+                break
+
             if interstitial:
                 stream_ids.extend(interstitial)
                 response_slots.extend([None] * len(interstitial))
@@ -989,6 +1039,7 @@ class PrefixMergingBuilder(BaseTrajectoryBuilder):
             msg_acc += len(Ci_trace.response_messages)
 
             prev_prompt_ids = Ci_prompt_ids
+            previous_trace = Ci_trace
             # 丢弃轮的 raw response 视为不存在,下一轮的 interstitial 取全段 canonical_tail
             prev_raw_response = [] if _prev_discarded else list(Ci_trace.response_ids)
             kept += 1
