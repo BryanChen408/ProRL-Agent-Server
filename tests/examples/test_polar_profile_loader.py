@@ -41,6 +41,8 @@ def test_real_profiles_separate_attempt_credit_from_call_limits(tmp_path, name):
     env = _load_env(proc.stdout)
     topology = yaml.safe_load(Path(env["POLAR_TOPOLOGY"]).read_text())
     op = topology["rollout"]["operator_profiles"]["operator_npu"]
+    docs_mount = f"{profile['operator_runtime']['asc_devkit_dir']}:/opt/asc-devkit:ro"
+    assert docs_mount in op["runtime"]["kwargs"]["volumes"]
     command = ClaudeCodeHarness(AgentSpec(**op["agent"])).run_steps("test operator")[0].command
     assert op["timeout_seconds"] == profile["operator"]["timeout_seconds"]
     assert op["evaluator"]["postrun_timeout_seconds"] == 5400

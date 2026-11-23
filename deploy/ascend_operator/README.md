@@ -58,31 +58,14 @@ python3 deploy/ascend_operator/tools/refresh_operator_task_prompts.py --workflow
 
 ## Start Polar
 
-### Prepare AscendC documentation (T2A / T3A)
+### AscendC documentation
 
-Run once when preparing or upgrading the SDK, before starting a new run:
-
-```bash
-python3 deploy/ascend_operator/prepare_asc_devkit_docs.py \
-  --src /home/docker/asc-devkit-9.0.0-a2a3 \
-  --dst /home/docker/asc-devkit-9.0.0-a2a3-readable
-```
-
-This copies the existing A2/A3 SDK and reuses CANNBot's bundled
-`ascendc-docs-search/scripts/clean_markdown.py`, as its plugin initialization does.
-Cleanup runs only on `docs/**/*.md`. Code blocks, inline code, existing Markdown
-table rows and tables containing code/media retain their original text. Tables
-with spans or links keep their HTML structure and targets, removing only redundant
-anchors/attributes/wrappers with upstream helpers. Other HTML tables and redundant
-markup use the upstream cleanup.
-Examples, headers, implementation sources and the A5-only stub list stay unchanged.
-The source is preserved and an existing destination is rejected. Use a new
-destination for SDK upgrades, then update `operator_runtime.asc_devkit_dir`.
-
-Both profiles mount the prepared copy read-only at `/opt/asc-devkit`; sessions do
-not repeat cleanup. Existing runs keep their rendered topology and original
-mount. To revert future runs, set `asc_devkit_dir` back to
-`/home/docker/asc-devkit-9.0.0-a2a3`.
+T2A uses the prepared CANN 9.2.0 documentation at
+`/home/docker/asc-devkit-9.2.0-a2a3-readable`, based on commit
+`02af6bddfd75b48d17cd2ec0d4da5bb3700cde44`.
+The profile mounts this directory read-only at `/opt/asc-devkit` when Polar starts.
+No download or document preparation is needed at startup or per session.
+T3A retains its existing 9.0.0 documentation selection.
 
 ### Launch
 

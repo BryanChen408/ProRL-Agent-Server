@@ -28,20 +28,12 @@ operator_runtime:
   # ← delta 6:算子同名 .json(NPUKernelBench 用例规格,get_input_groups() 要读)随 prepare 上传到 input/。
   #   {op}.py 走 vime task_source 内容寻址,.json 没有该通道 → 从数据集目录直传。triton 侧无此字段=不产生该动作。
   task_assets_dir: /home/docker/datasets/ascendc-rl-datasets/NPUKernelBench_level1-4_20261019/op_tasks
-  # ← delta 11:asc-devkit(上游 init.sh Step 4 会 clone 的算子开发资料仓)。
-  #   $ASC_DEVKIT_DIR 在 21 个 skill 文档里被引用 46 次,是出现最多的环境变量;
-  #   ascendc-docs-search 整个 skill 就是查它。只读挂到 /opt/asc-devkit,不进 workdir 拷贝。
-  #   钉 9.0.0 分支而非 init.sh 默认的 master:实测 API 名对本机 CANN 9.0.0 头文件的命中率
-  #   9.0.0=95% / master=82%,master 独有的 548 个里 53% 本机没有,照着写会引入新的编译错误。
-  #   路径映射:skill 写死 docs/zh/api,9.0.0 布局是 docs/api/context,已在仓内建相对软链。
-  # ← delta 12:先由 clean_asc_devkit.py 生成 A5-only stub 副本(523+523 页换成
-  #   一行「A2/A3 不可用」)。实测两个 run 25% 的文档读取(913 次/4M+字符)
-  #   打在 950-only 页上,学错签名烧 A 类迭代。原件 asc-devkit-9.0.0 保留,回退=改回该路径。
-  # prepare_asc_devkit_docs.py 再离线复用 CANNBot 清理 HTML；代码原文及复杂表格结构保留。
-  # 准备命令见 README.md；原始 A2/A3 副本保留，session 不重复清理。
-  asc_devkit_dir: /home/docker/asc-devkit-9.0.0-a2a3-readable
+  # CANN 9.2.0 v2 配套资料；原版固定于 02af6bddfd75b48d17cd2ec0d4da5bb3700cde44。
+  # 独立副本过滤明确不支持 A2/A3 的页面，并保守清理格式；原版源码、示例保持不变。
+  # 挂载到 /opt/asc-devkit 只读；准备和回退步骤见 README.md。
+  asc_devkit_dir: /home/docker/asc-devkit-9.2.0-a2a3-readable
   budget:
-    generation_max: 40
+    generation_max: 30
     optimization_max: 4
     interval_seconds: 2
   npu_lease:
@@ -104,7 +96,7 @@ operator:
     # ← delta 14:generation 8 次与 optimization 4 次独立计数，每次都可能需要
     #   「读日志→调用对应 Skill→改代码→重跑」；
     #   加 Phase 0-3 探索和长算子实现，保留 200 轮会话上限。
-    max_turns: 5
+    max_turns: 350
     # ← delta 8:规则 —— 只保留本项目(canonical/skills)提供的 skill,CLI 自带的一律关掉
     #   (每个 session 白占 4,327 字符 prompt,还可能被误调白烧 turn)。
     #   prepare 按 canonical/skills 的实际内容取补集,写 .claude/settings.json 的

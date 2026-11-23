@@ -14,7 +14,7 @@ service:
   gateway_url: http://80.48.5.64:8200
   sglang_router_url: http://80.48.5.56:8011
   inference_engine: vllm
-  model_served: /home/docker/Qwen3.6-35B-A3B-agentical-ascendc-hf-4t-bf16
+  model_served: /home/docker/Qwen3.6-35B-A3B-agentical-ascendc-hf-YaRN-525k-15020-bf16
 
 paths:
   output_dir: output/ascend_operator
@@ -23,14 +23,14 @@ paths:
 operator_runtime:
   workflow: legacy
   backend: ascendc
-  task_assets_dir: /home/docker/datasets/ascendc-rl-datasets/NPUKernelBench/op_tasks
+  task_assets_dir: /home/docker/datasets/ascendc-rl-datasets/NPUKernelBench_level1-4_20261019/op_tasks
   # 与 T2A 共用离线清理的文档副本；准备命令见 README.md。
   asc_devkit_dir: /home/docker/asc-devkit-9.0.0-a2a3-readable
   budget:
     enabled: false  # 不按 pipeline/verify 次数终止；解题由 timeout_seconds 限时。
   npu_lease:
     enabled: true
-    pool: [0, 1, 2, 3, 4, 5, 6, 7]
+    pool: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
     lock_dir: /dev/shm/npu-locks
 
 observer:
@@ -53,7 +53,7 @@ operator:
   profile: operator_npu
   timeout_seconds: 18000.0  # 初始化与解题预算；最终收尾/judge 使用独立预算。
   runtime:
-    image: ascendc-tilelang:v1
+    image: ascendc-tilelang:v2
     network: host
     workdir: /opt/workspace/agent_workdir
     env:
@@ -61,7 +61,7 @@ operator:
       ASCENDC_SOC_VERSION: "ascend910b1"
       ASC_DEVKIT_DIR: "/opt/asc-devkit"
       # 262144 总窗口预留 24576 输出 token；必须为正整数字符串。
-      CLAUDE_CODE_MAX_CONTEXT_TOKENS: "237568"
+      CLAUDE_CODE_MAX_CONTEXT_TOKENS: "524288"
 
   agent:
     env:
@@ -73,7 +73,7 @@ operator:
     # ← R2 复刻纪律:不写 skillOverrides(原生依赖全量可见);skills 由 prepare 拷进
     #   workdir/.claude/skills(项目级),harness preset 不再拷用户级(防双份)。
     skills_path: ""
-    max_output_tokens: 24576
+    max_output_tokens: 65536
     inference_timeout_ms: 14400000
     # ← R2 复刻纪律:官方流程需要 Skill(引导式诊断)与 Agent(子代理派发)工具,
     #   TaskCreate 系列做 Phase 追踪;只禁交互类(非交互运行)与网络类(训练确定性)。

@@ -1,0 +1,63 @@
+--- a/util/merge_obj_text.sh
++++ b/util/merge_obj_text.sh
+@@ -24,8 +24,14 @@
+ 
+ for arg in "$@"
+ do
+-    echo -n "${linker} -m aicorelinux -Ttext=0 ${arg} -o ${arg}"
++    # Keep compiler-owned ET_REL objects intact for incremental builds.
++    output="${arg}.merged"
++    temporary="${output}.tmp.$$"
++    trap 'rm -f -- "$temporary"' EXIT
++    echo "${linker} -m aicorelinux -Ttext=0 ${arg} -o ${output}"
+     # template kernel text sections will be named as .text.<mangle> like .text._Z11hello_worldILi300EhEvT0_f
+     # to remain consistent with none template kernels, merge them into .text
+-    ${linker} -m aicorelinux -Ttext=0 ${arg} -o ${arg}
++    "${linker}" -m aicorelinux -Ttext=0 "${arg}" -o "${temporary}"
++    mv -f -- "$temporary" "$output"
++    trap - EXIT
+ done
+--- a/device_preprocess_project/CMakeLists.txt
++++ b/device_preprocess_project/CMakeLists.txt
+@@ -61,6 +61,7 @@
+     )
+ 
+     string(REPLACE "," " " aiv_objs "$<TARGET_OBJECTS:aiv_obj>")
++    set(aiv_objs_merged "$<JOIN:$<TARGET_OBJECTS:aiv_obj>,.merged;>.merged")
+ 
+     add_custom_target(merge_aiv_obj_text ALL
+         COMMAND bash merge_obj_text.sh -l ${CMAKE_LINKER} ${aiv_objs}
+@@ -80,6 +81,7 @@
+     )
+ 
+     string(REPLACE "," " " aic_objs "$<TARGET_OBJECTS:aic_obj>")
++    set(aic_objs_merged "$<JOIN:$<TARGET_OBJECTS:aic_obj>,.merged;>.merged")
+ 
+     add_custom_target(merge_aic_obj_text ALL
+         COMMAND bash merge_obj_text.sh -l ${CMAKE_LINKER} ${aic_objs}
+@@ -90,7 +92,7 @@
+ 
+     add_custom_target(${device_target}_host_cpp ALL
+         COMMAND ${ASCEND_PYTHON_EXECUTABLE} extract_host_stub.py ${preprocess_objs} --dynamic-mode
+-                    -d ${DST_DIR} -hd ${INCLUDE_DIR} --aiv-o ${aiv_objs} --aic-o ${aic_objs}
++                    -d ${DST_DIR} -hd ${INCLUDE_DIR} --aiv-o "${aiv_objs_merged}" --aic-o "${aic_objs_merged}"
+                     --build-mode ${BUILD_MODE} --compile-commands ${CMAKE_BINARY_DIR}/compile_commands.json ${DEFINITION_OPTION}
+                     --run-mode ${RUN_MODE}
+         WORKING_DIRECTORY ${ASCENDC_KERNEL_CMAKE_DIR}/util
+@@ -109,6 +111,7 @@
+     )
+ 
+     string(REPLACE "," " " m200_obj "$<TARGET_OBJECTS:m200_obj>")
++    set(m200_obj_merged "$<JOIN:$<TARGET_OBJECTS:m200_obj>,.merged;>.merged")
+ 
+     add_custom_target(merge_m200_obj_text ALL
+         COMMAND bash merge_obj_text.sh -l ${CMAKE_LINKER} ${m200_obj}
+@@ -119,7 +122,7 @@
+ 
+     add_custom_target(${device_target}_host_cpp ALL
+     COMMAND ${ASCEND_PYTHON_EXECUTABLE} extract_host_stub.py ${preprocess_objs} -d ${DST_DIR}
+-                -hd ${INCLUDE_DIR} --aiv-o ${m200_obj}  --aic-o ${m200_obj} --build-mode ${BUILD_MODE} --compile-commands
++                -hd ${INCLUDE_DIR} --aiv-o "${m200_obj_merged}"  --aic-o "${m200_obj_merged}" --build-mode ${BUILD_MODE} --compile-commands
+                 ${CMAKE_BINARY_DIR}/compile_commands.json ${DEFINITION_OPTION}
+                 --run-mode ${RUN_MODE}
+     WORKING_DIRECTORY ${ASCENDC_KERNEL_CMAKE_DIR}/util

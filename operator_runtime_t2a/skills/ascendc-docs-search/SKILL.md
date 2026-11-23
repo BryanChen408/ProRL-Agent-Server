@@ -90,7 +90,7 @@ grep -rl "关键词" "$ASC_DEVKIT_DIR/docs/zh/api/" --include="*.md"
 
 ## 环境兼容性
 
-T2A 当前 profile 使用 9.0.0 配套 devkit；目标芯片以注入的 `SOC_VERSION` 为准。
+T2A 当前 profile 使用 9.2.0 配套 devkit；目标芯片以注入的 `SOC_VERSION` 为准。
 不要从历史对话或服务器名称猜硬件型号，详见 [环境兼容性表](references/compatibility.md)。
 
 查阅资料时必须确认 API/方法适用于当前环境。
@@ -118,8 +118,8 @@ python3 .claude/skills/ascendc-docs-search/scripts/ascend_search_client.py "Asce
 # 搜索 API 文档
 python3 .claude/skills/ascendc-docs-search/scripts/ascend_search_client.py "AscendC::Add 接口原型" --max_results 8
 
-# 带版本过滤（仅当实际 CANN 为 9.0.0）
-python3 .claude/skills/ascendc-docs-search/scripts/ascend_search_client.py "Ascend C API" --version "9.0.0"
+# 带版本过滤（仅当实际 CANN 为 9.2.0）
+python3 .claude/skills/ascendc-docs-search/scripts/ascend_search_client.py "Ascend C API" --version "9.2.0"
 ```
 
 **获取详细内容**：
@@ -131,7 +131,7 @@ python3 .claude/skills/ascendc-docs-search/scripts/ascend_content_fetcher.py <UR
 - `keyword`：搜索关键词（必需），建议使用中文
 - `--max_results`：返回结果数量（1-10，默认 10）
 - `--lang`：语言设置（zh/en，默认 zh）
-- `--version`：版本过滤字符串（如 "9.0.0"）
+- `--version`：版本过滤字符串（如 "9.2.0"）
 - `--doc_type`：文档类型（DOC/API，默认 DOC）
 
 在线脚本仅在现有环境已具备依赖与网络时作为兜底；失败时返回本地资料检索，不在 rollout 中安装依赖或修改脚本。

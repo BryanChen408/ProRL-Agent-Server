@@ -9,6 +9,9 @@
 # See LICENSE in the root of the software repository for the full text of the License.
 # ----------------------------------------------------------------------------------------------------------
 import argparse
+import hashlib
+import json
+import tempfile
 import logging
 import os
 import re
@@ -242,7 +245,70 @@ def _run(cmd: list[str], cwd: Path, env: dict[str, str]) -> None:
     subprocess.run(cmd, cwd=cwd, env=env, check=True)
 
 
+def _private_cann_sdk(ascend_path: Path, build_dir: Path) -> Path:
+    """Use task-local build rules without changing installed CANN files."""
+    ascend_path = ascend_path.resolve()
+    candidates = ("tools/tikcpp/ascendc_kernel_cmake", "compiler/tikcpp/ascendc_kernel_cmake",
+                  "ascendc_devkit/tikcpp/samples/cmake")
+    relative = next((Path(p) for p in candidates
+                     if (ascend_path / p / "legacy_modules/util/merge_obj_text.sh").is_file()), None)
+    if relative is None:
+        return ascend_path  # Non-legacy builds do not use the destructive merge stage.
+    patch = SCRIPT_DIR / "cann_preprocess.patch"
+    payload = patch.read_bytes()
+    source = ascend_path / relative
+    patched_files = ("util/merge_obj_text.sh", "device_preprocess_project/CMakeLists.txt")
+    identity = {"sdk": str(ascend_path), "patch": hashlib.sha256(payload).hexdigest(),
+                "rules": {p: hashlib.sha256((source / "legacy_modules" / p).read_bytes()).hexdigest()
+                          for p in patched_files}}
+    destination = build_dir / "_polar_cann"
+    manifest = destination / "manifest.json"
+    if destination.exists():
+        if manifest.is_file() and json.loads(manifest.read_text()) == identity:
+            return destination / "sdk"
+        raise RuntimeError("CANN build rules changed; rebuild this task once with --clean")
+
+    def mirror_branch(src, dst, parts):
+        dst.mkdir()
+        for child in src.iterdir():
+            target = dst / child.name
+            if child.name != parts[0]:
+                target.symlink_to(child.resolve(), target_is_directory=child.is_dir())
+            elif len(parts) > 1:
+                mirror_branch(child, target, parts[1:])
+            else:
+                shutil.copytree(child, target, symlinks=True)
+                # Preserve SDK-relative links when relocating the CMake tree.
+                for link in target.rglob("*"):
+                    if link.is_symlink():
+                        original = child / link.relative_to(target)
+                        link.unlink()
+                        link.symlink_to(original.resolve(), target_is_directory=original.is_dir())
+
+    build_dir.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix=".polar-cann-", dir=build_dir) as temporary:
+        stage = Path(temporary) / "view"
+        stage.mkdir()
+        mirror_branch(ascend_path, stage / "sdk", relative.parts)
+        rules = stage / "sdk" / relative / "legacy_modules"
+        for name in patched_files:
+            if not (rules / name).resolve().is_relative_to(stage.resolve()):
+                raise RuntimeError(f"Private CANN rule escapes build directory: {name}")
+        command = ["patch", "--batch", "--fuzz=0", "-p1"]
+        already_fixed = subprocess.run(command + ["--force", "--reverse", "--dry-run"],
+                                       input=payload, cwd=rules, capture_output=True).returncode == 0
+        if not already_fixed:
+            subprocess.run(command + ["--forward", "--dry-run"], input=payload, cwd=rules,
+                           capture_output=True, check=True)
+            subprocess.run(command + ["--forward"], input=payload, cwd=rules,
+                           capture_output=True, check=True)
+        (stage / "manifest.json").write_text(json.dumps(identity, sort_keys=True))
+        stage.rename(destination)
+    return destination / "sdk"
+
+
 def _make_cmake_args(source_dir, build_dir, soc_version, ascend_path, build_type):
+    ascend_path = _private_cann_sdk(ascend_path, build_dir)
     return [
         "cmake", "-S", str(source_dir), "-B", str(build_dir),
         f"-DSOC_VERSION={soc_version}",

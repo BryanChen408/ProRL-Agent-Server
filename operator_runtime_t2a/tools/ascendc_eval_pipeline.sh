@@ -775,6 +775,9 @@ digest = lambda p: hashlib.sha256(p.read_bytes()).hexdigest()
 files = {str(p.relative_to(task)): digest(p) for p in task.rglob('*') if p.is_file()}
 context = {k: os.environ.get(k, '') for k in ('SOC_VERSION', 'BUILD_TYPE', 'ASCEND_HOME_PATH', 'ASCEND_INSTALL_PATH', 'CC', 'CXX', 'CFLAGS', 'CXXFLAGS', 'LDFLAGS')}
 context['builder'] = digest(builder)
+patch = builder.with_name('cann_preprocess.patch')
+if patch.is_file():
+    context['cann_preprocess_patch'] = digest(patch)
 manifest = {'op': task.name, 'files': files, 'context': context}
 try:
     old = json.loads((previous / '.incremental.json').read_text())

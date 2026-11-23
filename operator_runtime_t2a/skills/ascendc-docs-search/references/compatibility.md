@@ -1,6 +1,6 @@
 # 环境兼容性
 
-T2A 当前 profile 提供 9.0.0 配套 asc-devkit，只读挂载在 `$ASC_DEVKIT_DIR`。
+T2A 当前 profile 提供 9.2.0 配套 asc-devkit，只读挂载在 `$ASC_DEVKIT_DIR`。
 目标芯片以会话注入的 `SOC_VERSION` / `ASCENDC_SOC_VERSION` 为准；工具链位置以
 `ASCEND_HOME_PATH` 为准。不使用旧资料中写死的 CANN 8.5.0、A3 或核数来覆盖环境变量。
 
