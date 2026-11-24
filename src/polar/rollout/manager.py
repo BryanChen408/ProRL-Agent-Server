@@ -350,9 +350,33 @@ class RolloutManager:
         except asyncio.CancelledError:
             with self._lock:
                 record = self._tasks.get(request.task_id)
+                sessions = list(record.sessions.values()) if record is not None else []
                 if record is not None:
                     record.status = "cancelled"
                     record.updated_at = time.time()
+            result_paths = []
+            for session in sessions:
+                if session.gateway_url is None:
+                    await self.pipeline._cleanup_session(
+                        session,
+                        reason=session.cancel_reason or "task_cancelled",
+                        strict=True,
+                    )
+                    await self.pipeline._record_cancel_before_enqueue(session)
+                result = session.rollout_result
+                if result is None:
+                    continue
+                result_path = self.pipeline.result_path_for(
+                    result.task_id, result.session_id, result.metadata
+                )
+                if result_path is not None:
+                    result_paths.append(result_path)
+            with self._lock:
+                record = self._tasks.get(request.task_id)
+                if record is not None:
+                    for result_path in result_paths:
+                        if result_path not in record.result_paths:
+                            record.result_paths.append(result_path)
             self._emit(
                 "task.completed",
                 {"task_id": request.task_id, "status": "cancelled"},
@@ -463,6 +487,7 @@ class RolloutManager:
             task.cancel()
 
         fence_pending = False
+        unwinding = False
         if reason == "policy_cutoff" and cancelled:
             with self._lock:
                 self._policy_cutoff_tasks.update(tasks_to_cancel)
@@ -490,6 +515,7 @@ class RolloutManager:
                 for tid in group_tasks:
                     background = self._tasks[tid].background_task
                     if background is not None and not background.done():
+                        unwinding = True
                         cancel_errors[tid] = "task cancellation is still unwinding"
         elif tasks_to_cancel:
             await asyncio.gather(*tasks_to_cancel, return_exceptions=True)
@@ -512,6 +538,7 @@ class RolloutManager:
             all_acknowledged = all_acknowledged and all_fenced
 
         return {
+            "cancel_accepted": reason == "group_unacceptable" and not missing and not unwinding,
             "cleanup_confirmed": reason == "group_unacceptable" and all_acknowledged and all_fenced,
             "requested": len(requested),
             "cancelled": len(cancelled),

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from pathlib import Path
 
 import pytest
@@ -27,6 +28,12 @@ class _BlockingPipeline:
         await asyncio.Event().wait()
 
     def result_path_for(self, *args, **kwargs):
+        return None
+
+    async def _cleanup_session(self, *args, **kwargs):
+        return None
+
+    async def _record_cancel_before_enqueue(self, *args, **kwargs):
         return None
 
 
@@ -459,6 +466,71 @@ def test_policy_cutoff_tombstone_prevents_late_dispatch_enqueue(tmp_path: Path, 
                 await dispatcher.enqueue(managed)
         finally:
             await dispatcher.stop()
+
+    asyncio.run(scenario())
+
+
+def test_group_cancel_before_enqueue_persists_lightweight_result(
+    tmp_path: Path,
+) -> None:
+    async def scenario() -> None:
+        pipeline = Pipeline(
+            callback_url="http://127.0.0.1:8080/callbacks/session_result",
+            save_dir=str(tmp_path),
+            scheduler=NodeScheduler(),
+        )
+        manager = RolloutManager(pipeline=pipeline, scheduler=NodeScheduler())
+        request = _task_request().model_copy(
+            update={
+                "num_samples": 1,
+                "metadata": {
+                    "run_id": "train-a",
+                    "group_id": "group-7",
+                    "policy_version": 3,
+                    "rollout_step": 11,
+                },
+            }
+        )
+        await manager.submit_task(request)
+        while not manager._tasks[request.task_id].sessions:
+            await asyncio.sleep(0)
+
+        cancelled = await manager.cancel_tasks(
+            [request.task_id], reason="group_unacceptable"
+        )
+
+        assert cancelled["cleanup_confirmed"] is True
+        task = manager.get_task(request.task_id)
+        assert task is not None
+        assert task.status == "cancelled"
+        assert task.results == []
+        assert len(task.result_paths) == 1
+        path = Path(task.result_paths[0])
+        payload = json.loads(path.read_text())
+        assert payload["status"] == "ERROR"
+        assert payload["error"] == "session cancelled"
+        assert payload["trajectory"]["traces"] == []
+        assert payload["metadata"]["group_id"] == "group-7"
+        assert payload["metadata"]["policy_version"] == 3
+        assert payload["metadata"]["rollout_step"] == 11
+        for metadata in (payload["metadata"], payload["trajectory"]["metadata"]):
+            assert metadata["termination_reason"] == "group_unacceptable"
+            assert metadata["cancelled_before_enqueue"] is True
+            assert metadata["cancelled_at"] > 0
+            assert metadata["group_cleanup_acknowledged"] is True
+            assert metadata["group_cleanup_error"] is None
+
+        original = path.read_bytes()
+        session = next(
+            iter(manager._tasks[request.task_id].sessions.values())
+        )
+        session.rollout_result.error = "must not replace the original record"
+        pipeline._persist_cancel_result(session.rollout_result)
+        await manager.cancel_tasks([request.task_id], reason="group_unacceptable")
+        assert path.read_bytes() == original
+        assert manager.get_task(request.task_id).result_paths == task.result_paths
+        assert list(path.parent.glob(f".{path.name}.*")) == []
+        await pipeline.close()
 
     asyncio.run(scenario())
 

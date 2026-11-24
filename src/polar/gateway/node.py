@@ -117,6 +117,7 @@ class GatewayNodeManager:
         self._control_client: httpx.AsyncClient | None = None
         self._heartbeat_task: asyncio.Task[None] | None = None
         self._policy_cleanup_tasks: set[asyncio.Task[None]] = set()
+        self._completed_runtime_cleanups: set[str] = set()
         self._session_affinity_release_url = (
             session_affinity_release_url.rstrip("/")
             if session_affinity_release_url
@@ -234,11 +235,14 @@ class GatewayNodeManager:
                     artifacts_dir=artifacts_dir,
                 )
             )
-        except Exception:
+        except Exception as exc:
             self.storage.delete_session(session_id)
             self.session_registry.remove(session_id)
             if session_dir is not None:
                 await self._remove_session_dir_best_effort(session_dir, session_id)
+            if isinstance(exc, ValueError) and "cancelled before enqueue" in str(exc):
+                # Dispatch never created a runtime, so the cancelled enqueue is fully retired.
+                self._completed_runtime_cleanups.add(session_id)
             raise
 
     async def cancel(self, session_id: str, *, reason: str | None = None) -> bool:
@@ -874,6 +878,7 @@ class GatewayNodeManager:
                 await asyncio.gather(*stop_tasks, return_exceptions=True)
             if managed.cancel_reason == "group_unacceptable" and managed.discard_cleanup_task is not None:
                 await asyncio.shield(managed.discard_cleanup_task)
+                self._completed_runtime_cleanups.add(request.session_id)
             managed.timer.mark("teardown", "finished")
             managed.timer.mark("return", "finished")
 

@@ -61,6 +61,8 @@ def test_coordinator_waits_for_cancelled_task_to_finish_unwinding(first_reason):
                 try:await asyncio.Event().wait()
                 finally:await finish.wait()
             def result_path_for(self,*a,**kw):return None
+            async def _cleanup_session(self,*a,**kw):return None
+            async def _record_cancel_before_enqueue(self,*a,**kw):return None
         manager=RolloutManager(pipeline=FakePipeline(),scheduler=NodeScheduler())
         await manager.submit_task(TaskRequest(task_id='task-pending',instruction='test',num_samples=1,runtime=RuntimeSpec(image='none'),agent=AgentSpec(harness='codex')))
         await started.wait()
@@ -68,7 +70,45 @@ def test_coordinator_waits_for_cancelled_task_to_finish_unwinding(first_reason):
             await manager.cancel_tasks(['task-pending'], reason=first_reason)
         first=await manager.cancel_tasks(['task-pending'],reason='group_unacceptable')
         assert not first['cleanup_confirmed']
+        assert not first['cancel_accepted']
         finish.set();await asyncio.sleep(.01)
         second=await manager.cancel_tasks(['task-pending'],reason='group_unacceptable')
         assert second['cleanup_confirmed']
+        assert second['cancel_accepted']
+    asyncio.run(run())
+
+
+def test_cancel_before_enqueue_creates_cleanup_receipt(tmp_path):
+    from test_discard_judge import setup
+    async def run():
+        node, managed = setup(tmp_path)
+        node.session_registry = SessionRegistry()
+        node.storage = SessionStore()
+        node._session_base_dir = tmp_path
+        node._completed_runtime_cleanups = set()
+        await node._dispatcher.start()
+        node._dispatcher._sessions.pop(managed.session_id, None)
+        await node._dispatcher.cancel(managed.session_id, reason='group_unacceptable')
+        with pytest.raises(ValueError, match='cancelled before enqueue'):
+            await node.dispatch(managed.request)
+        await node._dispatcher.stop()
+        assert managed.session_id in node._completed_runtime_cleanups
+    asyncio.run(run())
+
+
+def test_group_postrun_creates_cleanup_receipt(tmp_path):
+    from test_discard_judge import setup
+    async def run():
+        node, managed = setup(tmp_path)
+        node.session_registry = SessionRegistry()
+        node.storage = SessionStore()
+        node.inflight = NS(close_session=AsyncMock())
+        node.node_id = 'test-node'
+        node._session_affinity_release_url = None
+        node._completed_runtime_cleanups = set()
+        managed.cancel_requested = True
+        managed.cancel_reason = 'group_unacceptable'
+        managed.discard_cleanup_task = asyncio.create_task(asyncio.sleep(0))
+        await node._handle_postrun(managed)
+        assert managed.session_id in node._completed_runtime_cleanups
     asyncio.run(run())

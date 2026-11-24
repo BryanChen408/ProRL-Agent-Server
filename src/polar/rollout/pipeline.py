@@ -6,6 +6,8 @@ import asyncio
 import inspect
 import json
 import logging
+import os
+import tempfile
 import time
 from collections.abc import Awaitable, Callable
 from pathlib import Path
@@ -199,6 +201,8 @@ class Pipeline:
                     strict=True,
                 )
             )
+            if session.gateway_url is None:
+                await asyncio.shield(self._record_cancel_before_enqueue(session))
             raise
         except TimeoutError as exc:
             logger.warning("Session %s timed out in rollout pipeline", session.session_id)
@@ -532,6 +536,47 @@ class Pipeline:
         path.write_text(
             json.dumps(self._storage_payload(result), separators=(",", ":"), default=str)
         )
+
+    async def _record_cancel_before_enqueue(self, session: SessionContext) -> None:
+        if session.gateway_url is not None or session.rollout_result is not None:
+            return
+        # No gateway was assigned, so dispatch provably never enqueued this session.
+        result = self._failure_result(session, error="session cancelled")
+        cancel_metadata = {
+            "termination_reason": session.cancel_reason or "task_cancelled",
+            "cancelled_before_enqueue": True,
+            "cancelled_at": time.time(),
+            "group_cleanup_acknowledged": session.group_cleanup_acknowledged,
+            "group_cleanup_error": session.group_cleanup_error,
+        }
+        result.metadata.update(cancel_metadata)
+        result.trajectory.metadata.update(cancel_metadata)
+        await asyncio.to_thread(self._persist_cancel_result, result)
+        session.rollout_result = result
+
+    def _persist_cancel_result(self, result: SessionResult) -> None:
+        """Atomically create a lightweight cancel record without replacing real results."""
+        path = self._result_path(result.task_id, result.session_id, result.metadata)
+        if path is None or path.exists():
+            return
+        path.parent.mkdir(parents=True, exist_ok=True)
+        payload = json.dumps(
+            self._storage_payload(result), separators=(",", ":"), default=str
+        ).encode()
+        temp_path: Path | None = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                dir=path.parent, prefix=f".{path.name}.", delete=False
+            ) as temp:
+                temp.write(payload)
+                temp_path = Path(temp.name)
+            try:
+                os.link(temp_path, path)
+            except FileExistsError:
+                pass
+        finally:
+            if temp_path is not None:
+                temp_path.unlink(missing_ok=True)
 
     def _result_path(
         self,
